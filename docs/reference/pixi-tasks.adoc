@@ -37,8 +37,9 @@ Without that, `rclrs`' build script — which declares no `cargo:rerun-if-env-ch
 
 Add a distribution by adding a feature and an environment to `pixi.toml`, then keep `[environments]`, the CI matrix and `recipes/variants.yaml` in step.
 
-`pixi.toml` declares five platforms — `linux-64`, `linux-aarch64`, `osx-64`, `osx-arm64` and `win-64` — which are the release matrix's targets, so a release runner can install from `pixi.lock` rather than re-solving.
+`pixi.toml` declares five platforms — `linux-64`, `linux-aarch64`, `osx-64`, `osx-arm64` and `win-64` — so a release runner can install from `pixi.lock` rather than re-solving.
 RoboStack publishes every ROS package needed for both distributions on all five, `test-msgs` included.
+`win-64` is locked but not released: the environment installs there, the cdylib does not link.
 Ten environment/platform pairs is why the lock file is a couple of megabytes; only the current platform is ever materialised.
 
 == Tasks
@@ -224,7 +225,7 @@ pixi run release --push         # ...and push, which starts publishing
 ----
 
 Does not publish.
-Pushing a tag matching `[0-9]*` is what triggers `.github/workflows/release.yml`, which builds on five platforms and publishes the crate, the npm package and the wheels.
+Pushing a tag matching `[0-9]*` is what triggers `.github/workflows/release.yml`, which builds on four platforms and publishes the crate, the npm package and the wheels.
 This task establishes that the commit deserves that, and creates the tag.
 
 The push is a separate flag because it is the irreversible step: crates.io and PyPI allow a published version to be yanked but never replaced.

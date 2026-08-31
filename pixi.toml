@@ -10,10 +10,15 @@ channels = [
     "conda-forge",
 ]
 name = "mq-bridge-ros2"
-# The release matrix's five targets, so `release.yml` can install from this
-# lock instead of re-solving on each runner. RoboStack publishes every ROS
-# package this needs — including `test-msgs`, which is test-only and the most
-# likely to be missing — for both distributions on all five.
+# The release matrix's targets, so `release.yml` can install from this lock
+# instead of re-solving on each runner. RoboStack publishes every ROS package
+# this needs — including `test-msgs`, which is test-only and the most likely to
+# be missing — for both distributions on all five.
+#
+# `win-64` is kept even though Windows is not currently released. The
+# environment resolves and installs there perfectly well; what fails is linking
+# the cdylib. Keeping it locked means restoring the Windows build is a matrix
+# entry rather than a re-solve, and lets the link be investigated locally.
 platforms = [
     "linux-64",
     "linux-aarch64",

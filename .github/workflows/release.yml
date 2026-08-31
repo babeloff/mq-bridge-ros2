@@ -78,8 +78,18 @@ jobs:
             platform: darwin-x64
           - runner: macos-latest
             platform: darwin-arm64
-          - runner: windows-latest
-            platform: win32-x64-msvc
+          # win32-x64-msvc is deliberately absent. The pixi environment installs
+          # cleanly on Windows -- that step succeeded -- but linking the cdylib
+          # fails with 21 unresolved __imp_* symbols, all from test_msgs, the
+          # package rclrs vendors and links unconditionally. MSVC wants a DLL
+          # import library for them.
+          #
+          # Restoring it is re-adding the two lines below. Before doing so, see
+          # "Windows is not built" in docs/how-to/package-the-plugin.adoc, which
+          # records what to check first.
+          #
+          #   - runner: windows-latest
+          #     platform: win32-x64-msvc
     steps:
       - uses: actions/checkout@v7
         with:

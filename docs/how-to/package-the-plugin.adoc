@@ -135,7 +135,7 @@ CI runs the check, and `pixi run check` includes it.
 
 == Release from CI
 
-Pushing a numeric tag runs `.github/workflows/release.yml`, which builds for all five targets and publishes the crate, the npm package and the wheels.
+Pushing a numeric tag runs `.github/workflows/release.yml`, which builds for four targets — `linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64` and `darwin-arm64` — and publishes the crate, the npm package and the wheels.
 
 `pixi run release` is the front door: it checks the tree, the branch, the tag, CI, `check` and the test suites in every environment before creating the tag, and pushes only when asked.
 See xref:../reference/pixi-tasks.adoc[Pixi tasks].
@@ -155,6 +155,63 @@ They honour neither `CARGO_TARGET_DIR` nor a `build.target-dir` set in a cargo c
 `pixi run package --wheel` pins the variable to what the packager expects, and the release job sets it too.
 Building by hand outside those paths needs the same.
 ====
+
+== Windows is not built
+
+`win32-x64-msvc` is absent from the release matrix.
+
+The pixi environment installs on Windows without complaint — that step succeeded
+on a real runner — and so does the pip install of the packaging tools.
+What fails is linking the `cdylib`:
+
+[source,text]
+----
+error LNK2019: unresolved external symbol
+  __imp_test_msgs__msg__ComplexNestedKey__Sequence__fini
+...
+mq_bridge_ros2.dll : fatal error LNK1120: 21 unresolved externals
+----
+
+Every missing symbol comes from `test_msgs`, the package `rclrs` vendors and
+links unconditionally whether or not a route uses it — the same dependency that
+has to be installed everywhere else for the crate to link at all.
+The `__imp_` prefix means MSVC is looking for a DLL *import library* for those
+symbols.
+
+=== What this costs
+
+No Windows binary is published, so:
+
+* the npm package carries no `win32-x64-msvc` prebuild, and `register()` on
+  Windows raises the loader's "no prebuild for this platform" error;
+* no Windows wheel is published, so `pip install mq-bridge-ros2` there finds
+  nothing to install.
+
+Nothing else is affected. Linux and macOS are unchanged, and the conda packages
+are built separately from this matrix.
+
+=== Restoring it
+
+`win-64` is still a declared platform in `pixi.toml`, and `pixi.lock` still
+covers it, so the environment side needs no work — restoring the build is
+re-adding the commented matrix entry in `release.yml`.
+
+Before doing that, establish which of two causes it is. Both are cheap to check
+by adding a step to the Windows job:
+
+Missing import libraries::
+Look for `test_msgs__rosidl_generator_c.lib` and its siblings under the
+environment's `Library/lib`. If they are not shipped, RoboStack's Windows
+packages cannot satisfy the link and the fix has to come from upstream.
+
+The linker cannot see them::
+If the `.lib` files are present, print `LIB` in the job. `rclrs`' build script
+emits link directives but relies on the environment to put the library directory
+on the linker's search path, and that is exactly the kind of thing that differs
+between an activated conda shell and pixi's own activation.
+
+Only the second is fixable here — by exporting `LIB` in the job, or by passing
+the directory through `RUSTFLAGS`.
 
 == The licence has to reach four places
 

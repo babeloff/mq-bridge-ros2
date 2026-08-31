@@ -183,6 +183,9 @@ mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
 Currently built and tested: `humble` and `jazzy`.
 The endpoint's source is distribution-agnostic, so adding one is a packaging change rather than a port.
 
+Released platforms are `linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64` and `darwin-arm64`.
+Windows is buildable in principle — the crate produces `mq_bridge_ros2.dll` — but is not released, because linking it against RoboStack's Windows packages fails; see xref:../how-to/package-the-plugin.adoc[Package the plugin for distribution].
+
 A Python wheel's platform tag cannot express the distribution, which is a genuine gap: a mismatched wheel installs cleanly and fails at load time.
 
 == Runtime requirements
