@@ -162,6 +162,15 @@ def main(argv: list[str]) -> int:
         # The builder is mq-bridge's, not this project's: it compiles the
         # cdylib, stages it next to mq-bridge-plugin.json inside the importable
         # package and applies the platform tag.
+        #
+        # It looks for the library at `<root>/target/release/` literally, so it
+        # honours neither `CARGO_TARGET_DIR` nor a `build.target-dir` set in a
+        # cargo configuration file. On a machine that points target-dir at a
+        # shared cache — a common setting — cargo succeeds and the packager then
+        # reports "cargo produced no shared plugin library". Pinning the
+        # variable to what it expects is the whole fix.
+        wheel_env = dict(env)
+        wheel_env["CARGO_TARGET_DIR"] = str(ROOT / "target")
         run(
             [
                 "python",
@@ -172,7 +181,7 @@ def main(argv: list[str]) -> int:
                 "--out",
                 str(BUILD_DIR / "wheel"),
             ],
-            env=env,
+            env=wheel_env,
         )
         print("\npython wheel(s):")
         for wheel in sorted(Path(BUILD_DIR / "wheel").glob("*.whl")):

@@ -135,10 +135,23 @@ CI runs the check, and `pixi run check` includes it.
 
 == Release from CI
 
-Pushing a numeric tag runs `.github/workflows/release.yml`, which builds for all five targets, installs ROS 2 from RoboStack on each runner, and publishes the crate, the npm package and the wheels.
+Pushing a numeric tag runs `.github/workflows/release.yml`, which builds for all five targets and publishes the crate, the npm package and the wheels.
 
-The distribution it targets is the workflow-level `ROS_DISTRO_TARGET`.
-Releasing for a second distribution means running the workflow again with a different value — deliberately not a matrix axis, because the wheel filenames would collide.
+ROS, the Rust toolchain and python all come from the locked pixi environment, installed with `locked: true` rather than re-solved on each runner.
+That is what keeps a release off the failure mode that broke CI: a fresh solve validates each download against the size recorded in the channel's repodata, and that metadata is not always right, whereas the lock records a sha256.
+It also means one interpreter does everything, which is why `pip` is a pixi dependency — the packaging tools are pip-installed into that environment.
+
+The distribution it targets is the workflow-level `ROS_DISTRO_TARGET`, paired with `PIXI_ENVIRONMENT`, the environment that provides it.
+Releasing for a second distribution means running the workflow again with different values — deliberately not a matrix axis, because the wheel filenames would collide.
+
+[NOTE]
+====
+mq-bridge's packaging tools look for the compiled library at `<root>/target/release/` literally.
+They honour neither `CARGO_TARGET_DIR` nor a `build.target-dir` set in a cargo configuration file, so on a machine that points target-dir at a shared cache — a common setting — cargo succeeds and the packager then reports `cargo produced no shared plugin library`.
+
+`pixi run package --wheel` pins the variable to what the packager expects, and the release job sets it too.
+Building by hand outside those paths needs the same.
+====
 
 == The licence has to reach four places
 

@@ -14,6 +14,9 @@ env:
   # this workflow again with a different value here, not adding a matrix axis:
   # a Python wheel's platform tag has no room to say which ROS it was built for.
   ROS_DISTRO_TARGET: jazzy
+  # The pixi environment that provides that distribution. Keep in step with
+  # `[environments]` in pixi.toml: jazzy is `default`, humble is `humble`.
+  PIXI_ENVIRONMENT: default
 
 jobs:
   verify-version:
@@ -55,6 +58,14 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+    env:
+      # mq-bridge's packaging tools look for the compiled library at
+      # `<root>/target/release/` literally, honouring neither `CARGO_TARGET_DIR`
+      # nor a `build.target-dir` from a cargo configuration file. A runner has
+      # no such configuration today, so this is belt and braces — but if one
+      # ever gained it, cargo would succeed and the staging step would report
+      # "cargo produced no shared plugin library".
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     strategy:
       fail-fast: false
       matrix:
@@ -74,51 +85,41 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
 
-      - uses: actions/setup-python@v7
+      # ROS, the Rust toolchain and python all come from the locked pixi
+      # environment. Installing from pixi.lock rather than re-solving here is
+      # what keeps a release off the failure that broke CI: a fresh solve
+      # validates each download against the size in the channel's repodata, and
+      # that metadata is not always right, whereas the lock records a sha256.
+      #
+      # `activate-environment` exports the environment into the job, so the
+      # steps below run with ROS on the loader path and need no `pixi run`
+      # prefix and no login shell.
+      - name: Install ROS 2 ${{ env.ROS_DISTRO_TARGET }} from pixi.lock
+        uses: prefix-dev/setup-pixi@v0.10.2
         with:
-          python-version: "3.11"
-
-      # `rclrs` links `rcl`, so every artifact is built against a ROS
-      # installation. RoboStack ships ROS 2 as conda packages for all five
-      # targets here, which is the only uniform way to get one onto a runner.
-      # `test_msgs` and `example_interfaces` are required, not optional: `rclrs`
-      # vendors their generated code and links those libraries unconditionally.
-      - name: Install ROS 2 ${{ env.ROS_DISTRO_TARGET }}
-        uses: mamba-org/setup-micromamba@v2
-        with:
-          environment-name: ros2
-          create-args: >-
-            python=3.11
-            ros-${{ env.ROS_DISTRO_TARGET }}-ros-base
-            ros-${{ env.ROS_DISTRO_TARGET }}-test-msgs
-            ros-${{ env.ROS_DISTRO_TARGET }}-example-interfaces
-            ros-${{ env.ROS_DISTRO_TARGET }}-std-msgs
-          condarc: |
-            channels:
-              - https://prefix.dev/robostack-${{ env.ROS_DISTRO_TARGET }}
-              - conda-forge
+          environments: ${{ env.PIXI_ENVIRONMENT }}
+          locked: true
+          cache: true
+          activate-environment: true
 
       - name: Install official mq-bridge 0.4.5 packagers
-        shell: bash -el {0}
+        shell: bash
         working-directory: node
         run: |
           npm install --no-package-lock
           python -m pip install "mq-bridge-py[plugin-packaging]==0.4.5"
 
       - name: Stage npm native library
-        shell: bash -el {0}
+        shell: bash
         working-directory: node
         run: npx mq-bridge-package-plugin --root .. --package node
 
       - name: Build Python wheel
-        shell: bash -el {0}
+        shell: bash
         run: python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 --out python/dist
 
       - name: Retag macOS wheel
@@ -210,27 +211,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
-
       # `cargo package` builds to verify the archive, and that build needs ROS.
-      - name: Install ROS 2 ${{ env.ROS_DISTRO_TARGET }}
-        uses: mamba-org/setup-micromamba@v2
+      # Both it and the Rust toolchain come from the locked pixi environment.
+      - name: Install ROS 2 ${{ env.ROS_DISTRO_TARGET }} from pixi.lock
+        uses: prefix-dev/setup-pixi@v0.10.2
         with:
-          environment-name: ros2
-          create-args: >-
-            python=3.11
-            ros-${{ env.ROS_DISTRO_TARGET }}-ros-base
-            ros-${{ env.ROS_DISTRO_TARGET }}-test-msgs
-            ros-${{ env.ROS_DISTRO_TARGET }}-example-interfaces
-            ros-${{ env.ROS_DISTRO_TARGET }}-std-msgs
-          condarc: |
-            channels:
-              - https://prefix.dev/robostack-${{ env.ROS_DISTRO_TARGET }}
-              - conda-forge
+          environments: ${{ env.PIXI_ENVIRONMENT }}
+          locked: true
+          cache: true
+          activate-environment: true
 
       - name: Verify crate package
-        shell: bash -el {0}
+        shell: bash
         run: cargo package
 
       - name: Authenticate to crates.io
@@ -238,7 +230,7 @@ jobs:
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
 
       - name: Publish crate
-        shell: bash -el {0}
+        shell: bash
         run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

@@ -100,6 +100,13 @@ asciidoctor = ">=2.0.20,<3"
 # used, which has been stable across the whole 6.x line.
 pyyaml = ">=6.0,<7"
 
+# For the release workflow, which pip-installs mq-bridge's own packaging tools
+# (`mq-bridge-py[plugin-packaging]`, auditwheel, wheel) into this environment.
+# The conda `python` package does not bring pip along, and without it the
+# release would need a second interpreter beside this one — which is how the
+# 3.11-versus-3.12 mismatch arose that this removes.
+pip = ">=24"
+
 # ── One environment per ROS distribution ─────────────────────────────────────
 #
 # `rclrs` selects its `rcl` bindings at compile time, so a build serves one
