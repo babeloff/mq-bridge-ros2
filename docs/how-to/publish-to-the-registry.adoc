@@ -62,16 +62,17 @@ pixi run publish --dry-run
 [source,text]
 ----
 package:  mq-bridge-ros2 0.1.0
-registry: https://program-forge.invalid
-channel:  s3://program-forge/conda
+registry: http://127.0.0.1:19000
+          from [s3-options.program-forge] in config.toml
+channel:  s3://program-forge
 publishing 2 package(s):
   build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
   build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
 
 dry run, nothing contacted. The commands would be:
 
-  rattler-build upload s3 --channel s3://program-forge/conda ...
-  rattler-index s3 s3://program-forge/conda ...
+  rattler-build upload s3 --channel s3://program-forge ...
+  rattler-index s3 s3://program-forge ...
 ----
 
 Nothing is contacted, so this is safe to run against a registry you are not sure about.
@@ -87,12 +88,12 @@ The channel then holds, per platform subdirectory, the packages and a regenerate
 
 [source,text]
 ----
-conda/linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
-conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
-conda/linux-64/repodata.json
-conda/linux-64/repodata.json.zst
-conda/linux-64/repodata_shards.msgpack.zst
-conda/noarch/repodata.json
+linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
+linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+linux-64/repodata.json
+linux-64/repodata.json.zst
+linux-64/repodata_shards.msgpack.zst
+noarch/repodata.json
 ----
 
 == Why publishing is two steps
@@ -117,7 +118,7 @@ The upload refuses to overwrite:
 
 [source,text]
 ----
-Error: × Package s3://program-forge/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+Error: × Package s3://program-forge/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
   │ already exists. Use --force to overwrite.
 ----
 
@@ -137,13 +138,13 @@ pixi run publish --force
 
 == Consume the channel
 
-Add it to a pixi manifest ahead of the RoboStack channel the package's dependencies come from:
+A consumer names the registry's *canonical identity*, never the `s3://` URL this task writes to:
 
 [source,toml]
 ----
 [workspace]
 channels = [
-    "s3://program-forge/conda",
+    "https://program-forge.invalid",
     "https://prefix.dev/robostack-jazzy",
     "conda-forge",
 ]
@@ -159,7 +160,39 @@ Because the ROS distribution is in the build string, ask for the one you want ex
 mq-bridge-ros2 = { version = "*", build = "ros2_jazzy_*" }
 ----
 
-The consuming environment needs S3 credentials for the channel in the same way this task does.
+=== Why the channel is a name and not a location
+
+`https://program-forge.invalid` can never resolve — `.invalid` is reserved by RFC 2606 — and that is deliberate.
+It is an identity, and pixi's global configuration gives it a location:
+
+[source,toml]
+----
+[mirrors]
+"https://program-forge.invalid" = [
+    "http://127.0.0.1:19000/program-forge",
+    "https://nexus-dains-vu.isis.vanderbilt.edu/dains-conda",
+]
+----
+
+Three consequences matter here.
+
+A reader needs no S3 credentials::
+The mirror is a plain HTTP URL, so pixi fetches the packages and `repodata.json` over HTTP.
+Only *writing* needs the S3 API, which is why this task is the only thing that requires credentials.
+
+A manifest survives the registry moving::
+Nothing outside that `[mirrors]` block knows where the bytes live, so a project's channel list does not change when the registry does.
+
+Naming the `s3://` URL directly would bypass all of it::
+It would require every consumer to hold S3 credentials, and pin them to one location.
+
+`publish.py` reads the endpoint out of that same configuration rather than repeating it, so the location has one spelling.
+Verify the whole path end to end with the canonical name:
+
+[source,console]
+----
+pixi search -c https://program-forge.invalid mq-bridge-ros2 --platform linux-64
+----
 
 == Point it at another registry
 
@@ -171,11 +204,11 @@ Every part of the target is overridable, by flag or by environment variable:
 
 | `--channel`
 | `S3_CHANNEL`
-| `s3://program-forge/conda`
+| `s3://<bucket>`, from pixi's `[s3-options]` or `[mirrors]`
 
 | `--endpoint-url`
 | `S3_ENDPOINT_URL`
-| `https://program-forge.invalid`
+| from pixi's `[s3-options]`, falling back to `[mirrors]`
 
 | `--region`
 | `S3_REGION`
@@ -186,7 +219,35 @@ Every part of the target is overridable, by flag or by environment variable:
 | `path`
 |===
 
-Two of those defaults are worth understanding.
+The first two are derived, not hardcoded.
+`publish.py` reads them out of pixi's global configuration, preferring `[s3-options.<bucket>]`:
+
+[source,toml]
+----
+[s3-options.program-forge]
+endpoint-url = "http://127.0.0.1:19000"
+region = "us-east-1"
+force-path-style = true
+----
+
+That block states the S3 endpoint for a bucket outright, which is exactly the question a publish asks.
+`[mirrors]` is the fallback, and only a fallback: it answers a *read* question, its entries are ordered by read preference, and its first entry could legitimately become a read-only remote while the local registry is down.
+Deriving a write target from it is an inference; `[s3-options]` is a statement.
+When both are present the two are cross-checked — the bucket the mirror addresses is the one looked up in `[s3-options]` — so they cannot drift apart unnoticed.
+
+The task reports which source it used, so this is never guesswork.
+Change either and publishing follows, with no second copy of the URL to update.
+If neither is found the task stops and says so, rather than trying to write to a name that cannot resolve.
+
+[NOTE]
+====
+Neither publishing tool reads that configuration itself.
+`rattler-build upload s3` lists `--endpoint-url` and `--region` as required arguments and rejects the command without them even when handed `--config-file` containing exactly those values, and `rattler-index s3` has no `--config-file` at all.
+Both honour the `S3_ENDPOINT_URL` and `S3_REGION` environment variables, which is how "required" is satisfiable without flags.
+So `publish.py` reads the configuration and passes the values on.
+====
+
+The other two are about MinIO specifically.
 
 `--addressing-style path`::
 MinIO is addressed path-style — `endpoint/bucket/key`.
@@ -195,18 +256,12 @@ Virtual-host style, the S3 default, puts the bucket in the hostname and needs a 
 `--region us-east-1`::
 MinIO ignores the region entirely, but the AWS SDK refuses to build a client without one.
 
-[NOTE]
-====
-`program-forge.invalid` uses the `.invalid` top-level domain, which RFC 2606 reserves as permanently non-resolvable.
-It will not resolve through public DNS from anywhere, by design, so the name has to be mapped locally — in `/etc/hosts`, in a split-horizon resolver, or in the container network the registry runs in.
-
-On a machine where it is not mapped, point the task at the registry directly:
+For a genuinely different registry, override both:
 
 [source,console]
 ----
-pixi run publish --endpoint-url http://127.0.0.1:9000
+pixi run publish --endpoint-url http://other-host:9000 --channel s3://other-bucket
 ----
-====
 
 == Try it against a throwaway registry
 
@@ -225,7 +280,7 @@ S3_ACCESS_KEY_ID=minioadmin S3_SECRET_ACCESS_KEY=minioadmin \
   pixi run publish --endpoint-url http://127.0.0.1:9000
 
 mc ls -r forge/program-forge/
-mc cat forge/program-forge/conda/linux-64/repodata.json
+mc cat forge/program-forge/linux-64/repodata.json
 ----
 
 The repodata is the thing to check.

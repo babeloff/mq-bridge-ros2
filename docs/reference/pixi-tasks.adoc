@@ -165,11 +165,11 @@ Target defaults, each overridable by flag or environment variable:
 
 | `--channel`
 | `S3_CHANNEL`
-| `s3://program-forge/conda`
+| `s3://<bucket>`, from pixi's `[s3-options]` or `[mirrors]`
 
 | `--endpoint-url`
 | `S3_ENDPOINT_URL`
-| `https://program-forge.invalid`
+| from pixi's `[s3-options]`, falling back to its `[mirrors]` entry
 
 | `--region`
 | `S3_REGION`

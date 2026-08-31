@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Publishes the built conda packages to an S3-backed conda channel.
 
-The default target is the project's MinIO registry at
-`https://program-forge.invalid`. Override any of it for another registry.
+The target is not hardcoded. It is read from pixi's global configuration:
+`[s3-options.<bucket>]` states the S3 endpoint for a bucket, and `[mirrors]` for
+the canonical channel is the fallback. Either way the registry's location has
+one spelling, in a file deployed from a dotfiles repository. Override with
+`--endpoint-url` and `--channel` for a different registry.
 
 Two steps, both required:
 
@@ -43,10 +46,23 @@ from _common import (
     variant_distros,
 )
 
-#: The project's registry. A MinIO deployment, so path-style addressing:
-#: virtual-host style would require a wildcard DNS entry per bucket.
-DEFAULT_ENDPOINT_URL = "https://program-forge.invalid"
-DEFAULT_CHANNEL = "s3://program-forge/conda"
+#: The registry's canonical identity. Deliberately unresolvable — the `.invalid`
+#: TLD is reserved by RFC 2606 — because it is a *name*, not a location. Readers
+#: never fetch it: pixi's `[mirrors]` substitutes a real URL first. This is what
+#: a consumer puts in its channel list.
+CANONICAL_CHANNEL = "https://program-forge.invalid"
+
+#: Where pixi's global configuration lives, and so where the mirror that gives
+#: the canonical name a location is declared.
+PIXI_CONFIG = Path(
+    os.environ.get("PIXI_HOME") or (Path.home() / ".pixi")
+) / "config.toml"
+
+#: Used only when the mirror cannot be read. Writing needs a real endpoint, and
+#: the canonical name cannot supply one, so this fails honestly rather than
+#: pretending.
+FALLBACK_ENDPOINT_URL = ""
+FALLBACK_CHANNEL = "s3://program-forge"
 #: MinIO ignores the region, but the AWS SDK requires one to be set.
 DEFAULT_REGION = "us-east-1"
 
@@ -81,6 +97,99 @@ def packages_to_publish(version: str) -> list[Path]:
             f"{detail}.\nRun `pixi run package` to build them."
         )
     return found
+
+
+def _pixi_config() -> dict:
+    """pixi's global configuration, or an empty mapping if unreadable."""
+    if not PIXI_CONFIG.is_file():
+        return {}
+    import tomllib
+
+    try:
+        return tomllib.loads(PIXI_CONFIG.read_text())
+    except (tomllib.TOMLDecodeError, OSError):
+        return {}
+
+
+def _mirror_bucket(config: dict) -> tuple[str, str, str] | None:
+    """Endpoint, bucket and the entry they came from, from pixi's `[mirrors]`.
+
+    Reads go over plain HTTP through the mirror, so its URL has to be split into
+    an S3 endpoint and the bucket it addresses:
+    `http://host:19000/program-forge` becomes `http://host:19000` plus
+    `program-forge`.
+    """
+    from urllib.parse import urlsplit
+
+    mirrors = config.get("mirrors", {})
+    # pixi normalises the key with a trailing slash; accept either spelling.
+    entries: list[str] = []
+    for key in (CANONICAL_CHANNEL, f"{CANONICAL_CHANNEL}/"):
+        entries += mirrors.get(key, [])
+
+    for entry in entries:
+        parts = urlsplit(entry)
+        bucket = parts.path.strip("/")
+        # A bucket is one path segment. Anything deeper is a sub-path channel,
+        # which is not what this registry uses.
+        if parts.scheme in ("http", "https") and bucket and "/" not in bucket:
+            return f"{parts.scheme}://{parts.netloc}", bucket, entry
+    return None
+
+
+def registry_target() -> tuple[str, str, str] | None:
+    """Where to write, and where that answer came from.
+
+    The location of the registry is declared once, in pixi's global
+    configuration, which is deployed from a dotfiles repository. Reading it here
+    rather than repeating the URL leaves one spelling to keep correct.
+
+    `[s3-options.<bucket>]` is preferred, because it states the S3 endpoint for
+    a bucket outright — exactly the question a publish asks. `[mirrors]` is the
+    fallback: it answers a *read* question, its entries are ordered by read
+    preference, and its first entry could legitimately become a read-only remote
+    while the local registry is down. Deriving a write target from it is an
+    inference; `[s3-options]` is a statement.
+
+    Neither publishing tool reads this file itself — `rattler-build upload s3`
+    requires the endpoint as an argument even when given `--config-file`, and
+    `rattler-index s3` takes no config file at all — so the values are read here
+    and passed on as flags.
+    """
+    config = _pixi_config()
+    if not config:
+        return None
+
+    options = config.get("s3-options", {})
+    mirror = _mirror_bucket(config)
+
+    def endpoint_of(bucket: str) -> str | None:
+        url = options.get(bucket, {}).get("endpoint-url")
+        # pixi normalises with a trailing slash, which the S3 client does not want.
+        return url.rstrip("/") if isinstance(url, str) and url else None
+
+    # Tie the two together when both are present: the bucket the mirror
+    # addresses is the one being published to.
+    if mirror:
+        endpoint = endpoint_of(mirror[1])
+        if endpoint:
+            return endpoint, mirror[1], f"[s3-options.{mirror[1]}] in {PIXI_CONFIG.name}"
+
+    # No mirror to cross-check against, but one unambiguous block.
+    if len(options) == 1:
+        bucket = next(iter(options))
+        endpoint = endpoint_of(bucket)
+        if endpoint:
+            return endpoint, bucket, f"[s3-options.{bucket}] in {PIXI_CONFIG.name}"
+
+    if mirror:
+        return (
+            mirror[0],
+            mirror[1],
+            f"mirror {mirror[2]} in {PIXI_CONFIG.name} "
+            f"(no [s3-options.{mirror[1]}] block)",
+        )
+    return None
 
 
 def credential_source() -> str | None:
@@ -123,16 +232,21 @@ def s3_options(arguments: argparse.Namespace) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
+    target = registry_target()
+    default_endpoint = target[0] if target else FALLBACK_ENDPOINT_URL
+    default_channel = f"s3://{target[1]}" if target else FALLBACK_CHANNEL
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--channel",
-        default=os.environ.get("S3_CHANNEL", DEFAULT_CHANNEL),
-        help=f"channel URL in the bucket (default: {DEFAULT_CHANNEL})",
+        default=os.environ.get("S3_CHANNEL", default_channel),
+        help=f"channel to write to (default: {default_channel})",
     )
     parser.add_argument(
         "--endpoint-url",
-        default=os.environ.get("S3_ENDPOINT_URL", DEFAULT_ENDPOINT_URL),
-        help=f"S3 endpoint of the registry (default: {DEFAULT_ENDPOINT_URL})",
+        default=os.environ.get("S3_ENDPOINT_URL", default_endpoint),
+        help="S3 endpoint of the registry (default: pixi's [s3-options] for the "
+        "bucket, falling back to its [mirrors] entry)",
     )
     parser.add_argument(
         "--region",
@@ -166,8 +280,17 @@ def main(argv: list[str]) -> int:
     packages = packages_to_publish(version)
     distros = variant_distros()
 
+    if not arguments.endpoint_url:
+        raise TaskError(
+            f"no S3 endpoint. {CANONICAL_CHANNEL} is a name, not a location, and no\n"
+            f"mirror for it was found in {PIXI_CONFIG}.\n"
+            "Add one, or pass --endpoint-url."
+        )
+
     print(f"package:  {PACKAGE_NAME} {version}")
     print(f"registry: {arguments.endpoint_url}")
+    if target:
+        print(f"          from {target[2]}")
     print(f"channel:  {arguments.channel}")
     print(f"publishing {len(packages)} package(s):")
     for package in packages:
@@ -239,8 +362,13 @@ def main(argv: list[str]) -> int:
     run(index)
 
     print(f"\npublished {PACKAGE_NAME} {version} to {arguments.channel}")
-    print("Consume it by adding the channel to a pixi manifest:")
-    print(f"  channels = [\"{arguments.channel}\", \"conda-forge\"]")
+    # A consumer names the canonical channel, never this s3:// URL. pixi's
+    # mirror turns the name into a location and fetches over plain HTTP, so a
+    # reader needs no S3 credentials and no knowledge of where the registry
+    # currently lives.
+    print("Consume it by naming the canonical channel in a pixi manifest:")
+    print(f'  channels = ["{CANONICAL_CHANNEL}", "conda-forge"]')
+    print(f"  (pixi rewrites that through [mirrors] in {PIXI_CONFIG})")
     return 0
 
 
