@@ -137,6 +137,18 @@ def variant_distros() -> list[str]:
     return [str(distro) for distro in distros]
 
 
+def pixi_environments() -> list[str]:
+    """The environments declared in pixi.toml, one per ROS distribution.
+
+    Read rather than hardcoded so that adding a distribution reaches everything
+    that has to iterate over them.
+    """
+    import tomllib
+
+    manifest = tomllib.loads((ROOT / "pixi.toml").read_text())
+    return list(manifest.get("environments", {})) or ["default"]
+
+
 def package_version() -> str:
     """The version in Cargo.toml, which is the source of truth for all of them."""
     import tomllib
@@ -198,9 +210,9 @@ def report(steps: Iterable[tuple[str, bool]]) -> int:
         print(f"{'ok  ' if ok else 'FAIL'}  {name}")
     failed = [name for name, ok in results if not ok]
     if failed:
-        print(f"\n{len(failed)} of {len(results)} steps failed")
+        print(f"\n{len(failed)} of {len(results)} steps failed", flush=True)
         return 1
-    print(f"\nall {len(results)} steps passed")
+    print(f"\nall {len(results)} steps passed", flush=True)
     return 0
 
 
@@ -209,6 +221,9 @@ def task(entry: Callable[[list[str]], int | None]) -> None:
     try:
         raise SystemExit(entry(sys.argv[1:]) or 0)
     except TaskError as error:
+        # Flush first: stdout is block-buffered when piped, so without this the
+        # error appears *above* the output explaining it.
+        sys.stdout.flush()
         print(f"\nerror: {error}", file=sys.stderr)
         raise SystemExit(1)
     except KeyboardInterrupt:

@@ -137,6 +137,9 @@ CI runs the check, and `pixi run check` includes it.
 
 Pushing a numeric tag runs `.github/workflows/release.yml`, which builds for all five targets and publishes the crate, the npm package and the wheels.
 
+`pixi run release` is the front door: it checks the tree, the branch, the tag, CI, `check` and the test suites in every environment before creating the tag, and pushes only when asked.
+See xref:../reference/pixi-tasks.adoc[Pixi tasks].
+
 ROS, the Rust toolchain and python all come from the locked pixi environment, installed with `locked: true` rather than re-solved on each runner.
 That is what keeps a release off the failure mode that broke CI: a fresh solve validates each download against the size recorded in the channel's repodata, and that metadata is not always right, whereas the lock records a sha256.
 It also means one interpreter does everything, which is why `pip` is a pixi dependency — the packaging tools are pip-installed into that environment.

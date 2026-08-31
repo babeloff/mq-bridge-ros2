@@ -71,6 +71,10 @@ Ten environment/platform pairs is why the lock file is a couple of megabytes; on
 | `publish.py`
 | Uploads and indexes the built packages in the program-forge registry.
 
+| `release`
+| `release.py`
+| Checks everything a release depends on, then tags it.
+
 | `bump-version`
 | `bump_version.py`
 | Raises the version and propagates it to every manifest.
@@ -209,6 +213,38 @@ Target defaults, each overridable by flag or environment variable:
 |===
 
 See xref:../how-to/publish-to-the-registry.adoc[Publish to the program-forge registry].
+
+== `release`
+
+[source,console]
+----
+pixi run release --dry-run      # every check, no tag
+pixi run release                # check, then tag locally
+pixi run release --push         # ...and push, which starts publishing
+----
+
+Does not publish.
+Pushing a tag matching `[0-9]*` is what triggers `.github/workflows/release.yml`, which builds on five platforms and publishes the crate, the npm package and the wheels.
+This task establishes that the commit deserves that, and creates the tag.
+
+The push is a separate flag because it is the irreversible step: crates.io and PyPI allow a published version to be yanked but never replaced.
+
+The version is read from `Cargo.toml` and never chosen here — run `pixi run bump-version` first if it should be a new one.
+Keeping them apart means a release cannot change the version as a side effect.
+
+The gates, all reported together:
+
+. the working tree is clean, so the tag names a reviewable commit
+. `main` is checked out and identical to `origin/main` — a tag push carries any commits the remote lacks, so releasing from an unpushed branch would publish unreviewed code
+. the tag is unused, locally and on the remote
+. CI reported success for *this* commit, not merely for the branch
+. `pixi run check` passes
+. the test suites pass in every environment, since a release ships one artifact per ROS distribution
+
+`--skip-tests` drops the slow gate, `--allow-red-ci` the CI one.
+Both are deliberate overrides rather than defaults.
+
+The conda packages are not part of `release.yml`, so the task ends by naming the separate step: `pixi run package && pixi run publish`.
 
 == Version tasks
 

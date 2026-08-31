@@ -53,6 +53,7 @@ pixi run demo      # run the example route and feed it with ros2 topic pub
 pixi run docs      # render the documentation
 pixi run package   # build one conda package per ROS distribution
 pixi run publish   # upload and index them in the program-forge registry
+pixi run release   # check everything, then tag a release
 pixi run bump-version patch   # raise the version across every manifest
 pixi run sync-version         # make every manifest match Cargo.toml
 ```

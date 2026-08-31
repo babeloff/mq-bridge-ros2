@@ -50,6 +50,10 @@ description = "Build the conda package from recipes/recipe.yaml"
 cmd = "python pixi-scripts/publish.py"
 description = "Upload and index the built conda packages in the program-forge registry"
 
+[tasks.release]
+cmd = "python pixi-scripts/release.py"
+description = "Check everything, then tag a release (pushing the tag starts publishing)"
+
 [tasks.bump-version]
 cmd = "python pixi-scripts/bump_version.py"
 description = "Raise the version (major/minor/patch or explicit) across every manifest"
