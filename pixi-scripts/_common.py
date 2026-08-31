@@ -66,6 +66,37 @@ def ros_environment(*, require: bool = True) -> dict[str, str]:
             if library_dir not in existing.split(os.pathsep):
                 env[variable] = os.pathsep.join(filter(None, [library_dir, existing]))
 
+    # A target directory per ROS distribution.
+    #
+    # `rclrs`' build script reads `ROS_DISTRO` and `AMENT_PREFIX_PATH` but
+    # declares no `cargo:rerun-if-env-changed` for either, so cargo does not
+    # treat a change of distribution as a reason to rerun it. Sharing one target
+    # directory across distributions can therefore link one distribution's
+    # bindings against another's libraries, and the result fails at load time
+    # rather than at build time.
+    #
+    # This matters more now that `pixi run -e humble test` makes switching a
+    # single flag.
+    #
+    # The parent directory is whatever cargo would have used anyway, which is
+    # not necessarily `./target`: `build.target-dir` in a cargo configuration
+    # file commonly points at a shared cache, and defaulting to `./target` here
+    # would silently override that. Only cargo can report the effective value,
+    # so it is asked. A shared cache therefore keeps working and simply gains a
+    # subdirectory per distribution.
+    distro = env.get("ROS_DISTRO")
+    if distro:
+        base = env.get("CARGO_TARGET_DIR")
+        if not base:
+            try:
+                base = str(target_directory(env))
+            except TaskError:
+                # No cargo to ask — a task that does not need it, such as
+                # publishing. Leave the setting alone rather than guessing.
+                base = None
+        if base and Path(base).name != distro:
+            env["CARGO_TARGET_DIR"] = str(Path(base) / distro)
+
     return env
 
 

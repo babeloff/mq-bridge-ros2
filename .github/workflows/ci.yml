@@ -17,8 +17,20 @@ permissions:
 jobs:
   # `rclrs` links `rcl` and loads message type support libraries from a ROS
   # installation, so there is no build without one — not even for the unit
-  # tests, whose binary would fail to load. RoboStack provides ROS 2 as conda
-  # packages, which is the only way to install it uniformly across runners.
+  # tests, whose binary would fail to load.
+  #
+  # The environment comes from pixi, using pixi.lock, rather than a fresh solve
+  # here. That is deliberate on two counts:
+  #
+  #   * The dependency list lives in pixi.toml only. A copy in this file would
+  #     be a second thing to keep in step.
+  #
+  #   * A fresh solve validates each download against the size recorded in the
+  #     channel's repodata, and that metadata is not always right: robostack-jazzy
+  #     briefly advertised sizes a few bytes off from the files it served, which
+  #     failed the install for eight packages whose bytes were in fact correct.
+  #     A locked install checks the sha256 recorded in pixi.lock, which is a
+  #     statement about content rather than about metadata.
   #
   # There is no broker to start: ROS 2 is peer to peer, so the end-to-end tests
   # discover themselves over loopback on a dedicated domain.
@@ -28,72 +40,54 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The `rcl` ABI differs between distributions, so each one is a separate
-        # build and a separate artifact. Keep this in step with the `ros_distro`
-        # list in recipes/variants.yaml, which is what the packages are built
-        # for. `rclrs` 0.7 also supports kilted and rolling.
-        ros_distro: [humble, jazzy]
+        # One pixi environment per distribution, because the `rcl` ABI differs
+        # between them. Keep this in step with `[environments]` in pixi.toml and
+        # the `ros_distro` list in recipes/variants.yaml.
+        include:
+          - ros_distro: jazzy
+            environment: default
+          - ros_distro: humble
+            environment: humble
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Verify package versions
         run: python3 scripts/set_version.py --check
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-
-      - name: Install ROS 2 ${{ matrix.ros_distro }}
-        uses: mamba-org/setup-micromamba@v2
+      # No separate Rust toolchain step: `rust` is a locked pixi dependency, so
+      # the compiler comes from the same environment as ROS.
+      - name: Install ROS 2 ${{ matrix.ros_distro }} from pixi.lock
+        uses: prefix-dev/setup-pixi@v0.10.2
         with:
-          environment-name: ros2
-          # `test_msgs` and `example_interfaces` are not optional: `rclrs`
-          # vendors their generated code and links those libraries
-          # unconditionally, so the crate does not link without them.
-          create-args: >-
-            python=3.12
-            ros-${{ matrix.ros_distro }}-ros-base
-            ros-${{ matrix.ros_distro }}-test-msgs
-            ros-${{ matrix.ros_distro }}-example-interfaces
-            ros-${{ matrix.ros_distro }}-std-msgs
-          condarc: |
-            channels:
-              - https://prefix.dev/robostack-${{ matrix.ros_distro }}
-              - conda-forge
+          environments: ${{ matrix.environment }}
+          # Install exactly what is locked, and fail if pixi.lock has drifted
+          # from pixi.toml rather than quietly re-solving.
+          locked: true
+          cache: true
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/bin/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
           key: ${{ runner.os }}-${{ matrix.ros_distro }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: ${{ runner.os }}-${{ matrix.ros_distro }}-cargo-
 
-      - name: Show ROS environment
-        shell: bash -el {0}
-        run: |
-          echo "ROS_DISTRO=$ROS_DISTRO"
-          test -n "$AMENT_PREFIX_PATH" || { echo "ROS 2 is not sourced"; exit 1; }
-
+      # The task scripts add the environment's lib directory to the loader path
+      # and give each distribution its own cargo target directory, so nothing
+      # has to be exported here.
       - name: Unit tests
-        shell: bash -el {0}
-        run: cargo test --lib
+        run: pixi run -e ${{ matrix.environment }} test --unit
 
       - name: ROS 2 integration tests
-        shell: bash -el {0}
-        run: |
-          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-          cargo test --test integration -- --ignored --nocapture
+        run: pixi run -e ${{ matrix.environment }} test --integration
 
       - name: Endpoint conformance, linked and plugin-loaded
-        shell: bash -el {0}
-        run: |
-          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
-          cargo test --test plugin -- --ignored --nocapture
+        run: pixi run -e ${{ matrix.environment }} test --conformance
 
   # Type-checks the crate without a ROS installation. This is what the
   # `ros-shim` feature is for, and it keeps the compile clean for contributors
@@ -102,7 +96,7 @@ jobs:
     name: Check without a ROS installation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -121,7 +115,7 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -139,14 +133,14 @@ jobs:
     name: Node package smoke test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install dependencies
         working-directory: node

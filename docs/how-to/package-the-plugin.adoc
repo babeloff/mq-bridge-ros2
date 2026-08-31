@@ -14,13 +14,15 @@ The conda packages handle this properly, because a build string can say which di
 A Python wheel's platform tag cannot, which is the one place this leaks.
 ====
 
-[WARNING]
+[NOTE]
 ====
-When building for more than one distribution *by hand*, give each one its own `CARGO_TARGET_DIR`.
-`rclrs`' build script reads `ROS_DISTRO` and `AMENT_PREFIX_PATH` but declares no `cargo:rerun-if-env-changed` for either, so cargo will not necessarily rerun it when only the environment changes.
-Reusing one target directory across distributions can therefore link yesterday's bindings against today's libraries, and the result fails at load time rather than at build time.
+Switching distribution is safe, but only because something takes care of it.
 
-`pixi run package` is not affected: every rattler-build variant gets its own work directory, and the recipe pins `CARGO_TARGET_DIR` inside it.
+`rclrs`' build script reads `ROS_DISTRO` and `AMENT_PREFIX_PATH` yet declares no `cargo:rerun-if-env-changed` for either, so cargo does not treat a change of distribution as a reason to rerun it.
+One shared target directory across distributions would link one distribution's bindings against another's libraries, and fail at load time rather than at build time.
+
+Three things prevent that: the task scripts give each distribution its own subdirectory of whatever target directory cargo is configured to use, every rattler-build variant gets its own work directory, and the recipe pins `CARGO_TARGET_DIR` inside it.
+Building by hand outside those paths still needs a target directory per distribution.
 ====
 
 == Build the conda packages

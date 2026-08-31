@@ -1,15 +1,26 @@
 [workspace]
 authors = ["Fredrick Eisele <fred.eisele@vanderbilt.edu>"]
+# The RoboStack channels are deliberately NOT here: each belongs to one
+# distribution's feature. `ros2-distro-mutex` exists in every RoboStack channel
+# with a distribution-specific build, so an environment that can see two of them
+# fails to solve. Keeping them per-feature is what lets both distributions be
+# described in one manifest.
 channels = [
     "https://prefix.dev/meso-forge",
-    # RoboStack packages ROS 2 for conda, which is the only way to get a ROS
-    # installation into an environment uniformly across platforms. `rclrs`
-    # links `rcl`, so there is no build of this crate without one.
-    "https://prefix.dev/robostack-jazzy",
     "conda-forge",
 ]
 name = "mq-bridge-ros2"
-platforms = ["linux-64"]
+# The release matrix's five targets, so `release.yml` can install from this
+# lock instead of re-solving on each runner. RoboStack publishes every ROS
+# package this needs — including `test-msgs`, which is test-only and the most
+# likely to be missing — for both distributions on all five.
+platforms = [
+    "linux-64",
+    "linux-aarch64",
+    "osx-64",
+    "osx-arm64",
+    "win-64",
+]
 version = "0.1.0"
 
 # Every task is a Python script under pixi-scripts/, so the logic is readable,
@@ -57,20 +68,6 @@ description = "Run the example route and feed it with ros2 topic pub"
 # it here makes a mismatch a solve error rather than a puzzling import failure.
 python = ">=3.12,<3.13"
 
-# ROS 2. `test-msgs` and `example-interfaces` are not optional even though no
-# route uses them: `rclrs` vendors their generated code and links those
-# libraries unconditionally, so the crate does not link without them.
-#
-# The compatibility contract for these is the *distribution* in the package
-# name, not the version — everything in `robostack-jazzy` is built against one
-# `rcl` ABI. So the floors below record what the endpoint was tested against,
-# and the ceilings only exclude a new major, where message definitions could
-# change.
-ros-jazzy-ros-base = ">=0.11,<1"
-ros-jazzy-test-msgs = ">=2.0,<3"
-ros-jazzy-example-interfaces = ">=0.12,<1"
-ros-jazzy-std-msgs = ">=5.3,<6"
-
 # The Rust toolchain, so a `pixi run` compiles with the same compiler
 # everywhere rather than whatever happens to be on PATH.
 #
@@ -102,3 +99,48 @@ asciidoctor = ">=2.0.20,<3"
 # build for, and derives the build channels from that list. Only `safe_load` is
 # used, which has been stable across the whole 6.x line.
 pyyaml = ">=6.0,<7"
+
+# ── One environment per ROS distribution ─────────────────────────────────────
+#
+# `rclrs` selects its `rcl` bindings at compile time, so a build serves one
+# distribution only. Describing both here rather than in CI means the same
+# locked package set is used locally and on a runner, and there is no dependency
+# list to keep in step in two places.
+#
+#   pixi run test              # jazzy, the default
+#   pixi run -e humble test    # humble
+#
+# `test-msgs` and `example-interfaces` are not optional even though no route
+# uses them: `rclrs` vendors their generated code and links those libraries
+# unconditionally, so the crate does not link without them.
+#
+# The compatibility contract for these packages is the *distribution* in the
+# name, not the version — everything in one RoboStack channel is built against
+# one `rcl` ABI — so the floors record what was tested and the ceilings only
+# exclude a new major, where message definitions could change.
+#
+# Each feature carries its own channel. Two RoboStack channels in one
+# environment cannot solve, because `ros2-distro-mutex` is distribution-specific
+# and unprefixed.
+
+[feature.jazzy]
+channels = ["https://prefix.dev/robostack-jazzy"]
+
+[feature.jazzy.dependencies]
+ros-jazzy-ros-base = ">=0.11,<1"
+ros-jazzy-test-msgs = ">=2.0,<3"
+ros-jazzy-example-interfaces = ">=0.12,<1"
+ros-jazzy-std-msgs = ">=5.3,<6"
+
+[feature.humble]
+channels = ["https://prefix.dev/robostack-humble"]
+
+[feature.humble.dependencies]
+ros-humble-ros-base = ">=0.10,<1"
+ros-humble-test-msgs = ">=1.2,<2"
+ros-humble-example-interfaces = ">=0.9,<1"
+ros-humble-std-msgs = ">=4.9,<5"
+
+[environments]
+default = ["jazzy"]
+humble = ["humble"]

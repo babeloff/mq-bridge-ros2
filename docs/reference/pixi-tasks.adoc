@@ -4,14 +4,42 @@
 
 The project's tasks, defined in `pixi.toml` and implemented as Python scripts under `pixi-scripts/`.
 
-Every task runs inside the pixi environment, which activates ROS 2.
+Every task runs inside a pixi environment, which activates ROS 2.
 Arguments after the task name reach the script, so `pixi run test --unit` works.
 
 [source,console]
 ----
-pixi install          # once, to create the environment
+pixi install          # once, to create the environments
 pixi task list        # the tasks, with their descriptions
 ----
+
+== Environments
+
+One per ROS distribution, because `rclrs` selects its `rcl` bindings at compile time and a build serves one distribution only.
+
+[cols="1,1,2", options="header"]
+|===
+| Environment | Distribution | Use
+
+| `default`
+| jazzy
+| `pixi run test`
+
+| `humble`
+| humble
+| `pixi run -e humble test`
+|===
+
+Each carries its own RoboStack channel. Two of them in one environment cannot solve, because `ros2-distro-mutex` is distribution-specific and unprefixed — the same constraint that makes `pixi run package` build one distribution per invocation.
+
+Switching is safe: the task scripts give each distribution its own subdirectory of whatever target directory cargo is configured to use.
+Without that, `rclrs`' build script — which declares no `cargo:rerun-if-env-changed` for `ROS_DISTRO` — would leave one distribution's bindings in place while linking another's libraries.
+
+Add a distribution by adding a feature and an environment to `pixi.toml`, then keep `[environments]`, the CI matrix and `recipes/variants.yaml` in step.
+
+`pixi.toml` declares five platforms — `linux-64`, `linux-aarch64`, `osx-64`, `osx-arm64` and `win-64` — which are the release matrix's targets, so a release runner can install from `pixi.lock` rather than re-solving.
+RoboStack publishes every ROS package needed for both distributions on all five, `test-msgs` included.
+Ten environment/platform pairs is why the lock file is a couple of megabytes; only the current platform is ever materialised.
 
 == Tasks
 
