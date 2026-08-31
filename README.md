@@ -21,8 +21,12 @@ requires the original notice be retained in a derivative work.
 
 ## Documentation
 
+Published at **<https://phreed.github.io/mq-bridge-ros2/>**, rendered from
+`docs/` by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) on every
+push to `main` that touches them.
+
 `docs/` holds the full documentation, organised by
-[Diátaxis](https://diataxis.fr/) and written in AsciiDoc. Render it with
+[Diátaxis](https://diataxis.fr/) and written in AsciiDoc. Render it locally with
 `pixi run docs`, or read the sources directly:
 
 | | |

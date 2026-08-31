@@ -113,7 +113,12 @@ pixi run docs --check          # validate without writing
 ----
 
 Runs `asciidoctor` with `--failure-level=WARN`, so a broken cross-reference between pages fails the task instead of quietly producing a dead link.
+It also verifies that every `xref:` to another document points at a file that exists, which asciidoctor itself does not check.
 `--check` converts into a temporary directory and discards it.
+
+The published site at https://phreed.github.io/mq-bridge-ros2/ is built by the same script.
+`.github/workflows/pages.yml` runs `python3 pixi-scripts/docs.py` on a push to `main` that touches `docs/` or the renderer, and deploys `build/docs` to GitHub Pages.
+That workflow installs only Ruby and asciidoctor — rendering needs neither ROS nor Rust, so it does not create the pixi environment.
 
 == `package`
 

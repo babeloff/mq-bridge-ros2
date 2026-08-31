@@ -1,0 +1,75 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    # The rendered site depends on the AsciiDoc sources and the renderer, and
+    # nothing else. A change elsewhere would only redeploy identical output.
+    paths:
+      - "docs/**"
+      - "pixi-scripts/docs.py"
+      - "pixi-scripts/_common.py"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Read-only by default. Only the deploy job below is granted the Pages tokens,
+# so the job that installs gems and renders content cannot publish anything.
+permissions:
+  contents: read
+
+# One deployment at a time, and never cancel one in flight: a half-finished
+# deploy would leave the published site inconsistent.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Render AsciiDoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Neither ROS nor Rust is needed to render documentation, so this job
+      # deliberately does not create the pixi environment — that would pull a
+      # whole ROS installation to produce HTML.
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Install asciidoctor
+        # The same range pinned in pixi.toml, so a local render and this one
+        # cannot disagree.
+        run: gem install asciidoctor -v '~> 2.0' --no-document
+
+      - name: Render to build/docs
+        # The same script `pixi run docs` uses. It renders with
+        # `--failure-level=WARN` and checks that every inter-document xref
+        # resolves, so a dead link fails here rather than being published.
+        run: python3 pixi-scripts/docs.py
+
+      - name: Check the entry point exists
+        # Cheap guard against publishing a site with no landing page: Pages
+        # serves build/docs/index.html at the root.
+        run: test -f build/docs/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/docs
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
