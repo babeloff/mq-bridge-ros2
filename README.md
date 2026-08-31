@@ -13,6 +13,12 @@ Message types are resolved at run time through `rclrs`' dynamic messages, so the
 type a route carries is named in its configuration and any message type
 installed on the machine works without generating bindings for it.
 
+## License
+
+MIT — see [LICENSE](LICENSE). The copyright notice names both this project's
+author and Marco Mengelkoch, whose mq-bridge-pulsar this is derived from: MIT
+requires the original notice be retained in a derivative work.
+
 ## Documentation
 
 `docs/` holds the full documentation, organised by
@@ -38,7 +44,7 @@ script under `pixi-scripts/`:
 pixi install       # creates the environment: ROS 2 from RoboStack, plus the Rust toolchain
 pixi run build     # compile the endpoint and its plugin library
 pixi run test      # unit, ROS 2 integration and plugin conformance suites
-pixi run check     # formatting, clippy, version sync, doctests, no-ROS check
+pixi run check     # formatting, clippy, versions, doctests, licences, no-ROS check
 pixi run demo      # run the example route and feed it with ros2 topic pub
 pixi run docs      # render the documentation
 pixi run package   # build one conda package per ROS distribution

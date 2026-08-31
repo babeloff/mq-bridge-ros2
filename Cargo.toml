@@ -6,7 +6,9 @@ rust-version = "1.85"
 license = "MIT"
 description = "ROS 2 endpoint extension for mq-bridge"
 repository = "https://github.com/phreed/mq-bridge-ros2"
-include = ["/src/**", "/tests/**", "/examples/**", "/Cargo.toml", "/README.md"]
+# An explicit `include` overrides cargo's defaults, so the licence has to be
+# listed or the published crate would carry none.
+include = ["/src/**", "/tests/**", "/examples/**", "/Cargo.toml", "/README.md", "/LICENSE"]
 
 [lib]
 # `rlib` for Rust users who link the endpoint directly; `cdylib` is the loadable

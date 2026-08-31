@@ -25,7 +25,7 @@ description = "Run the unit, ROS 2 integration and plugin conformance suites"
 
 [tasks.check]
 cmd = "python pixi-scripts/check.py"
-description = "Formatting, clippy, version sync, doctests and a type check without ROS"
+description = "Formatting, clippy, version sync, doctests, licences and a no-ROS check"
 
 [tasks.docs]
 cmd = "python pixi-scripts/docs.py"

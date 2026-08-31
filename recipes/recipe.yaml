@@ -119,6 +119,9 @@ tests:
 about:
   homepage: https://github.com/phreed/mq-bridge-ros2
   license: MIT
+  # Relative to the source root, so the text lands in the package's
+  # info/licenses/ rather than only the SPDX identifier above.
+  license_file: LICENSE
   summary: ROS 2 endpoint extension for mq-bridge
   description: |
     An external mq-bridge endpoint for ROS 2, implemented with rclrs

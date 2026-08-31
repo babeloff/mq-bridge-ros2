@@ -29,7 +29,7 @@ pixi task list        # the tasks, with their descriptions
 
 | `check`
 | `check.py`
-| Formatting, clippy, version sync and a type check without ROS.
+| Formatting, clippy, version sync, doctests, licence copies and a type check without ROS.
 
 | `docs`
 | `docs.py`
@@ -93,11 +93,13 @@ pixi run check                 # report
 pixi run check --fix           # rewrite formatting, then report
 ----
 
-Four steps, all reported together rather than stopping at the first failure:
+Six steps, all reported together rather than stopping at the first failure:
 
 . `cargo fmt --check`
 . `cargo clippy --all-targets -- -D warnings`
 . `scripts/set_version.py --check`
+. the task scripts' doctests, which cover the version arithmetic
+. `node/LICENSE` and `python/LICENSE` still match the root `LICENSE`
 . `cargo check --features ros-shim --all-targets`, with ROS removed from the environment
 
 The last is the configuration a contributor without ROS is in, and worth keeping working even though it cannot produce a loadable library.

@@ -52,6 +52,8 @@ def main(argv: list[str]) -> int:
     )
     steps.append(("task script doctests", status == 0))
 
+    steps.append(("licence copies identical", licences_agree()))
+
     status = run(
         ["cargo", "check", "--features", "ros-shim", "--all-targets"],
         env=shim_environment(),
@@ -60,6 +62,32 @@ def main(argv: list[str]) -> int:
     steps.append(("type check without ROS", status == 0))
 
     return report(steps)
+
+
+def licences_agree() -> bool:
+    """Whether the per-package licence copies still match the root one.
+
+    The licence is duplicated because npm packs from `node/` and setuptools from
+    `python/`, and neither looks outside its own directory. Duplication is only
+    safe if the copies cannot quietly drift apart, hence this check.
+    """
+    root = ROOT / "LICENSE"
+    if not root.is_file():
+        print(f"\n{root.name} is missing")
+        return False
+
+    expected = root.read_bytes()
+    copies = (ROOT / "node" / "LICENSE", ROOT / "python" / "LICENSE")
+    drifted = [
+        str(path.relative_to(ROOT))
+        for path in copies
+        if not path.is_file() or path.read_bytes() != expected
+    ]
+    if drifted:
+        print(f"\nmissing or differing from LICENSE: {', '.join(drifted)}")
+        print("Copy the root LICENSE over them; they are shipped by npm and pip.")
+        return False
+    return True
 
 
 if __name__ == "__main__":
