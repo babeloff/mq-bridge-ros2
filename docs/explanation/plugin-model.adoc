@@ -1,0 +1,182 @@
+= How mq-bridge loads this endpoint
+:toc: left
+:icons: font
+
+This page is about mechanism rather than instructions.
+It exists because the plugin arrangement has a few properties that look arbitrary until you know what they are for.
+
+== One implementation, three lives
+
+mq-bridge's extension point is a factory:
+an object that can build a consumer or a publisher from a route name and a blob of JSON configuration.
+This crate provides one, `Ros2Factory`, and there are two ways it can reach mq-bridge's registry.
+
+A Rust program that links this crate calls `register()`,
+which puts the factory in the registry under the name `ros2`.
+
+Any other host loads the compiled `cdylib`.
+The crate exports one symbol, `mq_bridge_plugin_v1`, and `load_endpoint_plugin` looks it up,
+obtains the factory through it, and registers it.
+From that point the two cases are indistinguishable —
+a route naming `ros2` cannot tell which happened, and neither can mq-bridge.
+
+The Python and npm packages are the third life, and they are not a third implementation.
+Each ships that same `cdylib` and calls mq-bridge's *own* generic loader with the path to it.
+Neither package contains a line of ROS 2 logic.
+This is why Python, Node.js and Rust cannot drift apart in behaviour:
+there is only one behaviour, compiled once.
+
+The conformance suite is what holds that claim up.
+`tests/plugin.rs` runs mq-bridge's endpoint checks against the linked factory,
+then against the factory a host builds from the compiled library, and asserts the results are equal.
+If the ABI round trip lost something, that test fails.
+
+== Why the library is found by convention rather than by path
+
+A wheel and an npm package cannot know where they will be installed, so hardcoding a path is not an option.
+mq-bridge's answer is a small manifest that sits next to the library inside the importable package:
+
+[source,json]
+----
+{
+  "name": "ros2",
+  "library": "mq_bridge_ros2"
+}
+----
+
+`register()` in either language passes the *package directory* to the loader,
+which reads the manifest, expands `library` into the platform's actual filename —
+`libmq_bridge_ros2.so`, `libmq_bridge_ros2.dylib`, `mq_bridge_ros2.dll` — and loads that.
+
+The indirection buys two things.
+The manifest is platform-independent, so one file works everywhere.
+And the endpoint name lives with the artifact rather than in the host's configuration,
+so a host does not need to be told what it just loaded.
+
+== Why only one plugin crate can be linked at a time
+
+`mq_bridge_plugin_v1` is a fixed symbol name, not a per-crate one.
+That is what makes a host able to load *any* plugin without knowing which — it looks up one well-known name.
+
+The cost is that two plugin crates linked into the same binary would both define it.
+Hence the `plugin` feature, on by default because shipping a loadable plugin is the common case,
+and turned off with `default-features = false` when linking directly alongside another plugin crate.
+`register()` still works with the feature off; only the exported symbol goes away.
+
+== Why an endpoint gets its own ROS context and thread
+
+Each consumer and each publisher creates its own `rclrs` context, executor and node,
+and spawns a thread to spin that executor.
+
+A context per endpoint rather than one per process,
+because an endpoint may select its own `domain_id`, and
+because a route being torn down has to release its ROS resources without disturbing any other route sharing the process.
+
+A thread rather than a task, because `rclrs`' executor blocks the thread it spins on and is not a tokio runtime.
+mq-bridge is async, so the two are bridged by giving the executor a thread of its own.
+
+The order of construction matters and is enforced by the code's shape: the context and node are created,
+the subscription or publisher is created on that node, and only *then* does spinning start.
+Nothing is delivered to a node that is not being spun,
+so building the subscription first means no message can slip past a subscription that does not exist yet.
+`Ros2Runtime::start` takes a closure for exactly this reason —
+the wrong order is not expressible.
+
+Shutting down is `halt_spinning()` followed by a join.
+That is bounded rather than open-ended because halting also wakes every wait set,
+so the executor notices immediately instead of waiting for the next message to arrive.
+
+== Why message types are resolved at run time
+
+`rclrs` generates Rust bindings for ROS message packages inside a colcon workspace,
+and publishes almost none of them to crates.io.
+The only message types available to a plain `cargo build`
+are the handful `rclrs` vendors internally — `example_interfaces`, `test_msgs`, `builtin_interfaces` and a few others.
+
+`std_msgs` is not among them.
+A compile-time-typed bridge would therefore be able to speak `example_interfaces/msg/String` and not `std_msgs/msg/String`.
+Those two have identical fields and *different type names*,
+and DDS matches on the type name,
+so such a bridge would be unable to talk to any real ROS graph.
+
+So this endpoint uses `rclrs`' dynamic messages instead.
+The type is named in the route's configuration,
+the type support library is loaded at run time through the ament index,
+and the message structure is inspected to find the payload field.
+The cost is that a payload has to live in one named field rather than a typed struct.
+The benefit is that every message type installed on the machine works,
+including ones written after this crate was compiled.
+
+That inspection is also what makes the failure early.
+When an endpoint is created,
+the type support library is loaded and the payload field is checked against the real definition *before* the node joins the graph —
+so a typo in `message_type` or `payload_field` is a start-up error, not a surprise on the first message.
+
+== Why some failures are permanent
+
+A route treats an unclassified error as a connection failure and retries it on its reconnect interval, forever.
+That is right for a middleware that is not up yet, and wrong for a message type that is not installed.
+
+So failures that cannot heal are wrapped as `ConsumerError::Permanent` or `PublisherError::NonRetryable`,
+and the route stops instead of spinning.
+A missing package will not appear because you waited.
+Neither will a valid name emerge from an invalid one, nor valid UTF-8 from bytes that are not.
+
+xref:../reference/configuration.adoc#error-classification[The reference] lists which is which.
+
+[#shim]
+== Why the shim cannot build the plugin
+
+`rclrs` has a `use_ros_shim` feature that resolves ROS symbols by `dlopen` at run time instead of linking them,
+and this crate exposes it as `ros-shim`.
+It looks like it should allow building the plugin on a machine with no ROS and resolving ROS wherever it lands.
+It does not.
+
+The feature only stops `rclrs`' build script from emitting link flags for `rcl` and friends.
+It has no effect on the message packages `rclrs` *vendors*:
+that generated code carries `#[link]` attributes for `test_msgs`, `example_interfaces`, `rosidl_runtime_c` and the rest,
+and those must resolve whenever something is actually linked.
+
+An `rlib` defers them, which is why `cargo check` and `cargo build --lib`-as-rlib succeed.
+A `cdylib`, a test binary or an executable does not, and fails with a wall of `cannot find -ltest_msgs__rosidl_generator_c`.
+
+The shim is therefore useful for one thing: type checking on a machine without ROS.
+`pixi run check` includes it for that reason.
+Producing a distributable artifact needs a real ROS installation, and always will while that vendored code links real libraries.
+
+== Why an artifact is tied to a ROS distribution
+
+`rclrs` ships pre-generated `rcl` bindings per distribution —
+`rcl_bindings_generated_humble.rs`, `..._jazzy.rs`, and so on —
+and selects one at compile time from the `ros_distro` cfg.
+The struct layouts and function signatures differ between them.
+
+A library compiled against `jazzy` bindings therefore has `humble` as a hard incompatibility, not a warning.
+Every artifact is identified by platform *and* distribution.
+
+Nothing above the bindings needs to know this.
+The endpoint's own code is distribution-agnostic —
+it was written against `jazzy` and built,
+tested and packaged for `humble` without a single change —
+so supporting another distribution is a packaging concern rather than a porting one.
+That is why the distributions are a variant axis in `recipes/variants.yaml`:
+adding one is a line of configuration,
+and the resulting packages carry the distribution in their build string so they cannot be confused.
+
+Two consequences are worth knowing.
+
+The first is a build-system trap.
+`rclrs`' build script reads `ROS_DISTRO` and `AMENT_PREFIX_PATH` but emits no `cargo:rerun-if-env-changed` for either,
+so cargo does not treat a change of distribution as a reason to rerun it.
+Switching distribution while reusing one target directory can silently keep the previous bindings and link paths.
+Each rattler-build variant gets its own work directory, so the packages are safe;
+building both by hand needs a target directory per distribution.
+
+The second is the one real gap: a Python wheel's platform tag has no field for the distribution.
+A mismatched wheel installs cleanly and fails when the library is loaded.
+Conda has no such problem, which is part of why it is this project's primary artifact.
+
+== See also
+
+* xref:delivery-semantics.adoc[Delivery semantics on a brokerless bus]
+* xref:../reference/plugin.adoc[Plugin interface]

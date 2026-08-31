@@ -1,0 +1,161 @@
+= Your first ROS 2 route
+:toc: left
+:icons: font
+
+In this tutorial you will run an mq-bridge route that subscribes to a ROS 2 topic and writes every message it receives to a file.
+By the end you will have seen a message travel from the ordinary `ros2 topic pub` command, through the `ros2` endpoint, into a JSON Lines file.
+
+You will not need to write any Rust, and you will not need a broker — ROS 2 is peer to peer, so there is nothing to install and start alongside it.
+
+== What you need
+
+A checkout of this repository and https://pixi.sh[pixi].
+Everything else — ROS 2 itself, the Rust toolchain, the `ros2` command — comes from the project environment.
+
+Install it once:
+
+[source,console]
+----
+pixi install
+----
+
+This takes a few minutes the first time, because it downloads a full ROS 2 installation.
+
+== Step 1: confirm ROS 2 is active
+
+Every task in this project runs inside the pixi environment, which activates ROS 2 for you.
+Check that it worked:
+
+[source,console]
+----
+pixi run -- bash -c 'echo $ROS_DISTRO'
+----
+
+You should see `jazzy`.
+If the variable is empty, nothing later in this tutorial will work — see xref:../how-to/diagnose-a-failed-plugin-load.adoc[Diagnose a failed plugin load].
+
+== Step 2: look at the route
+
+Open `examples/ros2_to_file.yaml`.
+It is deliberately short:
+
+[source,yaml]
+----
+routes:
+  ros2_to_file:
+    batch_size: 100
+    input:
+      custom:
+        name: ros2
+        config:
+          qos:
+            depth: 100
+    output:
+      file:
+        path: "ros2-messages.jsonl"
+----
+
+Three things are worth noticing.
+
+`name: ros2` is how a route addresses this endpoint.
+The `custom` form is what every mq-bridge extension uses, and it is identical whether the endpoint was linked in or loaded from a plugin.
+
+The `config` block names no topic and no message type.
+It does not have to: the topic defaults to the route name, `ros2_to_file`, and the message type defaults to `std_msgs/msg/String`.
+Everything in the configuration has a default, so `config: {}` would also be valid.
+
+The QoS sets only `depth`.
+The durability policy is left at the ROS default, `volatile`, and that is not an oversight — it is what makes the next step work.
+`ros2 topic pub` offers `volatile` durability, and a subscription that asked for `transient_local` would not match a `volatile` publisher at all.
+It would sit there receiving nothing, with no error to explain why.
+
+== Step 3: run it
+
+The `demo` task does the whole thing: it builds the example, starts the route, waits for ROS discovery to match the two sides, publishes five messages and shows you what arrived.
+
+[source,console]
+----
+pixi run demo
+----
+
+You should see the publisher counting up, and then:
+
+[source,text]
+----
+ros2-messages.jsonl holds 5 message(s), expected 5
+  payload='hello from pixi run demo' topic='ros2_to_file'
+----
+
+That is the endpoint working.
+A `std_msgs/msg/String` was published, the endpoint read its `data` field, handed the bytes to mq-bridge as a canonical message, and the file output wrote it out.
+
+== Step 4: drive it yourself
+
+Now do the same thing by hand, so you can see both halves.
+
+Build and start the route, and leave it running:
+
+[source,console]
+----
+pixi run build --example
+pixi run -- ./target/debug/examples/ros2_to_file
+----
+
+[NOTE]
+====
+If that path does not exist, your cargo target directory has been moved by `CARGO_TARGET_DIR`.
+`pixi run build --example` prints the directory it actually used.
+====
+
+In a second terminal, publish to it:
+
+[source,console]
+----
+pixi run -- ros2 topic pub /ros2_to_file std_msgs/msg/String "{data: from my own terminal}"
+----
+
+Watch `ros2-messages.jsonl` grow:
+
+[source,console]
+----
+tail -f ros2-messages.jsonl
+----
+
+Each line is one message.
+Alongside the payload you will see two metadata entries, `ros2_topic` and `ros2_message_type`.
+Those are the whole of the metadata a received message carries, because a ROS 2 message has only the fields its type declares and no property map to put anything else in.
+
+Stop both with `Ctrl-C` when you have seen enough.
+
+== Step 5: watch it fail, on purpose
+
+Understanding one failure now will save you an afternoon later.
+Stop the route, and edit `examples/ros2_to_file.yaml` to request durability the publisher will not offer:
+
+[source,yaml]
+----
+          qos:
+            depth: 100
+            durability: transient_local
+----
+
+Start the route again and publish to it exactly as before.
+Nothing arrives.
+There is no error, no warning from the route, and `ros2 topic pub` reports success — because from DDS's point of view nothing went wrong.
+The two sides simply never matched, so there was no connection over which to deliver anything.
+
+This is the single most common surprise when moving a route from a broker to ROS 2, and it is explained in xref:../explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus].
+
+Undo that edit before moving on.
+
+== What you have learned
+
+* A route addresses this endpoint as `custom: { name: ros2 }`, and every configuration field has a default.
+* The payload travels in one named field of a named message type — by default `data` of a `std_msgs/msg/String`.
+* Metadata does not survive ROS 2; a received message carries only `ros2_topic` and `ros2_message_type`.
+* QoS is a matching contract, not a preference. Incompatible policies produce silence, not errors.
+
+== Next
+
+* xref:run-as-a-plugin.adoc[Run the same endpoint as a plugin] — the same route, in a host that was never compiled against this crate.
+* xref:../reference/configuration.adoc[Endpoint configuration] — everything the `config` block accepts.

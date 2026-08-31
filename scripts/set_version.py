@@ -9,12 +9,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+# The conda recipe declares its version once, as `context.version`, and the
+# `package:` block references it. Matched by regex rather than parsed, because
+# this script runs on a bare `python3` in CI and must not need PyYAML. The
+# leading whitespace and the quotes together pin it to the context entry:
+# `version: ${{ version }}` under `package:` is unquoted and so cannot match.
+RECIPE_VERSION = re.compile(r'^(\s+version:\s*)"([^"]+)"', re.MULTILINE)
 UPDATES = (
     ("Cargo.toml", r'^(version\s*=\s*)"[^"]+"', 1),
     ("node/package.json", r'^(\s*"version"\s*:\s*)"[^"]+"', 1),
     ("node/package-lock.json", r'^(\s*"version"\s*:\s*)"[^"]+"', 2),
     ("python/pyproject.toml", r'^(version\s*=\s*)"[^"]+"', 1),
+    ("recipes/recipe.yaml", RECIPE_VERSION.pattern, 1),
 )
+
+
+def recipe_version():
+    found = RECIPE_VERSION.search((ROOT / "recipes/recipe.yaml").read_text())
+    return found.group(2) if found else None
 
 
 def versions():
@@ -27,6 +39,7 @@ def versions():
         "node/package-lock.json": lock["version"],
         'node/package-lock.json packages[""]': lock["packages"][""]["version"],
         "python/pyproject.toml": python["project"]["version"],
+        "recipes/recipe.yaml": recipe_version(),
     }
 
 

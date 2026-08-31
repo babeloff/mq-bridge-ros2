@@ -1,0 +1,81 @@
+= Receive messages published before the route started
+:toc: left
+:icons: font
+
+By default a route sees only what is published while its subscription is matched.
+Start a route a second late and that second is gone.
+
+ROS 2's answer is the `DURABILITY` policy, and it does less than a broker's backlog would.
+Read the limits at the bottom before relying on it.
+
+== Do this
+
+Ask for `transient_local` on *both* sides:
+
+[source,yaml]
+----
+input:
+  custom:
+    name: ros2
+    config:
+      topic: "/orders/new"
+      qos:
+        durability: transient_local
+        depth: 100
+----
+
+The publisher must offer it too.
+If the publisher is another mq-bridge route, give it the same block.
+If it is a plain ROS node, that node's publisher has to be created with transient-local durability; you cannot obtain it from the subscription alone.
+
+`depth` is how many samples the publisher retains.
+With `history: keep_last` — the default — that is a rolling window of the most recent `depth` messages, so raise it if a late joiner needs more.
+
+== Verify it works
+
+The integration suite covers this directly: it publishes *before* any subscription exists, then creates one and requires the messages to arrive.
+
+[source,console]
+----
+pixi run test --integration
+----
+
+Look for `transient_local_reaches_a_subscription_created_after_the_publish`.
+
+== The limits
+
+These are the reasons `transient_local` is not a backlog, and each one bites in practice.
+
+Retention lives in the publisher::
+There is no broker.
+A transient-local sample is held by the *writer* that sent it, and delivered to readers that match later.
+When the publishing process exits, its retained samples go with it.
+A route that publishes and then stops has left nothing behind for anyone.
+
+Both sides must agree::
+DDS requires the offered policy to be at least as strong as the requested one.
+A `volatile` publisher and a `transient_local` subscription are *incompatible* and never match at all.
+The failure mode is silence: no error, no warning, no delivery.
+This is the single most common surprise when moving a route from a broker to ROS 2.
+
+It is bounded by `depth`::
+Only the most recent `depth` samples are kept under `keep_last`.
+`history: keep_all` removes that bound in principle, but the middleware's own resource limits still apply.
+
+It is not replay::
+A subscription that has already read to the end and is then restarted will receive whatever the publisher still retains — not a cursor position it left behind.
+There is no committed offset anywhere in the system.
+
+== If you need a real backlog
+
+Then you need something that stores messages, and ROS 2 does not.
+Two options that do work:
+
+* Put a broker in the path and use the mq-bridge endpoint for it, bridging ROS 2 to that broker with a route that is always running.
+* Record with `ros2 bag record` and replay with `ros2 bag play`, treating the bag as the durable store.
+  The endpoint reads a replayed topic exactly like a live one.
+
+== See also
+
+* xref:../reference/configuration.adoc#qos[`qos` reference] — every policy and its default.
+* xref:../explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus] — the full picture, including acknowledgement and redelivery.

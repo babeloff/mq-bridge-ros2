@@ -1,0 +1,236 @@
+= Endpoint configuration
+:toc: left
+:icons: font
+
+Every field the `ros2` endpoint accepts, its default, and how it is validated.
+
+Unknown fields are rejected.
+Every field has a default, so `config: {}` is valid.
+
+[source,yaml]
+----
+input:
+  custom:
+    name: ros2
+    config:
+      topic: "/orders/new"
+      message_type: "std_msgs/msg/String"
+      payload_field: "data"
+      node: "ingest_bridge"
+      namespace: "/ingest"
+      domain_id: 0
+      qos:
+        reliability: reliable
+        durability: volatile
+        history: keep_last
+        depth: 10
+----
+
+== Fields
+
+[cols="1,1,2,3", options="header"]
+|===
+| Field | Type | Default | Meaning
+
+| `topic`
+| string
+| the route name, sanitised
+| Topic to subscribe to or publish on.
+
+| `message_type`
+| string
+| `std_msgs/msg/String`
+| Message type as `<package>/msg/<Type>`.
+
+| `payload_field`
+| string
+| `data`
+| The field of that message the payload occupies.
+
+| `node`
+| string
+| `mq_bridge_<route>`, sanitised
+| Node name this endpoint appears under in the ROS graph.
+
+| `namespace`
+| string
+| `/`
+| Absolute namespace for the node.
+
+| `domain_id`
+| integer
+| `ROS_DOMAIN_ID` from the environment
+| DDS domain to join. Endpoints in different domains cannot see each other.
+
+| `qos`
+| map
+| see <<qos>>
+| Quality of service policies.
+|===
+
+`initial_position` and `subscription` from mq-bridge-pulsar have no equivalent and are rejected.
+The nearest thing to `initial_position` is `qos.durability`; see xref:../how-to/receive-earlier-messages.adoc[Receive messages published before the route started].
+There is no `url`, because there is no broker to address.
+
+== Names
+
+ROS 2 names are more restricted than mq-bridge route names, and the endpoint treats derived and explicit names differently.
+
+A name the endpoint *derives* from the route name is sanitised.
+Every character outside `[A-Za-z0-9_]` becomes `_`, and a leading `_` is added if the result would not start with a letter or underscore.
+Route `round-trip-9f1c.2` yields node `mq_bridge_round_trip_9f1c_2` and topic `round_trip_9f1c_2`.
+
+A name written out in the configuration is never rewritten — only accepted or rejected.
+Spelling a topic out is a statement of intent, and silently changing it would be worse than an error.
+
+[cols="1,3", options="header"]
+|===
+| Name | Rule
+
+| `node`
+| One segment matching `[A-Za-z_][A-Za-z0-9_]*`.
+
+| `namespace`
+| `/`, or `/` followed by `/`-separated segments each matching the above.
+  Must be absolute.
+
+| `topic`
+| `/`-separated segments each matching the above, optionally prefixed with `/` (absolute) or `~/` (private to the node).
+  A relative name is resolved against `namespace`.
+|===
+
+Hyphens are the usual trap: legal in a route name, illegal in ROS.
+
+== `message_type`
+
+Exactly three `/`-separated segments, with `msg` in the middle.
+`std_msgs/String` and `std_msgs/srv/Trigger` are both rejected.
+
+The type is resolved at run time through `rclrs`' dynamic messages, so any message type installed on the machine works with no bindings generated for it.
+Its package must be discoverable through `AMENT_PREFIX_PATH`.
+
+[#payload-field]
+== `payload_field`
+
+The single field of the message that carries the payload.
+It is validated against the real message definition when the endpoint is created, so a wrong choice fails at start-up rather than on the first message.
+
+[cols="2,3", options="header"]
+|===
+| Declared field type | Behaviour
+
+| `string`
+| Payload must be valid UTF-8.
+
+| `string<=N`
+| Payload must be valid UTF-8, length checked against `N` in characters.
+
+| `uint8[]`, `byte[]`, `char[]`
+| Raw bytes, any length.
+
+| `uint8[<=N]`, `byte[<=N]`, `char[<=N]`
+| Raw bytes, length checked against `N`.
+
+| `uint8[N]`, `byte[N]`, `char[N]`
+| Raw bytes, payload length must equal `N` exactly.
+|===
+
+Every other declared type is rejected, including a single `uint8` — a one-byte payload is far more likely to be a misconfiguration than an intent — and `wstring`, which is UTF-16 and would not pass opaque bytes through unchanged.
+
+Only this one field is read or written.
+Other fields of a published message are left at their defaults, and other fields of a received message are ignored.
+
+[#qos]
+== `qos`
+
+The three DDS policies a bridge has a basis to choose.
+Deadline, lifespan and liveliness are left at the ROS defaults.
+
+The publisher and the subscription of one route use the same profile, so a route always matches itself.
+
+[cols="1,2,1,3", options="header"]
+|===
+| Field | Values | Default | Meaning
+
+| `reliability`
+| `reliable`, `best_effort`, `system_default`
+| `reliable`
+| Whether delivery is retried until every matched reader has the sample.
+
+| `durability`
+| `volatile`, `transient_local`, `system_default`
+| `volatile`
+| Whether a reader that matches late can still receive retained samples.
+
+| `history`
+| `keep_last`, `keep_all`
+| `keep_last`
+| Whether the queue is bounded by `depth`.
+
+| `depth`
+| integer ≥ 1
+| `10`
+| Queue length under `keep_last`. Ignored under `keep_all`.
+|===
+
+`depth` must be at least 1 when `history` is `keep_last`; a `depth` of 0 with `keep_all` is accepted because the value is unused.
+
+=== Compatibility
+
+DDS matches two endpoints only when the offered policy is at least as strong as the requested one.
+An incompatible pair never matches, and the symptom is silence rather than an error.
+
+[cols="1,1,1", options="header"]
+|===
+| Publisher offers | Subscription requests | Match
+
+| `reliable` | `reliable` or `best_effort` | yes
+| `best_effort` | `best_effort` | yes
+| `best_effort` | `reliable` | *no*
+| `transient_local` | `volatile` or `transient_local` | yes
+| `volatile` | `volatile` | yes
+| `volatile` | `transient_local` | *no*
+|===
+
+=== `history` also bounds the consumer's own buffer
+
+`rclrs` offers no way to take a message from a subscription on demand, so a consumer queues between the ROS callback and the route.
+That queue uses the same policy: `keep_last` holds at most `depth` messages and discards the oldest beyond that, and `keep_all` holds everything.
+Discards are counted and reported on stderr when the endpoint closes.
+
+== Received metadata
+
+A received canonical message carries exactly two metadata entries:
+
+[cols="1,3", options="header"]
+|===
+| Key | Value
+
+| `ros2_topic`
+| The configured topic, as resolved.
+
+| `ros2_message_type`
+| The configured message type.
+|===
+
+Metadata on a *published* message is dropped.
+A ROS 2 message has only the fields its type declares and no property map, so there is nowhere for it to go.
+
+== Error classification
+
+A route retries a connection failure forever and stops on a permanent one, so the distinction matters.
+
+These are permanent — `ConsumerError::Permanent` or `PublisherError::NonRetryable`:
+
+* any rejected configuration, including an unknown field or an invalid name;
+* a `message_type` that is not installed, or whose package is not sourced;
+* a `payload_field` that does not exist or cannot carry a payload;
+* a payload that is not valid UTF-8 for a string field, or does not fit a bounded field;
+* a name `rcl` rejects, and an invalid ROS argument or remap rule.
+
+Everything else, including a middleware that is not up yet, reaches the route unclassified and is retried on its reconnect interval.
+
+== See also
+
+* xref:plugin.adoc[Plugin interface]
+* xref:../explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus]

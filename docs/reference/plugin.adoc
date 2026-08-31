@@ -1,0 +1,211 @@
+= Plugin interface
+:toc: left
+:icons: font
+
+What this crate exports, what a plugin package has to contain, and what a built artifact is valid for.
+
+== Endpoint name
+
+`ros2`.
+
+A route addresses it as `custom: { name: ros2 }`, identically whether the endpoint was linked in or loaded from a compiled library.
+
+== Library kinds
+
+`Cargo.toml` declares both:
+
+[source,toml]
+----
+crate-type = ["rlib", "cdylib"]
+----
+
+[cols="1,3", options="header"]
+|===
+| Kind | Purpose
+
+| `rlib`
+| For a Rust program that links this crate directly and calls `register()`.
+
+| `cdylib`
+| The loadable plugin. Built as `libmq_bridge_ros2.so`, `libmq_bridge_ros2.dylib` or `mq_bridge_ros2.dll`.
+|===
+
+== Exported symbol
+
+With the default features the crate exports mq-bridge's plugin entry point:
+
+[source,rust]
+----
+mq_bridge::export_endpoint_plugin! {
+    name: "ros2",
+    factory: Ros2Factory,
+}
+----
+
+The exported symbol is `mq_bridge_plugin_v1`.
+It is what `mq_bridge::plugin::load_endpoint_plugin` looks up, and loading it registers the endpoint.
+
+[WARNING]
+====
+Only one plugin crate per binary can define that symbol.
+Linking this crate directly alongside another mq-bridge plugin crate fails at link time unless both set `default-features = false`.
+====
+
+== Cargo features
+
+[cols="1,1,3", options="header"]
+|===
+| Feature | Default | Effect
+
+| `plugin`
+| on
+| Exports `mq_bridge_plugin_v1`. Turn off when linking alongside another plugin crate.
+
+| `example-app`
+| off
+| Enables the runnable `ros2_to_file` example.
+
+| `ros-shim`
+| off
+| Forwards to `rclrs/use_ros_shim`, resolving ROS symbols by `dlopen` rather than linking.
+  Requires `RUSTFLAGS='--cfg ros_distro="<distro>"'`.
+  Type checking only — see xref:../explanation/plugin-model.adoc#shim[why it cannot build the plugin].
+|===
+
+== Public Rust API
+
+[source,rust]
+----
+pub struct Ros2Factory;
+
+pub fn register() -> anyhow::Result<()>;
+
+pub use config::{Durability, History, QosConfig, Reliability, Ros2Config};
+----
+
+`register()` registers `Ros2Factory` under `ros2`.
+Calling it twice is an error.
+
+`Ros2Factory` implements `mq_bridge::traits::CustomEndpointFactory`, and is what the conformance suite is run against directly.
+
+== Plugin package layout
+
+The Python and npm packages follow mq-bridge's plugin-package convention: a manifest beside the library, both inside the importable package.
+
+[source,text]
+----
+mq_bridge_ros2/
+  __init__.py                 # Python only
+  mq-bridge-plugin.json
+  libmq_bridge_ros2.so        # or .dylib / .dll
+----
+
+[source,json]
+----
+{
+  "name": "ros2",
+  "library": "mq_bridge_ros2"
+}
+----
+
+[cols="1,3", options="header"]
+|===
+| Key | Meaning
+
+| `name`
+| The endpoint name a route will use.
+
+| `library`
+| The library filename *stem*, without the platform's `lib` prefix or extension, so one manifest serves all three platforms.
+|===
+
+The npm package instead stages per-platform binaries under `node/prebuilds/`, and mq-bridge selects the current platform's directory.
+
+== Language entry points
+
+[cols="1,2,2", options="header"]
+|===
+| Language | Call | Returns
+
+| Rust, linked
+| `mq_bridge_ros2::register()`
+| `Result<()>`
+
+| Rust, loaded
+| `mq_bridge::plugin::load_endpoint_plugin(path)`
+| plugin info, including `name`, `supports_consumer`, `supports_publisher`
+
+| Python
+| `mq_bridge_ros2.register()`
+| `"ros2"`; also `library_path() -> str`
+
+| Node.js
+| `register()` from `mq-bridge-ros2`
+| `"ros2"`; also `ENDPOINT_NAME`, `libraryPath()`
+|===
+
+Python and Node.js both hand the package directory to mq-bridge's generic loader; neither contains an implementation.
+
+== Host compatibility
+
+[cols="1,2", options="header"]
+|===
+| Dependency | Requirement
+
+| `mq-bridge` crate
+| `0.4.5` or later, below `0.5`
+
+| npm `mq-bridge`
+| `>=0.4.5 <0.5.0` (a peer dependency)
+
+| `mq-bridge-py`
+| `0.4.5` or later. Deliberately *not* a declared dependency, so the two upgrade independently.
+|===
+
+== Artifact identity
+
+A built artifact is valid for one combination of:
+
+* operating system and architecture;
+* **ROS distribution**.
+
+`rclrs` selects its `rcl` bindings at compile time, and that ABI differs between `humble`, `jazzy`, `kilted` and `rolling`.
+A `jazzy` build will not work on `humble` even on identical hardware.
+
+The distributions built for are listed in `recipes/variants.yaml` as a variant axis, and the conda build string names the one a package is for:
+
+[source,text]
+----
+mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
+mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+----
+
+Currently built and tested: `humble` and `jazzy`.
+The endpoint's source is distribution-agnostic, so adding one is a packaging change rather than a port.
+
+A Python wheel's platform tag cannot express the distribution, which is a genuine gap: a mismatched wheel installs cleanly and fails at load time.
+
+== Runtime requirements
+
+The library resolves ROS at run time, so the loading process needs:
+
+* a ROS installation on `AMENT_PREFIX_PATH`, with `ROS_DISTRO` set;
+* the ROS libraries on the platform's loader path (`LD_LIBRARY_PATH`, or `DYLD_FALLBACK_LIBRARY_PATH` on macOS);
+* the package providing the configured `message_type` — `ros-<distro>-std-msgs` for the default.
+
+== Build requirements
+
+Beyond a ROS installation, `rclrs` vendors generated code for several message packages and links their libraries unconditionally.
+These are required to link even though no route uses them:
+
+* `ros-<distro>-test-msgs`
+* `ros-<distro>-example-interfaces`
+
+`ros-base` does not include `test_msgs`.
+
+No `protoc` is needed; that was a `pulsar-rs` requirement in the project this was derived from.
+
+== See also
+
+* xref:../explanation/plugin-model.adoc[How mq-bridge loads this endpoint]
+* xref:../how-to/package-the-plugin.adoc[Package the plugin for distribution]

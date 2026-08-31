@@ -1,0 +1,153 @@
+= Package the plugin for distribution
+:toc: left
+:icons: font
+
+How to produce each of the four artifacts, and what each one is valid for.
+
+[IMPORTANT]
+====
+Every artifact here is specific to one platform *and* one ROS distribution.
+`rclrs` selects its `rcl` bindings at compile time and that ABI differs between distributions, so a `jazzy` build will not work on `humble`.
+Plan on one artifact per platform per distribution, not one per platform.
+
+The conda packages handle this properly, because a build string can say which distribution a package is for.
+A Python wheel's platform tag cannot, which is the one place this leaks.
+====
+
+[WARNING]
+====
+When building for more than one distribution *by hand*, give each one its own `CARGO_TARGET_DIR`.
+`rclrs`' build script reads `ROS_DISTRO` and `AMENT_PREFIX_PATH` but declares no `cargo:rerun-if-env-changed` for either, so cargo will not necessarily rerun it when only the environment changes.
+Reusing one target directory across distributions can therefore link yesterday's bindings against today's libraries, and the result fails at load time rather than at build time.
+
+`pixi run package` is not affected: every rattler-build variant gets its own work directory, and the recipe pins `CARGO_TARGET_DIR` inside it.
+====
+
+== Build the conda packages
+
+These are the project's primary artifacts, built with https://rattler.build[rattler-build] from `recipes/recipe.yaml`.
+One command builds every ROS distribution:
+
+[source,console]
+----
+pixi run package
+----
+
+[source,text]
+----
+building for ROS 2: humble, jazzy
+
+conda package(s):
+  build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
+  build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+----
+
+The distribution is in the build string, so the two cannot be installed over each other by accident.
+Each build also runs a test that imports the package and `dlopen`s the library, which catches a missing run dependency before a user does.
+
+To build just one while iterating:
+
+[source,console]
+----
+pixi run package --distro jazzy
+----
+
+=== Adding a distribution
+
+The distributions are a *variant axis*, not a value in the recipe.
+Add one to the `ros_distro` list in `recipes/variants.yaml` and that is the whole change:
+
+[source,yaml]
+----
+ros_distro:
+  - humble
+  - jazzy
+----
+
+`package.py` reads that list to decide what to build and derives the channel for each one, so nothing else has to be kept in step.
+Two conditions apply: `rclrs` must support the distribution — as of 0.7 that is `humble`, `jazzy`, `kilted` and `rolling` — and RoboStack must publish a `robostack-<distro>` channel for it.
+
+=== Why each distribution is built separately
+
+`package.py` runs rattler-build once per distribution, each with only that distribution's RoboStack channel, rather than expanding the variant axis in a single run.
+
+That is not tidiness.
+Most ROS conda packages are distribution-prefixed and would be unambiguous with several channels present, but `ros2-distro-mutex` is not: it exists in every RoboStack channel with a distribution-specific build string, and it is precisely what stops two distributions being mixed in one environment.
+With two RoboStack channels and strict channel priority, the mutex resolves from whichever channel comes first, and every other distribution then fails to solve with a long complaint about `ros2-distro-mutex ... jazzy_*` being excluded.
+
+One channel per invocation respects that guard rather than defeating it, and makes each build hermetic.
+
+== Build the Python wheel
+
+[source,console]
+----
+pixi run package --wheel
+----
+
+The builder is mq-bridge's, not this project's.
+It compiles the `cdylib`, stages it next to `mq-bridge-plugin.json` inside `python/mq_bridge_ros2/`, and applies the platform tag.
+
+Run it once per operating system and architecture you publish for, under the same distribution name; pip selects the right wheel by platform tag.
+
+[WARNING]
+====
+A wheel's platform tag has no room to express the ROS distribution.
+Nothing stops a user pip-installing a `jazzy`-built wheel on a `humble` machine, and it will fail at load time rather than at install time.
+If you publish wheels for more than one distribution, they need separate distribution names or a separate index.
+====
+
+== Build the npm package
+
+The npm release is a single package containing every platform's binary under `node/prebuilds/`.
+Stage on each target:
+
+[source,console]
+----
+mq-bridge-package-plugin
+----
+
+Then merge the resulting `node/prebuilds/` directories from every target onto one machine, and pack once:
+
+[source,console]
+----
+mq-bridge-package-plugin --pack --out npm
+----
+
+== Build the standalone archive
+
+For hosts that load a library by path and want nothing to do with pip or npm, the release workflow produces an archive of just the library and its manifest.
+See the `Build standalone plugin archive` step in `.github/workflows/release.yml`; it names the archive after both the platform and the distribution.
+
+== Keep the versions in step
+
+`Cargo.toml` is the source of truth.
+Both npm manifests, `python/pyproject.toml` and the conda recipe's `context.version` must agree with it, or a release ships mismatched versions:
+
+[source,console]
+----
+pixi run bump-version minor    # choose a new version, write it everywhere
+pixi run sync-version --check  # verify they agree
+----
+
+CI runs the check, and `pixi run check` includes it.
+
+== Release from CI
+
+Pushing a numeric tag runs `.github/workflows/release.yml`, which builds for all five targets, installs ROS 2 from RoboStack on each runner, and publishes the crate, the npm package and the wheels.
+
+The distribution it targets is the workflow-level `ROS_DISTRO_TARGET`.
+Releasing for a second distribution means running the workflow again with a different value — deliberately not a matrix axis, because the wheel filenames would collide.
+
+== A build dependency that is easy to miss
+
+`rclrs` vendors the generated code for several message packages and links their libraries unconditionally, whether or not a route uses them.
+`ros-<distro>-test-msgs` and `ros-<distro>-example-interfaces` are therefore *required* build dependencies.
+Without them the crate does not link, with a long list of `cannot find -ltest_msgs__rosidl_generator_c` errors.
+
+Both are listed in `recipes/recipe.yaml`, `pixi.toml` and the CI workflows for this reason.
+
+== See also
+
+* xref:publish-to-the-registry.adoc[Publish to the program-forge registry] — getting these artifacts into the conda channel.
+* xref:../reference/plugin.adoc[Plugin interface] — the package layout the artifacts have to produce.
+* xref:diagnose-a-failed-plugin-load.adoc[Diagnose a failed plugin load] — what a mismatched artifact looks like to a user.

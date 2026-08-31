@@ -1,30 +1,40 @@
-# mq-bridge-pulsar (Node.js)
+# mq-bridge-ros2 (Node.js)
 
-An Apache Pulsar endpoint for [mq-bridge](https://www.npmjs.com/package/mq-bridge),
+A ROS 2 endpoint for [mq-bridge](https://www.npmjs.com/package/mq-bridge),
 shipped as a native plugin. The package contains no JavaScript implementation of
-Pulsar — it loads the compiled Rust endpoint into mq-bridge, so Node.js, Python
-and Rust all run the same code and the same delivery semantics.
+ROS 2 — it loads the compiled Rust endpoint (built on
+[`rclrs`](https://github.com/ros2-rust/ros2_rust)) into mq-bridge, so Node.js,
+Python and Rust all run the same code and the same delivery semantics.
+
+Derived from
+[mq-bridge-pulsar](https://github.com/marcomq/mq-bridge-pulsar).
 
 ```console
-npm install mq-bridge mq-bridge-pulsar
+npm install mq-bridge mq-bridge-ros2
 ```
+
+A ROS 2 installation has to be sourced in the environment before the process
+starts; the plugin resolves `rcl` and its message type support libraries from
+it, and npm cannot install it for you.
 
 ```javascript
 import { Route } from "mq-bridge";
-import { register } from "mq-bridge-pulsar";
+import { register } from "mq-bridge-ros2";
 
 register(); // call once, before starting routes
 
 const route = Route.fromStr(`
-pulsar_to_file:
+ros2_to_file:
   input:
     custom:
-      name: pulsar
+      name: ros2
       config:
-        url: "pulsar://localhost:6650"
-        topic: "persistent://public/default/orders"
-        subscription: "order-workers"
-        initial_position: earliest
+        topic: "/orders/new"
+        message_type: "std_msgs/msg/String"
+        payload_field: "data"
+        qos:
+          durability: transient_local
+          depth: 100
   output:
     file:
       path: "orders.jsonl"
@@ -33,12 +43,18 @@ route.start();
 route.join(); // block until the route stops
 ```
 
-`initial_position` (optional, input only, `latest` by default) decides where
-Pulsar starts a subscription it has to create; `earliest` is what reading a
-topic's existing backlog needs. It applies only at creation — see the root
-`README.md` for the full rules.
+Every config field is optional: the topic defaults to the route name, the
+message type to `std_msgs/msg/String` and the payload field to `data`.
 
-`register()` returns the endpoint name (`pulsar`) and is a no-op when called
+`qos.durability` (optional, `volatile` by default) decides whether a
+subscription can see samples published before it matched. `transient_local` on
+both sides lets a late subscriber catch up with a **running** publisher — ROS 2
+has no broker, so retention lives in the publisher and a publisher that exits
+takes its samples with it. See the root `README.md` for the full rules, the
+payload field mapping, and the two things ROS 2 does not provide (no
+redelivery, no metadata).
+
+`register()` returns the endpoint name (`ros2`) and is a no-op when called
 again. `mq-bridge` selects the current platform's library from this package's
 `prebuilds/` directory using the shared plugin-package convention.
 
@@ -61,4 +77,6 @@ directories. Then create the single tarball that is published to npm:
 mq-bridge-package-plugin --pack --out npm
 ```
 
-Building `pulsar-rs` needs `protoc` on `PATH`.
+Every build needs a sourced ROS 2 installation, and a binary is specific to both
+the platform and the ROS distribution, because the `rcl` ABI differs between
+distributions.

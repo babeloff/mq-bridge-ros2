@@ -1,0 +1,129 @@
+schema_version: 1
+
+context:
+  version: "0.1.0"
+
+# `ros_distro` is deliberately *not* a context value: it comes from
+# variants.yaml, which makes it a variant axis. One build then produces one
+# package per distribution listed there, because the `rcl` ABI differs between
+# them and no single package could serve two.
+
+package:
+  name: mq-bridge-ros2
+  version: ${{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  # One variant per ROS distribution, so the two cannot be installed over each
+  # other by accident.
+  string: ros2_${{ ros_distro }}_h${{ hash }}_${{ build_number }}
+  script:
+    interpreter: bash
+    content: |
+      set -euxo pipefail
+
+      # `rclrs`' build script finds the ROS libraries through these. The host
+      # environment supplies them because ros-base is a host dependency, but its
+      # activation may not have run, so they are set explicitly.
+      #
+      # ros_distro below is substituted by rattler-build, not by the shell: this
+      # whole script is a Jinja template first. Avoid writing a doubled brace
+      # anywhere in it, including in a comment, or rendering fails.
+      export ROS_DISTRO="${{ ros_distro }}"
+      export AMENT_PREFIX_PATH="${PREFIX}"
+
+      # Not `./target`: CARGO_TARGET_DIR may be set in the environment this
+      # inherits, and then the copy below would look in the wrong place.
+      export CARGO_TARGET_DIR="${SRC_DIR}/target"
+
+      # Not `--locked`: Cargo.lock is not committed for this crate, so there is
+      # no lockfile in the source tree to honour and the flag would only fail.
+      # Commit one and add the flag here if byte-reproducible builds are wanted.
+      cargo build --release
+
+      # The endpoint is loaded by mq-bridge through the shared plugin-package
+      # convention: the library sits next to mq-bridge-plugin.json inside the
+      # importable package, which is what `mq_bridge_ros2.library_path()`
+      # returns. Installing it this way makes the conda package equivalent to
+      # the published wheel.
+      target="${SP_DIR}/mq_bridge_ros2"
+      mkdir -p "${target}"
+      cp python/mq_bridge_ros2/__init__.py "${target}/"
+      cp python/mq_bridge_ros2/mq-bridge-plugin.json "${target}/"
+      cp "${CARGO_TARGET_DIR}/release/libmq_bridge_ros2.so" "${target}/"
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - ${{ stdlib('c') }}
+    - rust >=1.85
+    # NOTE: no protoc here. It was a build requirement of `pulsar-rs` in the
+    # project this was forked from; `rclrs` does not use protobuf at all. If
+    # something else in this package ever needs it, add `protobuf 7.35.1` —
+    # 21.2 has been yanked from conda-forge.
+  host:
+    - python
+    # `test_msgs` and `example_interfaces` are not optional: `rclrs` vendors
+    # their generated code and links those libraries unconditionally, so the
+    # crate does not link without them even though no route uses them.
+    - ros-${{ ros_distro }}-ros-base
+    - ros-${{ ros_distro }}-test-msgs
+    - ros-${{ ros_distro }}-example-interfaces
+    - ros-${{ ros_distro }}-std-msgs
+  run:
+    - python
+    - ros-${{ ros_distro }}-ros-base
+    # The default message type, and the one every example uses.
+    - ros-${{ ros_distro }}-std-msgs
+    # Deliberately not a dependency: mq-bridge-py is installed and upgraded
+    # independently, and `register()` reports a clear error when it is absent.
+
+tests:
+  - script:
+      interpreter: bash
+      content: |
+        set -euxo pipefail
+        # Checks the two things this package is responsible for: that it has the
+        # plugin-package layout mq-bridge's loader expects, and that every ROS
+        # symbol the library needs resolves from the run environment.
+        #
+        # Deliberately does not call `mq_bridge_ros2.library_path()`, which goes
+        # through mq-bridge-py — not a dependency here, so it would fail with an
+        # ImportError that says nothing about this package.
+        python -c "
+        import ctypes, json, pathlib
+        import mq_bridge_ros2
+
+        package = pathlib.Path(mq_bridge_ros2.__file__).parent
+        contents = sorted(path.name for path in package.iterdir())
+
+        manifest = package / 'mq-bridge-plugin.json'
+        assert manifest.is_file(), contents
+        declared = json.loads(manifest.read_text())
+        assert declared['name'] == 'ros2', declared
+        assert declared['library'] == 'mq_bridge_ros2', declared
+
+        library = package / 'libmq_bridge_ros2.so'
+        assert library.is_file(), contents
+        ctypes.CDLL(str(library))
+        print('loaded', library.name, 'declaring endpoint', declared['name'])
+        "
+    requirements:
+      run:
+        - python
+
+about:
+  homepage: https://github.com/phreed/mq-bridge-ros2
+  license: MIT
+  summary: ROS 2 endpoint extension for mq-bridge
+  description: |
+    An external mq-bridge endpoint for ROS 2, implemented with rclrs
+    (ros2_rust). Message types are resolved at run time through dynamic
+    messages, so the type a route carries is named in its configuration.
+
+    Derived from mq-bridge-pulsar, with Apache Pulsar replaced by ROS 2.
+  repository: https://github.com/phreed/mq-bridge-ros2

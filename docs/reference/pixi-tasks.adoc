@@ -1,0 +1,331 @@
+= Pixi tasks
+:toc: left
+:icons: font
+
+The project's tasks, defined in `pixi.toml` and implemented as Python scripts under `pixi-scripts/`.
+
+Every task runs inside the pixi environment, which activates ROS 2.
+Arguments after the task name reach the script, so `pixi run test --unit` works.
+
+[source,console]
+----
+pixi install          # once, to create the environment
+pixi task list        # the tasks, with their descriptions
+----
+
+== Tasks
+
+[cols="1,2,3", options="header"]
+|===
+| Task | Script | Does
+
+| `build`
+| `build.py`
+| Compiles the endpoint and reports where the loadable plugin library was written.
+
+| `test`
+| `test.py`
+| Runs the unit, integration and conformance suites.
+
+| `check`
+| `check.py`
+| Formatting, clippy, version sync and a type check without ROS.
+
+| `docs`
+| `docs.py`
+| Renders this documentation.
+
+| `package`
+| `package.py`
+| Builds the conda package, and optionally the Python wheel.
+
+| `publish`
+| `publish.py`
+| Uploads and indexes the built packages in the program-forge registry.
+
+| `bump-version`
+| `bump_version.py`
+| Raises the version and propagates it to every manifest.
+
+| `sync-version`
+| `sync_version.py`
+| Makes every manifest agree with `Cargo.toml`.
+
+| `demo`
+| `demo.py`
+| Runs the example route and feeds it with `ros2 topic pub`.
+|===
+
+== `build`
+
+[source,console]
+----
+pixi run build                 # debug
+pixi run build --release       # optimised
+pixi run build --example       # also the runnable ros2_to_file example
+----
+
+Prints the path of the `cdylib`, asking cargo where its target directory is rather than assuming `./target` — `CARGO_TARGET_DIR` moves it.
+
+== `test`
+
+[source,console]
+----
+pixi run test                  # unit, integration and conformance
+pixi run test --unit
+pixi run test --integration
+pixi run test --conformance
+pixi run test --python         # additionally, the Python plugin tests
+pixi run test --node           # additionally, the npm smoke test
+----
+
+Selecting a suite does not avoid needing ROS.
+The Rust test binaries link the ROS libraries, so none of them can load without an installation — including the unit tests.
+
+The integration and conformance suites are marked `#[ignore]` so a bare `cargo test` stays fast; this task passes `--ignored` to reach them.
+Neither needs a broker.
+
+== `check`
+
+[source,console]
+----
+pixi run check                 # report
+pixi run check --fix           # rewrite formatting, then report
+----
+
+Four steps, all reported together rather than stopping at the first failure:
+
+. `cargo fmt --check`
+. `cargo clippy --all-targets -- -D warnings`
+. `scripts/set_version.py --check`
+. `cargo check --features ros-shim --all-targets`, with ROS removed from the environment
+
+The last is the configuration a contributor without ROS is in, and worth keeping working even though it cannot produce a loadable library.
+
+== `docs`
+
+[source,console]
+----
+pixi run docs                  # render to build/docs
+pixi run docs --check          # validate without writing
+----
+
+Runs `asciidoctor` with `--failure-level=WARN`, so a broken cross-reference between pages fails the task instead of quietly producing a dead link.
+`--check` converts into a temporary directory and discards it.
+
+== `package`
+
+[source,console]
+----
+pixi run package                    # one conda package per ROS distribution
+pixi run package --distro jazzy     # only that distribution, repeatable
+pixi run package --wheel            # also the Python wheel
+pixi run package --conda            # only the conda packages
+----
+
+Output goes to `build/conda` and `build/wheel`.
+
+The distributions come from the `ros_distro` list in `recipes/variants.yaml`, which is the single source of truth: the task reads it to decide what to build, and derives each build's channel from it.
+rattler-build is invoked once per distribution, with only that distribution's RoboStack channel, because `ros2-distro-mutex` cannot be resolved with two of them present — see xref:../how-to/package-the-plugin.adoc[Package the plugin for distribution].
+
+Only the packages this run produced are reported; the output directory accumulates, and a variant or version change alters the build string, so earlier packages remain and are counted separately.
+The wheel build additionally names the distribution it used, because a wheel filename cannot.
+
+== `publish`
+
+[source,console]
+----
+pixi run publish                                  # upload, then index
+pixi run publish --dry-run                        # show what would go out
+pixi run publish --force                          # replace existing packages
+pixi run publish --no-index                       # upload only, leaving the channel unpublished
+pixi run publish --endpoint-url http://host:9000  # another registry
+----
+
+Publishes only the packages matching the version in `Cargo.toml`, and refuses to proceed if any distribution is missing at that version — `build/conda` accumulates, so a stale directory would otherwise publish a half-set.
+
+Two steps, both needed: `rattler-build upload s3` puts the files in the bucket, and `rattler-index s3` regenerates `repodata.json`.
+Uploading alone is not publishing; a client reads the index and never lists the bucket.
+
+Credentials are never passed as arguments.
+The task looks for `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`, then the `AWS_*` pair, then an `s3://` entry in `~/.rattler/credentials.json`, reports which it found, and stops before contacting anything if there is none.
+
+Target defaults, each overridable by flag or environment variable:
+
+[cols="2,2,3", options="header"]
+|===
+| Flag | Environment | Default
+
+| `--channel`
+| `S3_CHANNEL`
+| `s3://program-forge/conda`
+
+| `--endpoint-url`
+| `S3_ENDPOINT_URL`
+| `https://program-forge.invalid`
+
+| `--region`
+| `S3_REGION`
+| `us-east-1` — ignored by MinIO, required by the SDK
+
+| `--addressing-style`
+| `S3_ADDRESSING_STYLE`
+| `path` — MinIO needs it; virtual-host style requires wildcard DNS per bucket
+|===
+
+See xref:../how-to/publish-to-the-registry.adoc[Publish to the program-forge registry].
+
+== Version tasks
+
+Two tasks, because choosing a new version and propagating the existing one are different jobs with different risks.
+
+`Cargo.toml` is the source of truth. These manifests are kept in step with it:
+
+* `node/package.json`
+* `node/package-lock.json` (two entries)
+* `python/pyproject.toml`
+* `recipes/recipe.yaml` — `context.version`, which the conda package version references
+
+Both delegate to `scripts/set_version.py`, which is also what CI runs, so there is one implementation of the rule.
+
+=== `bump-version`
+
+Chooses a new version and writes it everywhere.
+
+[source,console]
+----
+pixi run bump-version patch              # 0.1.0 -> 0.1.1
+pixi run bump-version minor              # 0.1.0 -> 0.2.0
+pixi run bump-version major              # 0.1.0 -> 1.0.0
+pixi run bump-version 0.4.0-rc.1         # or say it outright
+pixi run bump-version patch --dry-run    # report the new version, write nothing
+----
+
+A pre-release is *released* rather than incremented, because that is what a pre-release is: `0.2.0-rc.1` is a candidate for `0.2.0`, so a patch bump from it gives `0.2.0`.
+
+[cols="2,1,1", options="header"]
+|===
+| From | Bump | To
+
+| `0.1.0` | `patch` | `0.1.1`
+| `0.1.0` | `minor` | `0.2.0`
+| `0.1.9` | `major` | `1.0.0`
+| `0.2.0-rc.1` | `patch` | `0.2.0`
+| `0.2.0-rc.1` | `minor` | `0.3.0`
+|===
+
+That arithmetic is the only non-trivial pure logic in the task scripts, so it is covered by doctests, which `pixi run check` runs.
+
+Bumping does not rebuild.
+Artifacts already in `build/conda` still carry the old version, and `pixi run publish` refuses to publish a version it has no packages for, so the reminder to rebuild is printed rather than acted on.
+
+=== `sync-version`
+
+Propagates the version already in `Cargo.toml`, without choosing a new one.
+
+[source,console]
+----
+pixi run sync-version            # write Cargo.toml's version to the rest
+pixi run sync-version --check    # report whether they agree, and fail if not
+----
+
+Use it after editing `Cargo.toml` by hand, or when a merge has left one manifest behind:
+
+[source,text]
+----
+versions do not match Cargo.toml '0.1.0': {'node/package.json': '0.1.1', ...}
+----
+
+`--check` is what CI and `pixi run check` use.
+
+== `demo`
+
+[source,console]
+----
+pixi run demo
+pixi run demo --messages 20 --settle 5
+----
+
+Builds the example, starts the route, waits for DDS discovery, publishes with `ros2 topic pub`, then reports what arrived in `ros2-messages.jsonl`.
+
+`--settle` is the discovery wait.
+The example asks for `volatile` durability to match what `ros2 topic pub` offers, which means anything published before the two sides match is genuinely lost — so too short a wait shows fewer messages than were sent.
+
+== Dependency ranges
+
+`pixi.toml` pins ranges rather than `*`, so a manifest read on its own says what the project was tested against.
+Reproducibility comes from `pixi.lock`; the ranges exist to record the known-good floor and to put a ceiling where breakage is expected.
+
+[cols="2,1,3", options="header"]
+|===
+| Dependency | Range | Why that ceiling
+
+| `python`
+| `>=3.12,<3.13`
+| The RoboStack packages are built for `py312`. ROS pins this whether or not it is written down; saying so turns a mismatch into a solve error.
+
+| `ros-jazzy-*`
+| floor only, next major
+| The compatibility contract is the *distribution* in the package name — everything in `robostack-jazzy` is built against one `rcl` ABI. The floors record what was tested.
+
+| `rattler-build`
+| `>=0.75.0,<0.76`
+| Pre-1.0, and the task scripts hardcode its command-line surface. A pre-1.0 minor bump is where a flag gets renamed.
+
+| `rattler-index`
+| `>=0.30.11,<0.31`
+| The same reasoning.
+
+| `asciidoctor`
+| `>=2.0.20,<3`
+| Stable for years; only long-standing options are used. 3.0 would be a rewrite.
+
+| `rust`
+| `>=1.85,<1.99`
+| The floor is the crate's `rust-version`, which `rclrs` also requires. The ceiling is about `pixi run check`, not the compiler — see below.
+
+| `pyyaml`
+| `>=6.0,<7`
+| Only `safe_load`, stable across the whole 6.x line.
+|===
+
+The `rust` ceiling exists because `pixi run check` runs `cargo clippy -- -D warnings`, and every Rust release adds lints.
+A newer toolchain can therefore fail the check on code that has not changed.
+Raise it deliberately, and fix the new lints in the same commit.
+
+conda-forge's `rust` package bundles `clippy` and `rustfmt` from the same build, so `pixi run check` uses one self-consistent toolchain rather than driving a system clippy with the environment's cargo.
+
+The two rattler ceilings are the other ones that will need attention.
+Widening either is a one-line change, but do it deliberately and re-run `pixi run publish --dry-run` afterwards to confirm the flags still exist.
+
+`recipes/recipe.yaml` pins `rust >=1.85` separately for the conda build, which resolves its own build environment and does not use this one.
+
+== The shared helper
+
+`pixi-scripts/_common.py` holds what every task needs:
+
+[cols="1,3", options="header"]
+|===
+| Function | Purpose
+
+| `ros_environment()`
+| Checks `ROS_DISTRO` and `AMENT_PREFIX_PATH`, and adds the conda `lib` directory to the loader path.
+  That last part is what makes the test binaries start; nothing else puts it there.
+
+| `shim_environment()`
+| Removes ROS from the environment and sets `--cfg ros_distro` for the `ros-shim` check.
+
+| `target_directory()`
+| Asks `cargo metadata` where output goes.
+
+| `run()`
+| Echoes each command before running it, so a failure can be reproduced by hand.
+
+| `report()`
+| Prints a pass/fail summary of a multi-step task.
+|===
+
+== See also
+
+* xref:../how-to/package-the-plugin.adoc[Package the plugin for distribution]
+* xref:plugin.adoc[Plugin interface]

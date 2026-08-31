@@ -1,0 +1,185 @@
+= Diagnose a failed plugin load
+:toc: left
+:icons: font
+
+Symptoms in the order they occur, from "the library will not build" to "the route runs but receives nothing".
+Find yours and apply the fix.
+
+== The build fails with `cannot find -ltest_msgs__rosidl_generator_c`
+
+Dozens of similar lines, all for message packages you are not using.
+
+`rclrs` vendors the generated code for several message packages and links their libraries unconditionally.
+Install them:
+
+[source,console]
+----
+ros-<distro>-test-msgs
+ros-<distro>-example-interfaces
+----
+
+A `ros-base` installation does not include `test_msgs`, which is why this bites most people exactly once.
+
+== The build fails with `ROS_DISTRO environment variable not set`
+
+`rclrs`' build script needs a ROS installation.
+Source one, or use the project environment:
+
+[source,console]
+----
+pixi run build
+----
+
+If you have no ROS installation and only want to type check, use the shim:
+
+[source,console]
+----
+RUSTFLAGS='--cfg ros_distro="jazzy"' cargo check --features ros-shim --all-targets
+----
+
+That will not produce a loadable library — see xref:../explanation/plugin-model.adoc#shim[why the shim cannot build the plugin].
+
+== The test binary exits 127 with `error while loading shared libraries`
+
+For example `libaction_msgs__rosidl_typesupport_c.so: cannot open shared object file`.
+
+The library linked correctly but the loader cannot find the ROS libraries at run time.
+Their directory is not on the loader path:
+
+[source,console]
+----
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+----
+
+The pixi tasks do this for you; `pixi-scripts/_common.py` is where.
+
+== `register()` raises `FileNotFoundError`
+
+The installed package carries no library for this platform.
+
+Either the wheel was built for a different platform, or the packaging step did not stage the library.
+Check what the package thinks it has:
+
+[source,python]
+----
+import mq_bridge_ros2
+print(mq_bridge_ros2.library_path())
+----
+
+If you are testing a local change, remember that a wheel is a *compiled artifact*: an installed `mq-bridge-ros2` is easily older than your checkout.
+Rebuild and reinstall:
+
+[source,console]
+----
+python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 --out python/dist
+pip install --force-reinstall python/dist/*.whl
+----
+
+== `register()` raises `ImportError`
+
+mq-bridge itself is not installed.
+The two packages are deliberately independent, so installing this one does not pull in the host:
+
+[source,console]
+----
+pip install mq-bridge-py
+----
+
+== Loading the library fails with undefined symbols, or a mismatched distribution
+
+The artifact was built against a different ROS distribution than the one active now.
+`rclrs` selects its `rcl` bindings at compile time, so this cannot be fixed at run time.
+
+Check what you have against what is active:
+
+[source,console]
+----
+echo "$ROS_DISTRO"
+conda list | grep mq-bridge-ros2      # the build string names the distribution
+----
+
+Rebuild for the active distribution, or activate the one the artifact was built for.
+Both `humble` and `jazzy` packages are published, so this is usually an install-time mistake rather than a missing build.
+
+== A locally built library misbehaves after switching distribution
+
+You built for one distribution, sourced another, rebuilt, and the result is wrong in ways that make no sense.
+
+`rclrs`' build script reads `ROS_DISTRO` and `AMENT_PREFIX_PATH` but declares no `cargo:rerun-if-env-changed` for either, so cargo does not necessarily rerun it when only the environment changed.
+The stale build script output keeps the previous distribution's bindings and library search paths.
+
+Give each distribution its own target directory:
+
+[source,console]
+----
+CARGO_TARGET_DIR=target/humble cargo build
+----
+
+Or force the build script to rerun with `cargo clean -p mq-bridge-ros2 -p rclrs`.
+`pixi run package` is unaffected: every rattler-build variant builds in its own work directory.
+
+== The route fails immediately with `Package '<name>' was not found in any prefix`
+
+The message type's package is not on `AMENT_PREFIX_PATH`.
+`std_msgs/msg/String` needs `ros-<distro>-std-msgs` installed; a custom type needs its own package sourced.
+
+This is reported as a *permanent* error, so the route stops rather than retrying — no amount of waiting installs a package.
+
+== The route fails with `message type ... does not have the form <package>/msg/<Type>`
+
+`message_type` must have exactly three segments with `msg` in the middle.
+`std_msgs/String` and `std_msgs/srv/Trigger` are both rejected.
+
+== The route fails with `is not a valid ROS 2 topic name`
+
+ROS names allow only letters, digits, underscores and `/`, and may not start a segment with a digit.
+Hyphens are the usual culprit, because they are perfectly legal in an mq-bridge route name.
+
+Names the endpoint *derives* from the route name are sanitised for you — route `round-trip-1` becomes node `mq_bridge_round_trip_1`.
+A name you write out is never rewritten, only accepted or rejected.
+
+== The route starts, reports no errors, and receives nothing
+
+This is the one with no error message, and almost always a QoS mismatch.
+DDS only delivers between endpoints whose policies are compatible, and an incompatible pair simply never matches.
+
+Check, in this order:
+
+. *Durability.* A `volatile` publisher cannot satisfy a `transient_local` subscription. `ros2 topic pub` offers `volatile`.
+. *Reliability.* A `best_effort` publisher cannot satisfy a `reliable` subscription.
+. *Message type.* Two different types on the same topic name are two different DDS topics. `std_msgs/msg/String` and `example_interfaces/msg/String` have identical fields and still do not match.
+. *Domain.* Both sides need the same `ROS_DOMAIN_ID`, and this endpoint's `domain_id` overrides the environment.
+. *Topic name.* A relative name is resolved against the node's namespace, so `orders` under namespace `/ingest` is `/ingest/orders`, not `/orders`.
+
+Ask ROS what it sees:
+
+[source,console]
+----
+ros2 topic info /your_topic --verbose
+----
+
+That prints publisher and subscription counts with their QoS profiles, which makes an incompatible pair obvious.
+`ros2 node list` will confirm the endpoint's node joined the graph at all.
+
+== The route receives fewer messages than were published
+
+Two distinct causes.
+
+With `volatile` durability, samples published before discovery matched the two sides are genuinely lost.
+That is expected, not a fault; see xref:receive-earlier-messages.adoc[Receive messages published before the route started].
+
+Otherwise the route may be falling behind its own `qos.depth`.
+The consumer buffers at most `depth` messages between the ROS callback and the route and discards the oldest beyond that, mirroring a KEEP_LAST reader queue.
+Discards are counted and reported on stderr when the endpoint closes:
+
+[source,text]
+----
+mq-bridge-ros2: discarded 41 message(s) that overflowed `qos.depth` on node mq_bridge_orders
+----
+
+Raise `depth`, or use `history: keep_all` to remove the bound.
+
+== See also
+
+* xref:../reference/configuration.adoc[Endpoint configuration] — defaults and validation rules.
+* xref:../explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus] — why silence is a normal DDS outcome.

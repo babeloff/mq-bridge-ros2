@@ -1,0 +1,258 @@
+= Publish to the program-forge registry
+:toc: left
+:icons: font
+
+How to get the built conda packages into the project's MinIO-backed conda registry, and how to consume them afterwards.
+
+[source,console]
+----
+pixi run package                              # build them first
+pixi run publish --dry-run                    # check what would go out
+pixi run publish                              # upload and index
+----
+
+== Before you start
+
+Build the packages.
+Publishing never builds, so that a publish cannot quietly ship something other than what you tested:
+
+[source,console]
+----
+pixi run package
+----
+
+Only packages matching the version in `Cargo.toml` are published.
+`build/conda` accumulates — a version or variant change alters the filename — so a run refuses to proceed if any distribution is missing at the current version, rather than publishing a half-set.
+
+== Provide credentials
+
+Credentials are never passed as command-line arguments, where they would land in shell history and in the process list.
+Use any one of these; the task reports which it found:
+
+[source,console]
+----
+export S3_ACCESS_KEY_ID=...
+export S3_SECRET_ACCESS_KEY=...
+----
+
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` work too, as does an `s3://` entry in `~/.rattler/credentials.json`, which is the more idiomatic place for a pixi setup:
+
+[source,json]
+----
+{
+  "s3://program-forge": {
+    "S3Credentials": {
+      "access_key_id": "...",
+      "secret_access_key": "..."
+    }
+  }
+}
+----
+
+If none of the three is present the task stops before contacting anything and lists the options.
+`--dry-run` works without credentials.
+
+== Check first
+
+[source,console]
+----
+pixi run publish --dry-run
+----
+
+[source,text]
+----
+package:  mq-bridge-ros2 0.1.0
+registry: https://program-forge.invalid
+channel:  s3://program-forge/conda
+publishing 2 package(s):
+  build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
+  build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+
+dry run, nothing contacted. The commands would be:
+
+  rattler-build upload s3 --channel s3://program-forge/conda ...
+  rattler-index s3 s3://program-forge/conda ...
+----
+
+Nothing is contacted, so this is safe to run against a registry you are not sure about.
+
+== Publish
+
+[source,console]
+----
+pixi run publish
+----
+
+The channel then holds, per platform subdirectory, the packages and a regenerated index:
+
+[source,text]
+----
+conda/linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
+conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+conda/linux-64/repodata.json
+conda/linux-64/repodata.json.zst
+conda/linux-64/repodata_shards.msgpack.zst
+conda/noarch/repodata.json
+----
+
+== Why publishing is two steps
+
+Uploading is not publishing.
+A conda channel *is* its `repodata.json`: a client reads that file to learn what exists, and never lists the bucket.
+Packages uploaded without a regenerated index are invisible — present, paid for in storage, and unusable.
+
+`rattler-build upload` does not index, so the task runs `rattler-index s3` afterwards.
+
+`--no-index` skips it, which is only useful when publishing several projects in a row and indexing once at the end.
+The task says plainly that it left the channel unpublished:
+
+[source,console]
+----
+pixi run publish --no-index
+----
+
+== Re-publishing the same version
+
+The upload refuses to overwrite:
+
+[source,text]
+----
+Error: × Package s3://program-forge/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+  │ already exists. Use --force to overwrite.
+----
+
+That is a feature — a published version should be immutable, and the usual right answer is to bump the version:
+
+[source,console]
+----
+pixi run bump-version patch && pixi run package && pixi run publish
+----
+
+Use `--force` only when replacing a package nobody has installed yet:
+
+[source,console]
+----
+pixi run publish --force
+----
+
+== Consume the channel
+
+Add it to a pixi manifest ahead of the RoboStack channel the package's dependencies come from:
+
+[source,toml]
+----
+[workspace]
+channels = [
+    "s3://program-forge/conda",
+    "https://prefix.dev/robostack-jazzy",
+    "conda-forge",
+]
+
+[dependencies]
+mq-bridge-ros2 = "*"
+----
+
+Because the ROS distribution is in the build string, ask for the one you want explicitly when both are published:
+
+[source,toml]
+----
+mq-bridge-ros2 = { version = "*", build = "ros2_jazzy_*" }
+----
+
+The consuming environment needs S3 credentials for the channel in the same way this task does.
+
+== Point it at another registry
+
+Every part of the target is overridable, by flag or by environment variable:
+
+[cols="2,2,3", options="header"]
+|===
+| Flag | Environment | Default
+
+| `--channel`
+| `S3_CHANNEL`
+| `s3://program-forge/conda`
+
+| `--endpoint-url`
+| `S3_ENDPOINT_URL`
+| `https://program-forge.invalid`
+
+| `--region`
+| `S3_REGION`
+| `us-east-1`
+
+| `--addressing-style`
+| `S3_ADDRESSING_STYLE`
+| `path`
+|===
+
+Two of those defaults are worth understanding.
+
+`--addressing-style path`::
+MinIO is addressed path-style — `endpoint/bucket/key`.
+Virtual-host style, the S3 default, puts the bucket in the hostname and needs a wildcard DNS record per bucket, which a local deployment almost never has.
+
+`--region us-east-1`::
+MinIO ignores the region entirely, but the AWS SDK refuses to build a client without one.
+
+[NOTE]
+====
+`program-forge.invalid` uses the `.invalid` top-level domain, which RFC 2606 reserves as permanently non-resolvable.
+It will not resolve through public DNS from anywhere, by design, so the name has to be mapped locally — in `/etc/hosts`, in a split-horizon resolver, or in the container network the registry runs in.
+
+On a machine where it is not mapped, point the task at the registry directly:
+
+[source,console]
+----
+pixi run publish --endpoint-url http://127.0.0.1:9000
+----
+====
+
+== Try it against a throwaway registry
+
+Worth doing before trusting a real one, and how the task itself was verified.
+Start a MinIO, create the bucket, publish to it, and inspect the result:
+
+[source,console]
+----
+MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+  minio server /tmp/minio-data --address 127.0.0.1:9000 &
+
+mc alias set forge http://127.0.0.1:9000 minioadmin minioadmin
+mc mb forge/program-forge
+
+S3_ACCESS_KEY_ID=minioadmin S3_SECRET_ACCESS_KEY=minioadmin \
+  pixi run publish --endpoint-url http://127.0.0.1:9000
+
+mc ls -r forge/program-forge/
+mc cat forge/program-forge/conda/linux-64/repodata.json
+----
+
+The repodata is the thing to check.
+Both packages should be listed, with their ROS dependencies distribution-specific:
+
+[source,text]
+----
+mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
+  depends=['python', 'ros-humble-ros-base', 'ros-humble-std-msgs', ...]
+mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+  depends=['python', 'ros-jazzy-ros-base', 'ros-jazzy-std-msgs', ...]
+----
+
+[WARNING]
+====
+Stop only the server you started.
+`pkill -f "minio server"` will also kill any other MinIO on the machine, including the real registry if it runs locally.
+Find the specific process first:
+
+[source,console]
+----
+pgrep -af "minio server /tmp/minio-data"
+kill <that pid>
+----
+====
+
+== See also
+
+* xref:package-the-plugin.adoc[Package the plugin for distribution] — producing the artifacts this publishes.
+* xref:../reference/pixi-tasks.adoc[Pixi tasks] — the task's full options.

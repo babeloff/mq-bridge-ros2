@@ -1,0 +1,136 @@
+= Run the same endpoint as a plugin
+:toc: left
+:icons: font
+
+In xref:first-ros2-route.adoc[the first tutorial] the endpoint was compiled into the program that used it.
+That is the least interesting of its three lives.
+
+In this tutorial you will take the *same compiled library* and load it at run time into a host that was never built against this crate.
+This is how the Python and npm packages work, and it is the mechanism most of the rest of this documentation is about.
+
+== What you need
+
+The environment from the first tutorial, and a successful build:
+
+[source,console]
+----
+pixi install
+pixi run build
+----
+
+The last line of that output is the file this tutorial is about:
+
+[source,text]
+----
+loadable plugin library:
+  /path/to/target/debug/libmq_bridge_ros2.so
+----
+
+== Step 1: understand what you just built
+
+`Cargo.toml` asks for two library kinds:
+
+[source,toml]
+----
+crate-type = ["rlib", "cdylib"]
+----
+
+The `rlib` is for Rust programs that link this crate directly.
+The `cdylib` — `libmq_bridge_ros2.so` — is a plain shared library with one exported entry point that mq-bridge knows how to call.
+Nothing about it is Rust-specific from the caller's side, which is exactly why a Python interpreter can load it.
+
+== Step 2: watch a host load it
+
+You do not have to write a host to see this: the conformance test already does it, twice, and asserts the two paths behave identically.
+
+[source,console]
+----
+pixi run test --conformance
+----
+
+That test does four things worth reading in `tests/plugin.rs`:
+
+. runs mq-bridge's endpoint conformance suite against `Ros2Factory` linked directly into the test binary;
+. compiles the `cdylib` and calls `load_endpoint_plugin` on it;
+. asserts the loaded plugin reports the name `ros2` and supports both a consumer and a publisher;
+. runs the *same* suite against the factory the host built from the loaded library, and requires the results to match.
+
+A pass means the ABI round trip preserved the endpoint's behaviour.
+That is the guarantee the Python and npm packages rely on, since they load that very library.
+
+== Step 3: load it yourself, from Rust
+
+The host side is one call.
+Registration happens as part of loading, so nothing else is needed before a route can name `ros2`:
+
+[source,rust]
+----
+mq_bridge::plugin::load_endpoint_plugin("./target/debug/libmq_bridge_ros2.so")?;
+----
+
+Compare that with the linked case, which is what the example in the first tutorial used:
+
+[source,rust]
+----
+mq_bridge_ros2::register()?;
+----
+
+Both end with an endpoint named `ros2` in mq-bridge's registry, and a route cannot tell which happened.
+
+== Step 4: see how the packages find the library
+
+The Python and npm packages do not hardcode a path.
+They follow mq-bridge's *plugin package* convention: a small manifest next to the library, both inside the importable package.
+
+Look at `python/mq_bridge_ros2/mq-bridge-plugin.json`:
+
+[source,json]
+----
+{
+  "name": "ros2",
+  "library": "mq_bridge_ros2"
+}
+----
+
+`name` is the endpoint name a route will use.
+`library` is the stem of the shared library filename, without the platform's prefix or extension, so one manifest serves `libmq_bridge_ros2.so`, `libmq_bridge_ros2.dylib` and `mq_bridge_ros2.dll`.
+
+`register()` in either language hands the package directory to mq-bridge's generic loader, which reads that manifest, works out the right filename for the current platform, and loads it.
+This is why neither package contains an implementation of anything.
+
+== Step 5: build a loadable package and prove it loads
+
+Build the conda package, which stages the library into the importable Python package exactly as a release would:
+
+[source,console]
+----
+pixi run package
+----
+
+The recipe's own test then does the check that matters: it imports `mq_bridge_ros2`, asks it for `library_path()`, and `dlopen`s the result.
+If every ROS symbol the library needs resolves from the run environment, that succeeds.
+If the ROS dependencies were wrong, it fails there rather than in a user's route.
+
+== A warning about identity
+
+You now have an artifact that loads.
+It is more specific than it looks.
+
+`rclrs` selects its `rcl` bindings at compile time, and that ABI differs between ROS distributions.
+A library built against `jazzy` is not usable on `humble`, even on the same operating system and architecture.
+The conda recipe puts the distribution in the package's build string for exactly this reason.
+
+A Python wheel's platform tag has no room to say which ROS it was built for, so nothing stops a user installing a mismatched wheel.
+It will fail at load time, and xref:../how-to/diagnose-a-failed-plugin-load.adoc[Diagnose a failed plugin load] covers what that looks like.
+
+== What you have learned
+
+* One `cdylib` serves Rust, Python and Node.js; the packages ship it and delegate loading to mq-bridge.
+* Loading registers the endpoint, so a route cannot tell a plugin from a linked crate.
+* The plugin package convention is a manifest plus a library, and the manifest names the endpoint and the library stem.
+* A built artifact is specific to a platform *and* a ROS distribution.
+
+== Next
+
+* xref:../explanation/plugin-model.adoc[How mq-bridge loads this endpoint] — the mechanism, and why it is arranged this way.
+* xref:../how-to/package-the-plugin.adoc[Package the plugin for distribution] — producing the artifacts properly.

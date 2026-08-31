@@ -1,0 +1,138 @@
+= Delivery semantics on a brokerless bus
+:toc: left
+:icons: font
+
+mq-bridge's other endpoints mostly talk to brokers.
+ROS 2 is not a broker, and three habits that a broker-backed route can rely on do not survive the move.
+
+This page is about what changes and why, so that the gaps read as properties of the transport rather than omissions in this endpoint.
+
+== There is no broker at all
+
+DDS, which ROS 2 is built on, connects publishers and subscriptions directly.
+Discovery finds peers on the network, matches compatible pairs,
+and data flows between the two processes with nothing in the middle.
+
+Everything below follows from that one fact.
+There is no third party to hold a message, remember who has read it,
+or tell a publisher that a subscriber had a problem — because there is no third party.
+
+== No acknowledgement, so no redelivery
+
+A broker-backed consumer acknowledges a message, and the broker holds it until then.
+Negatively acknowledge it and the broker delivers it again, perhaps to someone else.
+
+DDS sends nothing from a reader back to a writer at the application level.
+`reliability: reliable` does involve middleware-level retransmission,
+but that is DDS making sure the sample arrives at a matched reader —
+it has nothing to do with whether the application succeeded in handling it,
+and it is finished long before a route's downstream sees the message.
+
+mq-bridge's consumer contract still asks for a disposition per message,
+and this endpoint still enforces the count.
+But the dispositions themselves cannot be acted on: by the time a route reports `Nack`,
+the message exists only in that route's own memory, and there is nothing anywhere to redeliver it from.
+The commit callback accepts it and the message is gone.
+
+The conformance suite is told this explicitly, with `expect_redelivery = false`.
+That is not the suite being weakened to get a pass —
+the alternative is a suite that waits for a redelivery that no correct implementation could produce.
+
+*What this means for a route.* If losing a message on a downstream failure is unacceptable,
+ROS 2 cannot be the durable side of that route.
+Bridge it to something that can be, and let the broker own the retry.
+
+== No metadata
+
+A canonical mq-bridge message is a payload plus a string map.
+Most brokers have somewhere to put that map —
+Pulsar properties, Kafka headers, AMQP application properties.
+
+A ROS 2 message has exactly the fields its `.msg` file declares.
+There is no property map, no header extension, nowhere to hide a dictionary.
+
+So metadata on a published message is dropped.
+The alternative — encoding it into some other field of the message,
+or wrapping the payload in a private envelope — was rejected deliberately:
+it would put data somewhere no ordinary ROS subscriber would look for it,
+and would make this endpoint's messages unreadable by the rest of the graph.
+Interoperating with real ROS nodes is the whole point of the endpoint.
+
+In the other direction a received message carries two entries, `ros2_topic` and `ros2_message_type`,
+because those are facts the endpoint knows rather than data it received.
+
+*What this means for a route.* If metadata has to survive, it must be part of the payload —
+serialise it into the bytes you send, and parse it on the other side.
+
+== No durable log, and `transient_local` is not one
+
+`qos.durability: transient_local` looks like a backlog and is not.
+
+The retention lives in the *publisher*.
+A transient-local writer keeps its last `depth` samples and hands them to readers that match later.
+When the publishing process exits, its retained samples go with it.
+There is no store, and nothing survives the writer.
+
+It is also bounded by `depth`, and it is not a cursor:
+a restarted subscription gets whatever the publisher still holds,
+not the position it had reached before.
+No offset is committed anywhere, because there is nowhere to commit one.
+
+It is genuinely useful for one thing —
+letting a late-joining subscription catch up with a publisher that is still running —
+and xref:../how-to/receive-earlier-messages.adoc[the how-to guide] covers that case.
+
+== Incompatible QoS produces silence, not errors
+
+This is the consequence that surprises people most,
+and it is worth stating separately because it is not a limitation so much as a different failure model.
+
+DDS matches two endpoints only when the publisher's offered policies are at least as strong as the subscription's requested ones.
+When they are not, the two simply never match.
+No connection is attempted, so nothing fails.
+
+The result is a route that starts cleanly, reports no error, and receives nothing indefinitely.
+A `volatile` publisher against a `transient_local` subscription is the usual case, and `ros2 topic pub` offers `volatile` —
+which is exactly why this project's example asks for the default rather than the seemingly safer `transient_local`.
+
+Message type is part of the same matching:
+`std_msgs/msg/String` and `example_interfaces/msg/String` have identical fields and different type names, and DDS matches on the name.
+
+`ros2 topic info --verbose` prints both sides' profiles and is the fastest way to see a mismatch.
+xref:../how-to/diagnose-a-failed-plugin-load.adoc[The diagnosis guide] lists the checks in order.
+
+== A queue this endpoint has to keep, and why its policy is borrowed
+
+mq-bridge consumers *pull*: `receive_batch` asks for up to N messages.
+`rclrs` subscriptions *push*: they invoke a callback, and expose no way to take a message on demand.
+
+Something has to sit between them, and that something needs an overflow policy —
+which is a decision about when to lose data, so it should not be invented quietly.
+
+Rather than pick a buffer size, the endpoint reuses the policy the route already stated.
+`history: keep_last` with `depth: N` holds at most N messages and discards the oldest beyond that,
+which is precisely what a KEEP\_LAST reader queue upstream does anyway;
+the route's stated intent is applied twice rather than contradicted once.
+`history: keep_all` holds everything and lets memory be the only bound, matching what "keep all" asks for.
+
+Discards are counted and reported on stderr when the endpoint closes,
+because a route that routinely overflows its own `depth` is losing data by configuration and should be told.
+
+== What does carry over unchanged
+
+It is worth being clear about what did *not* change, since the list above is all caveats.
+
+* Ordering within a topic from a single publisher is preserved, and the integration suite asserts it.
+* Batching works normally:
+  `receive_batch` fills up to the route's batch size,
+  and the batch commit callback is invoked after downstream processing.
+* `exit_on_empty` works: an idle topic yields an empty batch, which ends a draining route.
+* Publishing a batch attempts every message, and failures come back attached to the messages the route must retry,
+  so one rejected message does not hide the fate of the rest.
+* The error classification a route depends on is intact —
+  configuration and type errors stop the route, transient failures are retried.
+
+== See also
+
+* xref:../reference/configuration.adoc#qos[`qos` reference] — the compatibility table.
+* xref:plugin-model.adoc[How mq-bridge loads this endpoint]

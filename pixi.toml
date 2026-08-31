@@ -1,0 +1,104 @@
+[workspace]
+authors = ["Fredrick Eisele <fred.eisele@vanderbilt.edu>"]
+channels = [
+    "https://prefix.dev/meso-forge",
+    # RoboStack packages ROS 2 for conda, which is the only way to get a ROS
+    # installation into an environment uniformly across platforms. `rclrs`
+    # links `rcl`, so there is no build of this crate without one.
+    "https://prefix.dev/robostack-jazzy",
+    "conda-forge",
+]
+name = "mq-bridge-ros2"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+# Every task is a Python script under pixi-scripts/, so the logic is readable,
+# reviewable and runnable on its own. Arguments after the task name reach the
+# script: `pixi run test --unit`, `pixi run version 0.2.0`.
+[tasks.build]
+cmd = "python pixi-scripts/build.py"
+description = "Compile the endpoint and its loadable plugin library"
+
+[tasks.test]
+cmd = "python pixi-scripts/test.py"
+description = "Run the unit, ROS 2 integration and plugin conformance suites"
+
+[tasks.check]
+cmd = "python pixi-scripts/check.py"
+description = "Formatting, clippy, version sync, doctests and a type check without ROS"
+
+[tasks.docs]
+cmd = "python pixi-scripts/docs.py"
+description = "Render the AsciiDoc documentation to build/docs"
+
+[tasks.package]
+cmd = "python pixi-scripts/package.py"
+description = "Build the conda package from recipes/recipe.yaml"
+
+[tasks.publish]
+cmd = "python pixi-scripts/publish.py"
+description = "Upload and index the built conda packages in the program-forge registry"
+
+[tasks.bump-version]
+cmd = "python pixi-scripts/bump_version.py"
+description = "Raise the version (major/minor/patch or explicit) across every manifest"
+
+[tasks.sync-version]
+cmd = "python pixi-scripts/sync_version.py"
+description = "Make every manifest agree with the version in Cargo.toml"
+
+[tasks.demo]
+cmd = "python pixi-scripts/demo.py"
+description = "Run the example route and feed it with ros2 topic pub"
+
+[dependencies]
+# Pinned to the ABI the RoboStack packages are built for. Their build strings
+# say `py312`, so ROS constrains this whether or not it is written down; saying
+# it here makes a mismatch a solve error rather than a puzzling import failure.
+python = ">=3.12,<3.13"
+
+# ROS 2. `test-msgs` and `example-interfaces` are not optional even though no
+# route uses them: `rclrs` vendors their generated code and links those
+# libraries unconditionally, so the crate does not link without them.
+#
+# The compatibility contract for these is the *distribution* in the package
+# name, not the version — everything in `robostack-jazzy` is built against one
+# `rcl` ABI. So the floors below record what the endpoint was tested against,
+# and the ceilings only exclude a new major, where message definitions could
+# change.
+ros-jazzy-ros-base = ">=0.11,<1"
+ros-jazzy-test-msgs = ">=2.0,<3"
+ros-jazzy-example-interfaces = ">=0.12,<1"
+ros-jazzy-std-msgs = ">=5.3,<6"
+
+# The Rust toolchain, so a `pixi run` compiles with the same compiler
+# everywhere rather than whatever happens to be on PATH.
+#
+# The floor is the crate's own `rust-version`, which `rclrs` also requires. The
+# ceiling is about `pixi run check`, not about the compiler: it runs
+# `cargo clippy -- -D warnings`, and every Rust release adds lints, so a new
+# toolchain can fail the check on code that has not changed. Raise it
+# deliberately and fix the new lints in the same commit.
+rust = ">=1.85,<1.99"
+
+# Task tooling.
+#
+# The two rattler tools are held to the current minor on purpose. They are
+# pre-1.0, the task scripts hardcode their command-line surface
+# (`build --variant`, `upload s3 --addressing-style`, `index s3`), and a pre-1.0
+# minor bump is exactly where a flag gets renamed. Widening these is a one-line
+# change — do it deliberately, and re-run `pixi run publish --dry-run` after.
+rattler-build = ">=0.75.0,<0.76"
+# Uploading is not publishing: a conda channel is its repodata.json, and
+# `rattler-build upload` does not regenerate it.
+rattler-index = ">=0.30.11,<0.31"
+
+# Stable for years, and `docs.py` uses only long-standing options
+# (`--failure-level`, `--source-dir`, `--destination-dir`). 3.0 would be a
+# rewrite.
+asciidoctor = ">=2.0.20,<3"
+
+# `package.py` reads recipes/variants.yaml to learn which ROS distributions to
+# build for, and derives the build channels from that list. Only `safe_load` is
+# used, which has been stable across the whole 6.x line.
+pyyaml = ">=6.0,<7"

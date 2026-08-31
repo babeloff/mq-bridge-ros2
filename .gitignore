@@ -9,6 +9,13 @@ node/node_modules/
 python/dist/
 python/build/
 python/*.egg-info/
-python/mq_bridge_pulsar/*.so
-python/mq_bridge_pulsar/*.dylib
-python/mq_bridge_pulsar/*.dll
+python/mq_bridge_ros2/*.so
+python/mq_bridge_ros2/*.dylib
+python/mq_bridge_ros2/*.dll
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+# pixi task output: rendered docs, conda packages, wheels
+/build/
+# written by `pixi run demo` and the example route
+/ros2-messages.jsonl

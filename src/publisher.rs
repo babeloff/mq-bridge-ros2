@@ -1,53 +1,84 @@
 use std::any::Any;
 
-use anyhow::Context;
 use async_trait::async_trait;
-use futures::future::join_all;
 use mq_bridge::{errors::PublisherError, traits::MessagePublisher, CanonicalMessage, SentBatch};
-use pulsar::{
-    error::Error as PulsarError,
-    producer::{Message as PulsarMessage, Producer, ProducerOptions},
-    TokioExecutor,
+use rclrs::{
+    DynamicMessageMetadata, DynamicPublisher, MessageTypeName, PublisherOptions, RclrsError,
 };
-use tokio::sync::Mutex;
 
-use crate::{config, connect};
+use crate::{
+    config, message,
+    runtime::{self, Ros2Runtime},
+};
 
-struct PulsarPublisher {
-    inner: Mutex<Producer<TokioExecutor>>,
-}
-
-fn to_pulsar_message(message: &CanonicalMessage) -> PulsarMessage {
-    PulsarMessage {
-        payload: message.payload.to_vec(),
-        properties: message.metadata.clone(),
-        ..Default::default()
-    }
+struct Ros2Publisher {
+    publisher: DynamicPublisher,
+    /// Also the factory for the messages being sent: a dynamic message can only
+    /// be built from the metadata of its own type.
+    metadata: DynamicMessageMetadata,
+    payload_field: String,
+    /// Declared after the publisher so the executor stops before the publisher
+    /// it belongs to is torn down.
+    runtime: Ros2Runtime,
 }
 
 pub(crate) async fn create(
     route_name: &str,
     value: &serde_json::Value,
 ) -> anyhow::Result<Box<dyn MessagePublisher>> {
-    let (config, topic, _) = config::resolve_for_publisher(route_name, value)?;
-    let client = connect(&config.url).await?;
-    let producer = client
-        .producer()
-        .with_topic(topic)
-        .with_options(ProducerOptions {
-            batch_size: Some(1_000),
-            ..Default::default()
-        })
-        .build()
-        .await
-        .context("failed to create Pulsar producer")?;
-    Ok(Box::new(PulsarPublisher {
-        inner: Mutex::new(producer),
+    let endpoint = config::resolve_for_publisher(route_name, value)?;
+
+    let message_type = MessageTypeName::try_from(endpoint.config.message_type.as_str())
+        .map_err(|error| non_retryable(anyhow::Error::new(error)))?;
+    let metadata = DynamicMessageMetadata::new(message_type.clone())
+        .map_err(|error| non_retryable(anyhow::Error::new(error)))?;
+    message::carrier_for(metadata.structure(), &endpoint.config.payload_field)
+        .map_err(non_retryable)?;
+
+    let qos = endpoint.config.qos.profile();
+    let (runtime, publisher) = Ros2Runtime::start(&endpoint, |node| {
+        let mut options = PublisherOptions::new(&endpoint.topic);
+        options.qos = qos;
+        node.create_dynamic_publisher(message_type.clone(), options)
+    })
+    .map_err(|error| {
+        setup_error(error).context(format!(
+            "failed to publish on ROS 2 topic {}",
+            endpoint.topic
+        ))
+    })?;
+
+    Ok(Box::new(Ros2Publisher {
+        publisher,
+        metadata,
+        payload_field: endpoint.config.payload_field.clone(),
+        runtime,
     }))
 }
 
+impl Ros2Publisher {
+    /// Publishing is synchronous and produces no receipt, so this is the whole
+    /// of sending one message. Note that no `.await` may appear here: a
+    /// `DynamicMessage` owns raw type-support memory and is not `Send`.
+    fn publish(&self, message: &CanonicalMessage) -> Result<(), PublisherError> {
+        let mut outgoing = self
+            .metadata
+            .create()
+            .map_err(|error| PublisherError::NonRetryable(anyhow::Error::new(error)))?;
+        // A payload that is not valid UTF-8 for a string field, or does not fit
+        // a bounded one, will not become valid by being sent again.
+        message::set_payload(&mut outgoing, &self.payload_field, &message.payload)
+            .map_err(PublisherError::NonRetryable)?;
+        self.publisher.publish(outgoing).map_err(publisher_error)
+    }
+}
+
 #[async_trait]
-impl MessagePublisher for PulsarPublisher {
+impl MessagePublisher for Ros2Publisher {
+    /// Metadata does not survive this direction. A ROS 2 message carries only
+    /// the fields its type declares, with no property map to put a canonical
+    /// message's metadata in, so it is dropped rather than smuggled somewhere a
+    /// consumer would not think to look.
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -56,23 +87,14 @@ impl MessagePublisher for PulsarPublisher {
             return Ok(SentBatch::Ack);
         }
 
-        let payloads: Vec<PulsarMessage> = messages.iter().map(to_pulsar_message).collect();
-        let receipts = {
-            let mut producer = self.inner.lock().await;
-            let receipts = producer.send_all(payloads).await.map_err(publisher_error)?;
-            producer.send_batch().await.map_err(publisher_error)?;
-            receipts
-        };
-
-        // Every receipt is awaited: a broker rejecting one message must not hide
-        // the fate of the rest. Receipts come back in send order, so the failures
-        // zip straight back onto the messages the route has to retry.
-        let failed: Vec<(CanonicalMessage, PublisherError)> = join_all(receipts)
-            .await
+        // Every message is attempted: one the middleware rejects must not hide
+        // the fate of the rest, and the failures are handed back attached to the
+        // messages the route has to retry.
+        let failed: Vec<(CanonicalMessage, PublisherError)> = messages
             .into_iter()
-            .zip(messages)
-            .filter_map(|(receipt, message)| {
-                receipt.err().map(|error| (message, publisher_error(error)))
+            .filter_map(|message| match self.publish(&message) {
+                Ok(()) => None,
+                Err(error) => Some((message, error)),
             })
             .collect();
 
@@ -86,13 +108,11 @@ impl MessagePublisher for PulsarPublisher {
         }
     }
 
+    /// Nothing to do: `publish` hands the sample straight to the middleware, and
+    /// there is no producer-side batch to force out. Getting the sample to a
+    /// reader is the `reliability` policy's job, not a flush's.
     async fn flush(&self) -> anyhow::Result<()> {
-        self.inner
-            .lock()
-            .await
-            .send_batch()
-            .await
-            .context("failed to flush Pulsar producer")
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -100,41 +120,63 @@ impl MessagePublisher for PulsarPublisher {
     }
 }
 
-fn publisher_error(error: PulsarError) -> PublisherError {
-    match error {
-        PulsarError::Authentication(_) => PublisherError::NonRetryable(anyhow::Error::new(error)),
-        PulsarError::Custom(_) => PublisherError::NonRetryable(anyhow::Error::new(error)),
-        _ => PublisherError::Retryable(anyhow::Error::new(error)),
+impl Drop for Ros2Publisher {
+    fn drop(&mut self) {
+        self.runtime.shutdown();
+    }
+}
+
+fn non_retryable(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(PublisherError::NonRetryable(error))
+}
+
+/// Leaving a transient failure unclassified is deliberate: the route then treats
+/// it as a connection failure and retries on its reconnect interval.
+fn setup_error(error: RclrsError) -> anyhow::Error {
+    if runtime::is_permanent(&error) {
+        non_retryable(anyhow::Error::new(error))
+    } else {
+        anyhow::Error::new(error)
+    }
+}
+
+fn publisher_error(error: RclrsError) -> PublisherError {
+    if runtime::is_permanent(&error) {
+        PublisherError::NonRetryable(anyhow::Error::new(error))
+    } else {
+        PublisherError::Retryable(anyhow::Error::new(error))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rclrs::{DynamicMessageError, RclReturnCode};
 
     #[test]
     fn publisher_errors_are_classified_for_retry() {
+        // A publisher that timed out may well succeed next time.
         assert!(matches!(
-            publisher_error(PulsarError::Executor),
+            publisher_error(RclrsError::RclError {
+                code: RclReturnCode::Timeout,
+                msg: None
+            }),
             PublisherError::Retryable(_)
         ));
+        // A message type that is not installed will never install itself.
         assert!(matches!(
-            publisher_error(PulsarError::Custom("invalid message".into())),
+            publisher_error(RclrsError::DynamicMessageError {
+                err: DynamicMessageError::InvalidMessageType
+            }),
             PublisherError::NonRetryable(_)
         ));
-    }
-
-    #[test]
-    fn canonical_metadata_becomes_pulsar_properties() {
-        let mut message = CanonicalMessage::from("payload");
-        message.metadata.insert("source".into(), "test".into());
-
-        let pulsar = to_pulsar_message(&message);
-
-        assert_eq!(pulsar.payload, b"payload");
-        assert_eq!(
-            pulsar.properties.get("source").map(String::as_str),
-            Some("test")
-        );
+        // Neither will a topic name `rcl` refuses.
+        assert!(matches!(
+            publisher_error(RclrsError::RclError {
+                code: RclReturnCode::TopicNameInvalid,
+                msg: None
+            }),
+            PublisherError::NonRetryable(_)
+        ));
     }
 }

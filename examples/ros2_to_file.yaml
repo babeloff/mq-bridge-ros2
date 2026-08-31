@@ -1,0 +1,21 @@
+routes:
+  ros2_to_file:
+    batch_size: 100
+    input:
+      custom:
+        name: ros2
+        config:
+          # The topic defaults to the route name and the message type to
+          # std_msgs/msg/String, so this route is fed by:
+          #
+          #   ros2 topic pub /ros2_to_file std_msgs/msg/String "{data: hello}"
+          #
+          # The QoS is left at the ROS defaults deliberately. `ros2 topic pub`
+          # offers `volatile` durability, and a `volatile` publisher does not
+          # match a `transient_local` subscription at all, so asking for
+          # durability here would make the example silently receive nothing.
+          qos:
+            depth: 100
+    output:
+      file:
+        path: "ros2-messages.jsonl"

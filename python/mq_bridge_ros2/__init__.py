@@ -1,4 +1,4 @@
-"""Apache Pulsar endpoint plugin for mq-bridge."""
+"""ROS 2 endpoint plugin for mq-bridge."""
 
 from pathlib import Path
 
@@ -13,7 +13,7 @@ def library_path() -> str:
 
 
 def register() -> str:
-    """Register the ``pulsar`` endpoint and return its name."""
+    """Register the ``ros2`` endpoint and return its name."""
     from mq_bridge import load_plugin_package
 
     return load_plugin_package(_PACKAGE)

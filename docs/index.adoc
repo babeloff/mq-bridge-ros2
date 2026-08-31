@@ -1,0 +1,90 @@
+= mq-bridge-ros2 documentation
+:toc: left
+:icons: font
+
+A ROS 2 input and output endpoint for https://github.com/marcomq/mq-bridge[mq-bridge], built on https://github.com/ros2-rust/ros2_rust[`rclrs`].
+
+The same compiled library is used three ways:
+linked directly into a Rust program, loaded as a native plugin by any mq-bridge host, and shipped inside the Python and npm packages that hand it to that same loader.
+Most of this documentation is about that third life — operating the endpoint as a *plugin* — because that is where the parts a route author cannot see live.
+
+This project is derived from https://github.com/marcomq/mq-bridge-pulsar[mq-bridge-pulsar].
+Its factory, plugin export, error classification and batch-commit structure are that project's, with Apache Pulsar replaced by ROS 2.
+
+== How this documentation is organised
+
+It follows https://diataxis.fr/[Diátaxis], which separates four things that are usually mixed together and are hard to write well when they are.
+Each section answers one question, so start with the one matching what you actually need.
+
+[cols="1,2,3", options="header"]
+|===
+| Section | Answers | Read it when
+
+| xref:tutorials/first-ros2-route.adoc[Tutorials]
+| "Take me through it."
+| You have never run this endpoint and want a working route in front of you.
+
+| xref:how-to/load-the-plugin-in-a-host.adoc[How-to guides]
+| "How do I achieve this?"
+| You know what you want and need the steps for that one job.
+
+| xref:reference/configuration.adoc[Reference]
+| "What exactly does this accept?"
+| You are writing configuration and need the precise, complete answer.
+
+| xref:explanation/plugin-model.adoc[Explanation]
+| "Why does it work this way?"
+| Something surprised you, or you are deciding whether this design fits.
+|===
+
+=== Tutorials
+
+Learning-oriented, and meant to be followed in order.
+
+* xref:tutorials/first-ros2-route.adoc[Your first ROS 2 route] — bring up a route that reads a ROS topic and writes a file.
+* xref:tutorials/run-as-a-plugin.adoc[Run the same endpoint as a plugin] — load the compiled library into a host that was never built against it.
+
+=== How-to guides
+
+Task-oriented, and each independent of the others.
+
+* xref:how-to/load-the-plugin-in-a-host.adoc[Load the plugin in a host] — from Rust, Python or Node.js.
+* xref:how-to/carry-non-text-payloads.adoc[Carry payloads that are not text] — binary data through a byte-sequence message type.
+* xref:how-to/receive-earlier-messages.adoc[Receive messages published before the route started] — what `transient_local` can and cannot do.
+* xref:how-to/package-the-plugin.adoc[Package the plugin for distribution] — conda, wheel and npm artifacts.
+* xref:how-to/publish-to-the-registry.adoc[Publish to the program-forge registry] — upload and index in the MinIO conda channel.
+* xref:how-to/diagnose-a-failed-plugin-load.adoc[Diagnose a failed plugin load] — the symptoms, in the order they occur.
+
+=== Reference
+
+Information-oriented, and intended to be complete rather than readable.
+
+* xref:reference/configuration.adoc[Endpoint configuration] — every field, its default and its validation.
+* xref:reference/plugin.adoc[Plugin interface] — the exported symbol, the plugin package layout, artifact identity.
+* xref:reference/pixi-tasks.adoc[Pixi tasks] — the project's task commands.
+
+=== Explanation
+
+Understanding-oriented, and safe to skip until something puzzles you.
+
+* xref:explanation/plugin-model.adoc[How mq-bridge loads this endpoint] — registration, the ABI, and why one library serves three languages.
+* xref:explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus] — what changes when there is no broker: no acknowledgement, no metadata, no durable log.
+
+== Before anything else
+
+`rclrs` links `rcl` and loads message type support libraries from a ROS installation.
+There is no build and no test run without one, not even for the unit tests, whose binary would fail to load.
+
+[source,console]
+----
+source /opt/ros/jazzy/setup.bash
+----
+
+Or use this project's pixi environment, which installs ROS 2 from https://robostack.github.io/[RoboStack] and activates it for every task:
+
+[source,console]
+----
+pixi run test
+----
+
+See xref:reference/pixi-tasks.adoc[Pixi tasks] for the full set.

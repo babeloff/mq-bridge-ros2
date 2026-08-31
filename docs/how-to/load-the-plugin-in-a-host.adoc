@@ -1,0 +1,136 @@
+= Load the plugin in a host
+:toc: left
+:icons: font
+
+How to get an endpoint named `ros2` into mq-bridge's registry, from each of the four places you might be starting from.
+
+Whichever you choose, the result is the same and a route cannot tell the difference:
+
+[source,yaml]
+----
+input:
+  custom:
+    name: ros2
+    config: {}
+----
+
+[IMPORTANT]
+====
+A ROS 2 installation must be active in the process's environment *before* it starts.
+The library resolves `rcl` and its message type support libraries through `AMENT_PREFIX_PATH`, and no amount of registration can substitute for that.
+====
+
+== From Rust, linking the crate directly
+
+Add the dependency and call `register` once, before starting any route that uses it:
+
+[source,toml]
+----
+[dependencies]
+mq-bridge-ros2 = "0.1"
+----
+
+[source,rust]
+----
+mq_bridge_ros2::register()?;
+----
+
+Calling it twice is an error, so guard it if the call site can run more than once:
+
+[source,rust]
+----
+static REGISTERED: std::sync::Once = std::sync::Once::new();
+REGISTERED.call_once(|| mq_bridge_ros2::register().expect("register ROS 2 endpoint"));
+----
+
+If you link this crate alongside another mq-bridge plugin crate, turn off the default features on both.
+Both would otherwise export the same `mq_bridge_plugin_v1` symbol and fail to link:
+
+[source,toml]
+----
+mq-bridge-ros2 = { version = "0.1", default-features = false }
+----
+
+== From Rust, loading the compiled library
+
+Use this when the host was not built against this crate — for instance a generic mq-bridge runner that discovers endpoints at start-up.
+Loading registers the endpoint, so there is nothing else to call:
+
+[source,rust]
+----
+mq_bridge::plugin::load_endpoint_plugin("./libmq_bridge_ros2.so")?;
+----
+
+The returned value reports what was loaded, which is worth checking if the path came from configuration:
+
+[source,rust]
+----
+let info = mq_bridge::plugin::load_endpoint_plugin(path)?;
+assert_eq!(info.name, "ros2");
+assert!(info.supports_consumer && info.supports_publisher);
+----
+
+== From Python
+
+[source,console]
+----
+pip install mq-bridge-py mq-bridge-ros2
+----
+
+[source,python]
+----
+import mq_bridge_ros2
+
+mq_bridge_ros2.register()   # once, before starting routes
+----
+
+`register()` returns the endpoint name, `ros2`, and is a no-op if called again.
+It raises `ImportError` when mq-bridge itself is missing, and `FileNotFoundError` when the installed wheel carries no library for this platform.
+
+To find out what it would load without loading it:
+
+[source,python]
+----
+print(mq_bridge_ros2.library_path())
+----
+
+== From Node.js
+
+[source,console]
+----
+npm install mq-bridge mq-bridge-ros2
+----
+
+[source,javascript]
+----
+import { register } from "mq-bridge-ros2";
+
+register(); // once, before starting routes
+----
+
+The package also exports `ENDPOINT_NAME` and `libraryPath()`.
+The named ESM import above is the reason `index.js` assigns its exports individually rather than replacing `module.exports` wholesale — Node's CommonJS lexer only detects exports it can see statically.
+
+== Verify it worked
+
+The cheapest end-to-end check is a route that drains an idle topic.
+It has to reach an empty batch and stop, which means `rcl` accepted the node and the subscription:
+
+[source,yaml]
+----
+input:
+  custom:
+    name: ros2
+    config:
+      topic: "an_idle_topic"
+output:
+  file: { path: "/dev/null" }
+exit_on_empty: true
+----
+
+If it hangs or raises instead, go to xref:diagnose-a-failed-plugin-load.adoc[Diagnose a failed plugin load].
+
+== See also
+
+* xref:../reference/plugin.adoc[Plugin interface] — the exported symbol and package layout.
+* xref:../explanation/plugin-model.adoc[How mq-bridge loads this endpoint] — why one library serves three languages.

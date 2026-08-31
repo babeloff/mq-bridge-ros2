@@ -1,0 +1,27 @@
+# rattler-build reads this automatically because it sits next to recipe.yaml.
+
+# The ROS distributions to build for.
+#
+# This is a variant axis rather than a fixed value in the recipe, so one build
+# produces one package per distribution. `rclrs` selects its `rcl` bindings at
+# compile time and that ABI differs between distributions, so a single package
+# could never serve two; the distribution is part of the build string to keep
+# them apart.
+#
+# Adding a distribution here is enough to build for it, provided `rclrs`
+# supports it — as of 0.7 that is humble, jazzy, kilted and rolling — and
+# RoboStack publishes a `robostack-<distro>` channel for it. `package.py` derives
+# the build channels from this list, so there is nothing else to keep in step.
+ros_distro:
+  - humble
+  - jazzy
+
+# Resolves `${{ stdlib('c') }}` in recipe.yaml. Without it the recipe fails to
+# render with "No stdlib found for language: c".
+#
+# These are conda-forge's own values for linux-64; the sysroot version is the
+# oldest glibc the resulting package will run against.
+c_stdlib:
+  - sysroot
+c_stdlib_version:
+  - "2.17"

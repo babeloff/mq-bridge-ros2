@@ -1,0 +1,106 @@
+= Carry payloads that are not text
+:toc: left
+:icons: font
+
+The default message type, `std_msgs/msg/String`, requires the payload to be valid UTF-8.
+If a route carries protobuf, msgpack, compressed data or anything else binary, that default will reject it with a non-retryable error on the first message.
+
+Use a byte-sequence message type instead.
+
+== Do this
+
+Name a message type whose payload field is a byte collection:
+
+[source,yaml]
+----
+input:
+  custom:
+    name: ros2
+    config:
+      topic: "/sensor/frames"
+      message_type: "std_msgs/msg/UInt8MultiArray"
+      payload_field: "data"
+----
+
+`std_msgs/msg/UInt8MultiArray` declares `data` as `uint8[]`, an unbounded sequence, so the payload is copied through byte for byte with no encoding step and no length limit.
+
+Both ends of a route need the same setting.
+A publisher writing `UInt8MultiArray` and a subscription expecting `String` are different DDS types and will not match at all.
+
+== Which fields are accepted
+
+The payload field is validated against the real message definition when the endpoint is created, so a wrong choice fails at start-up rather than on the first message.
+These are accepted:
+
+[cols="2,3", options="header"]
+|===
+| Declared field type | Behaviour
+
+| `string`
+| Payload must be valid UTF-8.
+
+| `string<=N`
+| Payload must be valid UTF-8, and is length checked against `N`.
+
+| `uint8[]`, `byte[]`, `char[]`
+| Raw bytes, any length.
+
+| `uint8[<=N]`, `byte[<=N]`, `char[<=N]`
+| Raw bytes, length checked against `N`.
+
+| `uint8[N]`, `byte[N]`, `char[N]`
+| Raw bytes, and the payload length must equal `N` exactly.
+|===
+
+Anything else is rejected, with an error naming the type it found.
+A single `uint8` is deliberately refused even though a one-byte payload would technically fit, because it is far more likely to be a mistake than an intent.
+
+[WARNING]
+====
+A fixed-length array (`uint8[N]`) carries no length of its own, so a shorter payload would arrive padded and indistinguishable from a full one.
+Rather than silently corrupt data, the endpoint rejects any payload whose length is not exactly `N`.
+Prefer a sequence unless the wire format really is fixed width.
+====
+
+== Using your own message type
+
+Any message type installed on the machine works, because types are resolved at run time rather than compiled in.
+No bindings need generating.
+
+Given a package `my_msgs` with `msg/Frame.msg`:
+
+[source,text]
+----
+uint8[] payload
+uint32 sequence
+----
+
+point the endpoint at the field that should carry the bytes:
+
+[source,yaml]
+----
+      message_type: "my_msgs/msg/Frame"
+      payload_field: "payload"
+----
+
+The `sequence` field is left at its default; the endpoint only reads and writes the one field you name, and has no way to populate the others.
+If a consumer downstream needs those fields, this endpoint is the wrong tool for that message — it carries opaque payloads, not structured messages.
+
+The package must be discoverable through `AMENT_PREFIX_PATH` at run time.
+If it is not, the endpoint fails permanently with a message naming the package it could not find, rather than retrying forever.
+
+== Verify it round-trips
+
+The integration suite includes exactly this case, with a payload chosen to be invalid UTF-8 so a string field could not have carried it:
+
+[source,console]
+----
+pixi run test --integration
+----
+
+Look for `a_byte_sequence_message_type_carries_a_payload_that_is_not_utf8`.
+
+== See also
+
+* xref:../reference/configuration.adoc#payload-field[`payload_field` reference] — the complete rule.
+* xref:../explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus] — why metadata cannot travel alongside the payload.

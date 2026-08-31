@@ -1,9 +1,9 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    const ROUTE_NAME: &str = "pulsar_to_file";
-    mq_bridge_pulsar::register()?;
+    const ROUTE_NAME: &str = "ros2_to_file";
+    mq_bridge_ros2::register()?;
     let document: serde_yaml::Value =
-        serde_yaml::from_str(&std::fs::read_to_string("examples/pulsar_to_file.yaml")?)?;
+        serde_yaml::from_str(&std::fs::read_to_string("examples/ros2_to_file.yaml")?)?;
     let route = document
         .get("routes")
         .and_then(|routes| routes.get(ROUTE_NAME))

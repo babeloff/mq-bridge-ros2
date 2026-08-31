@@ -9,6 +9,11 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_NET_RETRY: "5"
+  # Every binary artifact is specific to one ROS distribution, because the `rcl`
+  # ABI differs between them. Releasing for a second distribution means running
+  # this workflow again with a different value here, not adding a matrix axis:
+  # a Python wheel's platform tag has no room to say which ROS it was built for.
+  ROS_DISTRO_TARGET: jazzy
 
 jobs:
   verify-version:
@@ -80,33 +85,41 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install protoc (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install protoc (macOS)
-        if: runner.os == 'macOS'
-        run: brew install protobuf
-
-      - name: Install protoc (Windows)
-        if: runner.os == 'Windows'
-        run: choco install protoc --no-progress -y
+      # `rclrs` links `rcl`, so every artifact is built against a ROS
+      # installation. RoboStack ships ROS 2 as conda packages for all five
+      # targets here, which is the only uniform way to get one onto a runner.
+      # `test_msgs` and `example_interfaces` are required, not optional: `rclrs`
+      # vendors their generated code and links those libraries unconditionally.
+      - name: Install ROS 2 ${{ env.ROS_DISTRO_TARGET }}
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ros2
+          create-args: >-
+            python=3.11
+            ros-${{ env.ROS_DISTRO_TARGET }}-ros-base
+            ros-${{ env.ROS_DISTRO_TARGET }}-test-msgs
+            ros-${{ env.ROS_DISTRO_TARGET }}-example-interfaces
+            ros-${{ env.ROS_DISTRO_TARGET }}-std-msgs
+          condarc: |
+            channels:
+              - https://prefix.dev/robostack-${{ env.ROS_DISTRO_TARGET }}
+              - conda-forge
 
       - name: Install official mq-bridge 0.4.5 packagers
-        shell: bash
+        shell: bash -el {0}
         working-directory: node
         run: |
           npm install --no-package-lock
           python -m pip install "mq-bridge-py[plugin-packaging]==0.4.5"
 
       - name: Stage npm native library
-        shell: bash
+        shell: bash -el {0}
         working-directory: node
         run: npx mq-bridge-package-plugin --root .. --package node
 
       - name: Build Python wheel
-        shell: bash
-        run: python -m mq_bridge.plugin_packaging --package python/mq_bridge_pulsar --out python/dist
+        shell: bash -el {0}
+        run: python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 --out python/dist
 
       - name: Retag macOS wheel
         if: runner.os == 'macOS'
@@ -133,6 +146,7 @@ jobs:
         shell: bash
         env:
           PLUGIN_PLATFORM: ${{ matrix.platform }}
+          ROS_DISTRO_TARGET: ${{ env.ROS_DISTRO_TARGET }}
         run: |
           python - <<'PY'
           import os
@@ -153,7 +167,11 @@ jobs:
           shutil.copy2(libraries[0], staging / libraries[0].name)
           shutil.copy2("node/mq-bridge-plugin.json", staging / "mq-bridge-plugin.json")
 
-          base = Path("release-dist") / f"mq-bridge-pulsar-{platform}"
+          # The ROS distribution is part of the identity of the artifact: the
+          # `rcl` ABI differs between distributions, so a `jazzy` build is not
+          # usable on `humble` even on the same platform.
+          distro = os.environ["ROS_DISTRO_TARGET"]
+          base = Path("release-dist") / f"mq-bridge-ros2-{platform}-ros2-{distro}"
           archive_format = "zip" if platform.startswith("win32-") else "gztar"
           shutil.make_archive(str(base), archive_format, staging)
           PY
@@ -162,7 +180,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: standalone-${{ matrix.platform }}
-          path: release-dist/mq-bridge-pulsar-*
+          path: release-dist/mq-bridge-ros2-*
           if-no-files-found: error
 
       - name: Upload npm native library
@@ -195,10 +213,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      # `cargo package` builds to verify the archive, and that build needs ROS.
+      - name: Install ROS 2 ${{ env.ROS_DISTRO_TARGET }}
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ros2
+          create-args: >-
+            python=3.11
+            ros-${{ env.ROS_DISTRO_TARGET }}-ros-base
+            ros-${{ env.ROS_DISTRO_TARGET }}-test-msgs
+            ros-${{ env.ROS_DISTRO_TARGET }}-example-interfaces
+            ros-${{ env.ROS_DISTRO_TARGET }}-std-msgs
+          condarc: |
+            channels:
+              - https://prefix.dev/robostack-${{ env.ROS_DISTRO_TARGET }}
+              - conda-forge
 
       - name: Verify crate package
+        shell: bash -el {0}
         run: cargo package
 
       - name: Authenticate to crates.io
@@ -206,6 +238,7 @@ jobs:
         uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
 
       - name: Publish crate
+        shell: bash -el {0}
         run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

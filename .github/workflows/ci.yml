@@ -15,12 +15,24 @@ permissions:
   contents: read
 
 jobs:
-  # The conformance suite is `#[ignore]`d because it needs a Pulsar broker.
-  # Docker and the compose plugin are preinstalled on ubuntu runners, so the
-  # job just has to ask for the ignored test explicitly.
-  plugin-conformance:
-    name: Plugin conformance (Docker)
+  # `rclrs` links `rcl` and loads message type support libraries from a ROS
+  # installation, so there is no build without one — not even for the unit
+  # tests, whose binary would fail to load. RoboStack provides ROS 2 as conda
+  # packages, which is the only way to install it uniformly across runners.
+  #
+  # There is no broker to start: ROS 2 is peer to peer, so the end-to-end tests
+  # discover themselves over loopback on a dedicated domain.
+  ros2-tests:
+    name: Tests (ROS 2 ${{ matrix.ros_distro }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The `rcl` ABI differs between distributions, so each one is a separate
+        # build and a separate artifact. Keep this in step with the `ros_distro`
+        # list in recipes/variants.yaml, which is what the packages are built
+        # for. `rclrs` 0.7 also supports kilted and rolling.
+        ros_distro: [humble, jazzy]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,9 +44,23 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      # pulsar-rs compiles the Pulsar protobuf schema at build time.
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install ROS 2 ${{ matrix.ros_distro }}
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: ros2
+          # `test_msgs` and `example_interfaces` are not optional: `rclrs`
+          # vendors their generated code and links those libraries
+          # unconditionally, so the crate does not link without them.
+          create-args: >-
+            python=3.12
+            ros-${{ matrix.ros_distro }}-ros-base
+            ros-${{ matrix.ros_distro }}-test-msgs
+            ros-${{ matrix.ros_distro }}-example-interfaces
+            ros-${{ matrix.ros_distro }}-std-msgs
+          condarc: |
+            channels:
+              - https://prefix.dev/robostack-${{ matrix.ros_distro }}
+              - conda-forge
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -44,20 +70,70 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          key: ${{ runner.os }}-${{ matrix.ros_distro }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.ros_distro }}-cargo-
 
-      - name: Verify Docker is available
-        run: docker compose version
+      - name: Show ROS environment
+        shell: bash -el {0}
+        run: |
+          echo "ROS_DISTRO=$ROS_DISTRO"
+          test -n "$AMENT_PREFIX_PATH" || { echo "ROS 2 is not sourced"; exit 1; }
 
       - name: Unit tests
+        shell: bash -el {0}
         run: cargo test --lib
 
-      - name: Pulsar integration tests
-        run: cargo test --test integration -- --ignored --nocapture
+      - name: ROS 2 integration tests
+        shell: bash -el {0}
+        run: |
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+          cargo test --test integration -- --ignored --nocapture
 
       - name: Endpoint conformance, linked and plugin-loaded
-        run: cargo test --test plugin -- --ignored --nocapture
+        shell: bash -el {0}
+        run: |
+          export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+          cargo test --test plugin -- --ignored --nocapture
+
+  # Type-checks the crate without a ROS installation. This is what the
+  # `ros-shim` feature is for, and it keeps the compile clean for contributors
+  # who have no ROS on their machine.
+  shim-check:
+    name: Check without a ROS installation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Check with the ROS shim
+        env:
+          RUSTFLAGS: --cfg ros_distro="jazzy"
+        run: cargo check --features ros-shim --all-targets
+
+  # No ROS needed: this only reads the AsciiDoc sources. It catches a broken
+  # cross-reference between pages, which asciidoctor itself does not check and
+  # which otherwise ships as a dead link.
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Install asciidoctor
+        run: gem install asciidoctor --no-document
+
+      - name: Validate the documentation
+        run: python3 pixi-scripts/docs.py --check
 
   node-package:
     name: Node package smoke test
