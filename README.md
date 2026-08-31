@@ -83,7 +83,7 @@ input:
       topic: "/orders/new"                    # optional; route name by default
       message_type: "std_msgs/msg/String"     # optional; this is the default
       payload_field: "data"                   # optional; this is the default
-      node: "ingest_bridge"                   # optional; mq_bridge_<route> by default
+      node: "ingest_bridge"                   # optional; mq_bridge_<route>_in/_out by default
       namespace: "/ingest"                    # optional; "/" by default
       domain_id: 0                            # optional; ROS_DOMAIN_ID by default
       qos:                                    # optional
@@ -95,7 +95,7 @@ input:
 
 Names are checked, not repaired. A name the endpoint *derives* from the route
 name is sanitised, because route names routinely contain characters ROS forbids
-(`round-trip-9f1c` becomes the node `mq_bridge_round_trip_9f1c`). A name written
+(`round-trip-9f1c` becomes the node `mq_bridge_round_trip_9f1c_in`). A name written
 out in the configuration is rejected if it is not a valid ROS 2 name, so
 `topic: "order-new"` is an error rather than a silent rewrite.
 

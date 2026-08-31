@@ -49,7 +49,7 @@ input:
 
 | `node`
 | string
-| `mq_bridge_<route>`, sanitised
+| `mq_bridge_<route>_in` or `_out`, sanitised
 | Node name this endpoint appears under in the ROS graph.
 
 | `namespace`
@@ -78,10 +78,21 @@ ROS 2 names are more restricted than mq-bridge route names, and the endpoint tre
 
 A name the endpoint *derives* from the route name is sanitised.
 Every character outside `[A-Za-z0-9_]` becomes `_`, and a leading `_` is added if the result would not start with a letter or underscore.
-Route `round-trip-9f1c.2` yields node `mq_bridge_round_trip_9f1c_2` and topic `round_trip_9f1c_2`.
+Route `round-trip-9f1c.2` yields node `mq_bridge_round_trip_9f1c_2_in` and topic `round_trip_9f1c_2`.
 
 A name written out in the configuration is never rewritten — only accepted or rejected.
 Spelling a topic out is a statement of intent, and silently changing it would be worse than an error.
+
+=== Why the default node name ends in `_in` or `_out`
+
+A route has two endpoints, and both derive their names from the same route name.
+Without the suffix they would join the graph as two nodes called the same thing — legal in ROS 2, but `rcl` warns about it, and `ros2 node list` then cannot tell a route's input from its output.
+
+The suffix applies to the *node name only*.
+The topic is deliberately unaffected: suffixing it would give a route's two ends different topics, and they would never match — silently, because an unmatched pair is not an error in DDS.
+
+An explicit `node` is used for both ends exactly as written, consistent with every other explicit name.
+Naming both ends of one route the same is then the user's choice, and brings the warning back.
 
 [cols="1,3", options="header"]
 |===

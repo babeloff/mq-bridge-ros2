@@ -108,7 +108,9 @@ impl QosConfig {
 #[serde(deny_unknown_fields)]
 pub struct Ros2Config {
     /// Node name this endpoint appears under in the ROS graph. Defaults to
-    /// `mq_bridge_<route>`.
+    /// `mq_bridge_<route>_in` for an input and `mq_bridge_<route>_out` for an
+    /// output, so a route's two ends are distinguishable in the graph. An
+    /// explicit name is used for both ends as written.
     #[serde(default)]
     pub node: Option<String>,
     /// Absolute namespace for the node, e.g. `/ingest`. Defaults to `/`.
@@ -149,6 +151,27 @@ pub(crate) struct Resolved {
     pub topic: String,
 }
 
+/// Which end of a route an endpoint is.
+///
+/// Only the default node name depends on this. A route's consumer and publisher
+/// would otherwise both derive the same node name and join the graph as two
+/// nodes called the same thing, which `rcl` warns about and which makes
+/// `ros2 node list` ambiguous.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Direction {
+    In,
+    Out,
+}
+
+impl Direction {
+    fn suffix(self) -> &'static str {
+        match self {
+            Direction::In => "_in",
+            Direction::Out => "_out",
+        }
+    }
+}
+
 /// A rejected configuration cannot heal by reconnecting, so both constructors
 /// below hand the route an error classified as permanent. An unclassified
 /// `anyhow::Error` reaches the route as a connection failure, which it retries
@@ -157,30 +180,40 @@ pub(crate) fn resolve_for_consumer(
     route_name: &str,
     value: &serde_json::Value,
 ) -> anyhow::Result<Resolved> {
-    resolve(route_name, value).map_err(|error| anyhow::Error::new(ConsumerError::Permanent(error)))
+    resolve(route_name, value, Direction::In)
+        .map_err(|error| anyhow::Error::new(ConsumerError::Permanent(error)))
 }
 
 pub(crate) fn resolve_for_publisher(
     route_name: &str,
     value: &serde_json::Value,
 ) -> anyhow::Result<Resolved> {
-    resolve(route_name, value)
+    resolve(route_name, value, Direction::Out)
         .map_err(|error| anyhow::Error::new(PublisherError::NonRetryable(error)))
 }
 
-fn resolve(route_name: &str, value: &serde_json::Value) -> anyhow::Result<Resolved> {
+fn resolve(
+    route_name: &str,
+    value: &serde_json::Value,
+    direction: Direction,
+) -> anyhow::Result<Resolved> {
     let config: Ros2Config =
         serde_json::from_value(value.clone()).context("invalid ROS 2 endpoint configuration")?;
 
     // A route name is free-form, but a ROS name is not, so a *derived* name is
     // sanitised while an *explicit* one is only checked: a user who spells a
     // topic out wants that topic or an error, not a silent rewrite.
+    //
+    // `direction` reaches only this name. It must never reach the topic below:
+    // suffixing that would give a route's two ends different topics, and they
+    // would then never match — silently, because an unmatched pair is not an
+    // error in DDS.
     let node = match &config.node {
         Some(node) => {
             validate_name_token(node).context("ROS 2 `node` name is not a valid ROS 2 name")?;
             node.clone()
         }
-        None => format!("mq_bridge_{}", sanitize(route_name)),
+        None => format!("mq_bridge_{}{}", sanitize(route_name), direction.suffix()),
     };
     let namespace = match &config.namespace {
         Some(namespace) => {
@@ -312,14 +345,27 @@ fn validate_message_type(message_type: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    /// Most cases do not care which end they are, so they get the input side.
     fn resolved(route: &str, value: serde_json::Value) -> Resolved {
-        resolve(route, &value).unwrap()
+        resolve(route, &value, Direction::In).unwrap()
+    }
+
+    fn resolve_both(route: &str, value: serde_json::Value) -> (Resolved, Resolved) {
+        (
+            resolve(route, &value, Direction::In).unwrap(),
+            resolve(route, &value, Direction::Out).unwrap(),
+        )
+    }
+
+    /// Rejection does not depend on which end is asking.
+    fn rejects(route: &str, value: serde_json::Value) -> bool {
+        resolve(route, &value, Direction::In).is_err()
     }
 
     #[test]
     fn defaults_node_topic_and_message_type_from_the_route_name() {
         let endpoint = resolved("orders", serde_json::json!({}));
-        assert_eq!(endpoint.node, "mq_bridge_orders");
+        assert_eq!(endpoint.node, "mq_bridge_orders_in");
         assert_eq!(endpoint.namespace, "/");
         assert_eq!(endpoint.topic, "orders");
         assert_eq!(endpoint.config.message_type, "std_msgs/msg/String");
@@ -327,12 +373,39 @@ mod tests {
     }
 
     #[test]
+    fn the_two_ends_of_a_route_are_distinct_nodes_on_one_topic() {
+        // Two nodes with the same name is legal in ROS 2 but `rcl` warns about
+        // it, and `ros2 node list` cannot then tell a route's ends apart.
+        let (input, output) = resolve_both("orders", serde_json::json!({}));
+        assert_eq!(input.node, "mq_bridge_orders_in");
+        assert_eq!(output.node, "mq_bridge_orders_out");
+        assert_ne!(input.node, output.node);
+
+        // The important half: the *topic* must not pick up the suffix. If it
+        // did, a route's publisher and subscription would address different
+        // topics and never match — with no error, because an unmatched pair is
+        // not a failure in DDS.
+        assert_eq!(input.topic, "orders");
+        assert_eq!(output.topic, input.topic);
+    }
+
+    #[test]
+    fn only_the_derived_node_name_carries_the_direction() {
+        // An explicit name is used exactly as written, here as everywhere else,
+        // so a route that names both ends the same is the user's choice.
+        let (input, output) = resolve_both("orders", serde_json::json!({"node": "ingest_bridge"}));
+        assert_eq!(input.node, "ingest_bridge");
+        assert_eq!(output.node, "ingest_bridge");
+    }
+
+    #[test]
     fn a_derived_name_is_sanitized_because_route_names_are_not_ros_names() {
         // mq-bridge's own tests build route names like `round-trip-<uuid>`,
         // which no ROS node could be called.
-        let endpoint = resolved("round-trip-9f1c.2", serde_json::json!({}));
-        assert_eq!(endpoint.node, "mq_bridge_round_trip_9f1c_2");
-        assert_eq!(endpoint.topic, "round_trip_9f1c_2");
+        let (input, output) = resolve_both("round-trip-9f1c.2", serde_json::json!({}));
+        assert_eq!(input.node, "mq_bridge_round_trip_9f1c_2_in");
+        assert_eq!(output.node, "mq_bridge_round_trip_9f1c_2_out");
+        assert_eq!(input.topic, "round_trip_9f1c_2");
     }
 
     #[test]
@@ -370,12 +443,15 @@ mod tests {
     #[test]
     fn an_invalid_ros_name_is_rejected_rather_than_repaired() {
         // Hyphens are the common trap: legal in a route name, illegal in ROS.
-        assert!(resolve("route", &serde_json::json!({"topic": "order-new"})).is_err());
-        assert!(resolve("route", &serde_json::json!({"node": "mq-bridge"})).is_err());
-        assert!(resolve("route", &serde_json::json!({"topic": "orders//new"})).is_err());
-        assert!(resolve("route", &serde_json::json!({"topic": ""})).is_err());
+        assert!(rejects("route", serde_json::json!({"topic": "order-new"})));
+        assert!(rejects("route", serde_json::json!({"node": "mq-bridge"})));
+        assert!(rejects(
+            "route",
+            serde_json::json!({"topic": "orders//new"})
+        ));
+        assert!(rejects("route", serde_json::json!({"topic": ""})));
         // A namespace has to be absolute.
-        assert!(resolve("route", &serde_json::json!({"namespace": "ingest"})).is_err());
+        assert!(rejects("route", serde_json::json!({"namespace": "ingest"})));
     }
 
     #[test]
@@ -389,14 +465,13 @@ mod tests {
 
     #[test]
     fn invalid_configuration_is_rejected_before_connecting() {
-        assert!(resolve("route", &serde_json::json!({"extra": true})).is_err());
-        assert!(resolve("route", &serde_json::json!({"payload_field": " "})).is_err());
-        assert!(resolve("route", &serde_json::json!({"qos": {"depth": 0}})).is_err());
-        assert!(resolve(
+        assert!(rejects("route", serde_json::json!({"extra": true})));
+        assert!(rejects("route", serde_json::json!({"payload_field": " "})));
+        assert!(rejects("route", serde_json::json!({"qos": {"depth": 0}})));
+        assert!(rejects(
             "route",
-            &serde_json::json!({"qos": {"reliability": "eventual"}})
-        )
-        .is_err());
+            serde_json::json!({"qos": {"reliability": "eventual"}})
+        ));
     }
 
     #[test]

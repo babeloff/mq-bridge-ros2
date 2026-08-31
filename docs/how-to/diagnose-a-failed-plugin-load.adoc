@@ -174,7 +174,7 @@ Discards are counted and reported on stderr when the endpoint closes:
 
 [source,text]
 ----
-mq-bridge-ros2: discarded 41 message(s) that overflowed `qos.depth` on node mq_bridge_orders
+mq-bridge-ros2: discarded 41 message(s) that overflowed `qos.depth` on node mq_bridge_orders_in
 ----
 
 Raise `depth`, or use `history: keep_all` to remove the bound.
