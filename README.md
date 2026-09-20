@@ -62,6 +62,14 @@ host that never compiled against it can load it at runtime:
 mq_bridge::plugin::load_endpoint_plugin("./libmq_bridge_pulsar.so")?;
 ```
 
+A package manager puts the same library where mq-bridge already looks, so
+nothing has to name a path:
+
+```console
+brew install marcomq/tap/mq-bridge-pulsar
+conda install -c marcomq mq-bridge-pulsar
+```
+
 Python and Node.js users install two independent packages; neither reimplements
 Pulsar, both ship this library and hand its path to mq-bridge's generic loader.
 
