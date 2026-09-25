@@ -3,7 +3,7 @@
 > **Looking for what middleware or structural endpoints exist, and how to configure them?**
 > [REFERENCE.md](docs/REFERENCE.md) is the complete, authoritative list — every middleware
 > (`retry`, `dlq`, `transform`, `id`, `filter`, `deduplication`, `weak_join`, `buffer`, `limiter`, `delay`,
-> `cookie_jar`, `encryption`, `compression`, `pack`, `unpack`, `metrics`, `random_panic`, `custom`) and every
+> `cookie_jar`, `encryption`, `compression`, `pack`, `unpack`, `metrics`, `otel`, `lookup`, `random_panic`, `custom`) and every
 > structural endpoint (`ref`,
 > `fanout`, `switch`, `request`, `response`, `reader`, `static`, `stream_buffer`, `null`,
 > `custom`), each with its fields, defaults, and a working YAML example. Do not infer these
@@ -85,7 +85,9 @@ src/
 │   ├── filter.rs        # Expression predicate: keep only matching messages
 │   ├── id.rs            # Replay-stable business identity into `mqb.id`
 │   ├── limiter.rs       # Throughput limiting (msg/s)
+│   ├── lookup.rs        # Enrich from another endpoint's response
 │   ├── metrics.rs       # Metrics collection
+│   ├── otel.rs          # OpenTelemetry spans + traceparent propagation
 │   ├── random_panic.rs  # Testing middleware
 │   ├── retry.rs         # Exponential backoff retry
 │   ├── transform/       # Declarative JSON mapping + schema coercion

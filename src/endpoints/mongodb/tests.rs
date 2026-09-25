@@ -385,3 +385,42 @@ async fn mongo_dedup_store_states_release_and_replies() {
         Reservation::Claimed
     );
 }
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_find_answers_with_the_first_match() {
+    let collection = format!("find_{}", fast_uuid_v7::gen_id());
+    let config = |find: Option<&str>| MongoDbConfig {
+        url: "mongodb://localhost:27017".to_string(),
+        database: "mq_bridge_test".to_string(),
+        collection: Some(collection.clone()),
+        format: MongoDbFormat::Json,
+        id_field: Some("id".to_string()),
+        find: find.map(str::to_string),
+        ..Default::default()
+    };
+    let writer = MongoDbPublisher::new(&config(None)).await.unwrap();
+    writer
+        .send(CanonicalMessage::new(br#"{"id":"u1","name":"Ada"}"#.to_vec(), None))
+        .await
+        .unwrap();
+
+    let finder = MongoDbPublisher::new(&config(Some(r#"{"_id": "${payload:user_id}"}"#)))
+        .await
+        .unwrap();
+    let ask = |id: &str| CanonicalMessage::new(format!(r#"{{"user_id":"{id}"}}"#).into_bytes(), None);
+
+    let Sent::Response(hit) = finder.send(ask("u1")).await.unwrap() else {
+        panic!("find must answer with a response");
+    };
+    let doc: serde_json::Value = serde_json::from_slice(&hit.payload).unwrap();
+    assert_eq!(doc["name"], "Ada");
+    assert_eq!(hit.metadata.get("mongodb.found").map(String::as_str), Some("true"));
+
+    let Sent::Response(miss) = finder.send(ask("nobody")).await.unwrap() else {
+        panic!("find must answer with a response");
+    };
+    assert!(miss.payload.is_empty());
+    assert_eq!(miss.metadata.get("mongodb.found").map(String::as_str), Some("false"));
+}

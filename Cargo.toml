@@ -130,6 +130,10 @@ webpki-roots = { version = "1", optional = true }
 
 # Metrics
 metrics = { version = "0.24", optional = true }
+# Tracing: API only; the host installs the SDK and exporter.
+opentelemetry = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
+# Avro payloads with a Confluent Schema Registry.
+apache-avro = { version = "0.22", optional = true }
 
 # Storage for Deduplication
 sled = { version = "0.34", optional = true }
@@ -276,13 +280,13 @@ protoc-bin-vendored = { version = "3.2", optional = true }
 
 [features]
 default = []
-middleware = ["metrics", "dedup", "compression", "encryption", "filter"]
+middleware = ["metrics", "otel", "dedup", "compression", "encryption", "filter"]
 # Opt-in: parse JSON f64 with full precision so a number round-trips bit-exactly.
 # Off by default because it slows float parsing; without it serde_json shifts ~1 ULP
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
 # moved through a JSON payload). Enable if bit-exact float round-tripping matters.
 float-roundtrip = ["serde_json/float_roundtrip"]
-full-common = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "parquet", "rustls-aws-lc"]
+full-common = ["middleware", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
 
 # ibm-mq (dlopen) is safe to include: it needs no IBM SDK at build, and at
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
@@ -318,7 +322,7 @@ vendored-protoc = ["dep:protoc-bin-vendored"]
 # kafka (librdkafka), sqlx (libsqlite3-sys), grpc (protoc), ibm-mq/ibm-mq-static
 # (IBM C client). postgres-cdc is excluded too: its wire protocol is pure Rust
 # but it pulls in sqlx (C).
-portable = ["metrics", "dedup", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "websocket", "object-store", "rustls-aws-lc"]
+portable = ["metrics", "otel", "dedup", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "websocket", "object-store", "rustls-aws-lc"]
 
 # Functionality features
 dedup = ["sled"]
@@ -334,6 +338,10 @@ encryption = ["dep:chacha20poly1305", "dep:aes-gcm", "dep:zeroize"]
 filter = ["zen"]
 zen = ["dep:zen-expression", "dep:rust_decimal"]
 metrics = ["dep:metrics"]
+# Per-message spans (`otel` middleware); inert until the host calls `otel::enable()`.
+otel = ["dep:opentelemetry"]
+# Confluent-framed Avro (`avro` middleware); schemas come from the registry over HTTP.
+avro = ["dep:apache-avro", "dep:reqwest"]
 # Load endpoints from native plugin libraries at runtime (`mq_bridge::plugin`).
 # The endpoint itself lives in its own crate and package; see docs/PLUGINS.md.
 plugin = ["dep:libloading", "dep:object", "dep:libc"]
@@ -408,6 +416,7 @@ config = { version = "0.15" }
 tokio = { workspace = true, features = ["test-util"] }
 serde_yaml_ng = "0.10"
 tempfile = "3.27"
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "testing"] }
 chrono = "0.4"
 metrics-util = "0.20"
 # pgoutput decoder unit tests decode hex-encoded wire fixtures.

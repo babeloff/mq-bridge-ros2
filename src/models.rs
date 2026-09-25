@@ -424,6 +424,10 @@ pub enum Middleware {
     Id(String),
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
+    /// Per-message OpenTelemetry spans, continuing the `traceparent` metadata. Input and output.
+    Otel(OtelMiddleware),
+    /// Asks another endpoint per message and writes its response into the payload. Output-only.
+    Lookup(Box<LookupMiddleware>),
     Dlq(Box<DeadLetterQueueMiddleware>),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
@@ -492,6 +496,43 @@ pub struct DeduplicationMiddleware {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
+
+/// OpenTelemetry middleware configuration.
+///
+/// Opens a span per message and carries the W3C `traceparent` in metadata. Inactive unless
+/// the host installed an OpenTelemetry tracer provider before the route started.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct OtelMiddleware {}
+
+/// Lookup (enrich) middleware configuration.
+///
+/// Sends a request per message to a request-capable endpoint (HTTP, NATS/Memory
+/// `request_reply`, MongoDB `find`, SQLx `select_one_query`) and writes the response into
+/// the payload before the message is published.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LookupMiddleware {
+    /// The endpoint to ask; it must answer with a response.
+    pub from: Endpoint,
+    /// Request metadata templates, e.g. `http_path: "/users/${payload:user_id}"`.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    /// Request payload template. Defaults to the message's own payload and metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// Dotted payload path the response is written to, e.g. `customer.profile`.
+    pub into: String,
+    /// Lookups in flight per batch.
+    #[serde(default = "default_lookup_concurrency")]
+    pub concurrency: usize,
+}
+
+fn default_lookup_concurrency() -> usize {
+    16
+}
 
 /// Dead-Letter Queue (DLQ) middleware configuration.
 ///
@@ -646,6 +687,22 @@ pub struct WeakJoinMiddleware {
     /// What to do with an incomplete group when the timeout expires.
     #[serde(default)]
     pub on_timeout: WeakJoinTimeout,
+    /// When source messages are acknowledged: after the joined message is committed (default) or on receipt.
+    #[serde(default)]
+    pub ack: WeakJoinAck,
+}
+
+/// When a weak join acknowledges the source messages it buffers.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WeakJoinAck {
+    /// Ack members once their joined message is committed; a crash redelivers open groups.
+    #[default]
+    OnJoin,
+    /// Ack on receipt; open groups are lost on a crash. For sources whose prefetch limit is
+    /// smaller than the messages held in open groups.
+    OnReceive,
 }
 
 /// Action taken on an incomplete weak-join group when its timeout expires.
@@ -1718,6 +1775,10 @@ pub struct MongoDbConfig {
     /// (dup-key) so a `request`+`switch` can branch. Sink collections only; pair with `id_field`.
     #[serde(default)]
     pub report_outcome: bool,
+    /// (Publisher only) Extended-JSON filter template, e.g. `{"_id": "${payload:id}"}`. Each send
+    /// returns the first match as the response and writes nothing. For the `lookup` middleware.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub find: Option<String>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
     pub cursor_id: Option<String>,
     /// (Optional) Collection to store sequence counters and cursor positions. Defaults to the message collection if not set.

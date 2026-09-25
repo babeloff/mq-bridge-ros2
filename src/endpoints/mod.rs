@@ -3187,6 +3187,7 @@ mod tests {
                 branch_by: None,
                 required: Vec::new(),
                 on_timeout: Default::default(),
+                ack: Default::default(),
             });
 
             for middleware in [deduplication(), weak_join, rejecting_transform()] {

@@ -612,6 +612,9 @@ async fn main() -> anyhow::Result<()> {
         };
     let prometheus_handle = recorder.handle();
     metrics::set_global_recorder(recorder).context("Failed to install Prometheus recorder")?;
+    #[cfg(feature = "otel")]
+    let otel_guard = mq_bridge_app::otel_export::init_from_env()
+        .context("Failed to install OpenTelemetry OTLP exporter")?;
 
     // `metrics-exporter-prometheus` only drains its histogram buckets during
     // upkeep. The `build()` (http-listener) branch above spawns its own upkeep
@@ -781,6 +784,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = web_ui_handle {
         handle.abort();
     }
+
+    #[cfg(feature = "otel")]
+    drop(otel_guard);
 
     info!("Shutdown complete.");
 

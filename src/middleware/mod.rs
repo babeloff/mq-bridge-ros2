@@ -25,8 +25,11 @@ pub(crate) mod encryption;
 pub(crate) mod filter;
 mod id;
 mod limiter;
+mod lookup;
 #[cfg(feature = "metrics")]
 mod metrics;
+#[cfg(feature = "otel")]
+mod otel;
 mod pack;
 mod random_panic;
 mod raw_json;
@@ -58,6 +61,45 @@ use timeout::TimeoutPublisher;
 use transform::{TransformConsumer, TransformPublisher};
 use weak_join::WeakJoinConsumer;
 
+/// Leaves the consumer unwrapped unless the host installed a tracer provider, so an unused
+/// `otel` middleware costs nothing per message.
+fn otel_consumer(
+    consumer: Box<dyn MessageConsumer>,
+    route_name: &str,
+) -> Result<Box<dyn MessageConsumer>> {
+    #[cfg(feature = "otel")]
+    if otel::tracer_installed() {
+        return Ok(Box::new(otel::OtelConsumer::new(consumer, route_name)));
+    }
+    otel_inactive(route_name)?;
+    Ok(consumer)
+}
+
+fn otel_publisher(
+    publisher: Box<dyn MessagePublisher>,
+    route_name: &str,
+) -> Result<Box<dyn MessagePublisher>> {
+    #[cfg(feature = "otel")]
+    if otel::tracer_installed() {
+        return Ok(Box::new(otel::OtelPublisher::new(publisher, route_name)));
+    }
+    otel_inactive(route_name)?;
+    Ok(publisher)
+}
+
+fn otel_inactive(route_name: &str) -> Result<()> {
+    if cfg!(feature = "otel") {
+        tracing::debug!(
+            "[middleware:{route_name}] no OpenTelemetry tracer installed; otel middleware inactive"
+        );
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "[middleware:{route_name}] the otel middleware requires the 'otel' feature"
+        ))
+    }
+}
+
 /// Wraps a `MessageConsumer` with the middlewares specified in the endpoint configuration.
 ///
 /// Middlewares are applied in reverse order of the configuration list.
@@ -78,6 +120,7 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsConsumer::new(consumer, cfg, route_name, "input"))
             }
+            Middleware::Otel(_) => otel_consumer(consumer, route_name)?,
             Middleware::Dlq(_) => {
                 tracing::warn!("Dlq middleware is ignored on consumers (input endpoints). It is currently publisher-only.");
                 consumer
@@ -102,6 +145,11 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Pack(_) => {
                 return Err(anyhow::anyhow!(
                     "[middleware:{route_name}] `pack` is an output-only middleware. Put `pack` on the route's output endpoint and `unpack` on its input."
+                ))
+            }
+            Middleware::Lookup(_) => {
+                return Err(anyhow::anyhow!(
+                    "[middleware:{route_name}] `lookup` enriches outgoing messages and is output-only. Move it to the route's output endpoint."
                 ))
             }
             Middleware::Timeout(_) => {
@@ -165,6 +213,10 @@ pub async fn apply_middlewares_to_publisher(
                 ))
             }
             Middleware::Dlq(cfg) => Box::new(DlqPublisher::new(publisher, cfg, route_name).await?),
+            Middleware::Otel(_) => otel_publisher(publisher, route_name)?,
+            Middleware::Lookup(cfg) => {
+                Box::new(lookup::LookupPublisher::new(publisher, cfg, route_name).await?)
+            }
             #[cfg(feature = "metrics")]
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsPublisher::new(publisher, cfg, route_name, "output"))

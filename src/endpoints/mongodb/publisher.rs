@@ -19,12 +19,15 @@ pub struct MongoDbPublisher {
     id_field: Option<String>,
     id_template: Option<CompiledTemplate>,
     report_outcome: bool,
+    find: Option<CompiledTemplate>,
 }
 
 /// Metadata key carrying the insert outcome when `report_outcome` is enabled.
 pub(crate) const OUTCOME_KEY: &str = "mongodb.outcome";
 pub(crate) const OUTCOME_INSERTED: &str = "inserted";
 pub(crate) const OUTCOME_EXISTED: &str = "existed";
+/// Metadata key telling whether a `find` matched a document.
+const FOUND_KEY: &str = "mongodb.found";
 
 fn mongodb_uses_sequencer(request_reply: bool, format: &MongoDbFormat) -> bool {
     !request_reply && !matches!(format, MongoDbFormat::Raw)
@@ -64,9 +67,35 @@ impl MongoDbPublisher {
             .collection
             .as_deref()
             .ok_or_else(|| anyhow!("Collection name is required for MongoDB publisher"))?;
+        let find = config
+            .find
+            .as_deref()
+            .map(|t| {
+                CompiledTemplate::compile(t, Some("application/json"))
+                    .context("invalid MongoDB `find` template")
+            })
+            .transpose()?;
         let shared_client = create_shared_client(config).await?;
         let client = (*shared_client).clone();
         let db = client.database(&config.database);
+        if find.is_some() {
+            info!(database = %config.database, collection = %collection_name, "MongoDB find publisher connected");
+            return Ok(Self {
+                collection: db.collection(collection_name),
+                meta_collection: db.collection(collection_name),
+                db,
+                _shared_client: shared_client,
+                collection_name: collection_name.to_string(),
+                request_reply: false,
+                request_timeout: Duration::ZERO,
+                reply_polling_interval: Duration::ZERO,
+                format: config.format.clone(),
+                id_field: None,
+                id_template: None,
+                report_outcome: false,
+                find,
+            });
+        }
 
         if let Some(capped_size) = config.capped_size_bytes {
             let collections = db
@@ -166,7 +195,40 @@ impl MongoDbPublisher {
             id_field,
             id_template,
             report_outcome: config.report_outcome,
+            find: None,
         })
+    }
+
+    /// Runs the rendered `find` filter and answers with the first match, or an empty payload.
+    async fn find_one(
+        &self,
+        template: &CompiledTemplate,
+        message: &CanonicalMessage,
+    ) -> Result<Sent, PublisherError> {
+        let rendered = template.render(Some(message));
+        let filter = serde_json::from_slice::<serde_json::Value>(&rendered)
+            .map_err(anyhow::Error::from)
+            .and_then(|v| Ok(Bson::try_from(v)?))
+            .and_then(|b| match b {
+                Bson::Document(d) => Ok(d),
+                other => Err(anyhow!("filter is a {:?}, not a document", other.element_type())),
+            })
+            .map_err(|e| PublisherError::NonRetryable(e.context("invalid MongoDB `find` filter")))?;
+        let found = self
+            .collection
+            .find_one(filter)
+            .await
+            .map_err(|e| PublisherError::Retryable(e.into()))?;
+        let payload = match &found {
+            Some(doc) => serde_json::to_vec(&Bson::Document(doc.clone()).into_relaxed_extjson())
+                .map_err(|e| PublisherError::NonRetryable(e.into()))?,
+            None => Vec::new(),
+        };
+        let mut response = CanonicalMessage::new(payload, Some(message.message_id));
+        response
+            .metadata
+            .insert(FOUND_KEY.to_string(), found.is_some().to_string());
+        Ok(Sent::Response(response))
     }
 
     async fn recover_correlation_id_from_duplicate(
@@ -240,6 +302,9 @@ pub(crate) fn tag_outcome(
 #[async_trait]
 impl MessagePublisher for MongoDbPublisher {
     async fn send(&self, mut message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if let Some(template) = &self.find {
+            return self.find_one(template, &message).await;
+        }
         if !self.request_reply {
             trace!(message_id = %format!("{:032x}", message.message_id), collection = %self.collection_name, uses_sequencer = self.uses_sequencer(), "Publishing document to MongoDB");
             let mut doc = message_to_document(
@@ -394,7 +459,7 @@ impl MessagePublisher for MongoDbPublisher {
             return Ok(SentBatch::Ack);
         }
 
-        if self.request_reply || self.report_outcome {
+        if self.request_reply || self.report_outcome || self.find.is_some() {
             // report_outcome needs a per-message Response, so fan out through single send.
             return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
                 .await;

@@ -152,6 +152,8 @@ pub use async_nats;
 pub use lapin;
 #[cfg(feature = "mongodb")]
 pub use mongodb;
+#[cfg(feature = "otel")]
+pub use opentelemetry;
 #[cfg(feature = "kafka")]
 pub use rdkafka;
 #[cfg(feature = "redis-streams")]

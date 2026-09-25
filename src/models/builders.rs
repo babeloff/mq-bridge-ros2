@@ -965,7 +965,7 @@ with_optional_string_setters!(CookieJarMiddleware { with_shared_scope => shared_
 with_value_setters!(CookieJarMiddleware { with_capture_metadata_keys => capture_metadata_keys: Vec<String>, with_inject_metadata => inject_metadata: HashMap<String, String> });
 with_string_setters!(WeakJoinMiddleware { with_group_by => group_by });
 with_optional_string_setters!(WeakJoinMiddleware { with_branch_by => branch_by });
-with_value_setters!(WeakJoinMiddleware { with_expected_count => expected_count: usize, with_timeout_ms => timeout_ms: u64, with_required => required: Vec<String>, with_on_timeout => on_timeout: WeakJoinTimeout });
+with_value_setters!(WeakJoinMiddleware { with_expected_count => expected_count: usize, with_timeout_ms => timeout_ms: u64, with_required => required: Vec<String>, with_on_timeout => on_timeout: WeakJoinTimeout, with_ack => ack: WeakJoinAck });
 with_value_setters!(TransformMiddleware { with_mapping => mapping: HashMap<String, MappingRule>, with_coerce => coerce: bool, with_apply_defaults => apply_defaults: bool, with_coerce_empty_as_null => coerce_empty_as_null: bool, with_on_error => on_error: TransformErrorPolicy });
 with_optional_setters!(TransformMiddleware { with_schema => schema: serde_json::Value });
 with_optional_string_setters!(TransformMiddleware { with_schema_file => schema_file });
@@ -1005,7 +1005,7 @@ with_value_setters!(AmqpConfig { with_subscribe_mode => subscribe_mode: bool, wi
 with_optional_setters!(AmqpConfig { with_prefetch_count => prefetch_count: u16 });
 with_value_setters!(MongoDbConfig { with_tls => tls: TlsConfig, with_request_reply => request_reply: bool, with_source_metadata => source_metadata: bool, with_format => format: MongoDbFormat, with_report_outcome => report_outcome: bool });
 with_optional_setters!(MongoDbConfig { with_polling_interval_ms => polling_interval_ms: u64, with_reply_polling_ms => reply_polling_ms: u64, with_consume => consume: MongoConsume, with_request_timeout_ms => request_timeout_ms: u64, with_ttl_seconds => ttl_seconds: u64, with_capped_size_bytes => capped_size_bytes: i64, with_shared => shared: bool });
-with_optional_string_setters!(MongoDbConfig { with_receive_query => receive_query, with_checkpoint_store => checkpoint_store, with_id_field => id_field, with_cursor_id => cursor_id, with_meta_collection => meta_collection });
+with_optional_string_setters!(MongoDbConfig { with_receive_query => receive_query, with_checkpoint_store => checkpoint_store, with_id_field => id_field, with_cursor_id => cursor_id, with_meta_collection => meta_collection, with_find => find });
 
 with_value_setters!(MqttConfig { with_tls => tls: TlsConfig, with_clean_session => clean_session: bool, with_protocol => protocol: MqttProtocol, with_delayed_ack => delayed_ack: bool });
 with_optional_setters!(MqttConfig { with_queue_capacity => queue_capacity: usize, with_max_inflight => max_inflight: u16, with_qos => qos: u8, with_keep_alive_seconds => keep_alive_seconds: u64, with_session_expiry_interval => session_expiry_interval: u32 });

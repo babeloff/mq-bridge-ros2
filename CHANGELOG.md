@@ -6,36 +6,30 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **`weak_join` no longer loses buffered messages.** Source messages used to be acked on
+  receipt, so a crash with open groups dropped them. They are now acked once the joined
+  message is committed, and nacked with it (`ack: on_join`, the default); ordered sources
+  still commit in source order. `ack: on_receive` keeps the old behaviour for sources whose
+  prefetch limit would stall on unacked messages.
+
+### Added
+
+- **`otel` middleware: OpenTelemetry spans per message.** Continues the W3C `traceparent` in
+  metadata, on input and output. It activates itself when the host has installed a tracer
+  provider and otherwise stays out of the chain. `mq-bridge-app` exports to OTLP when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+- **`lookup` middleware: enrich a message from another endpoint.** Per message, it sends a
+  request built from templates to any request-capable endpoint (e.g. HTTP) and writes the
+  response at a payload path, with `lookup.found` in metadata. Output-only.
+
+## 0.4.15
+
+### Fixed
+
 - **Plugin SDK: an endpoint is dropped inside the plugin's runtime.** Freeing a consumer,
   publisher, batch or middleware ran its `Drop` outside that runtime, so a `Drop` that spawns
   — the Pulsar client closing its producer — panicked and skipped its cleanup. Rebuild a
   plugin against this version to get the fix.
-- **`deduplication` no longer loses a message that failed and came straight back.** A nacked
-  key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
-  JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
-  duplicate, and the message was gone. A failed delivery now releases its key, and a copy that
-  arrives while another is still in flight waits for it instead of being acked on its
-  strength.
-- **`deduplication` writes its marker before acking the source**, not after. A crash between
-  the two now replays a message that is already recognised.
-- **`deduplication` on MongoDB no longer fails the route on every contested key.** The upsert
-  reports a duplicate key as a command error, which was not recognised; the route reconnected
-  and the batch it held was dropped. A store error now also hands the batch back to the source
-  instead of dropping it.
-- **A nacked Kafka batch is redelivered.** Kafka commits are cumulative, so the next batch's
-  commit used to cover the nacked offsets and they were never read again. After a nack the
-  consumer stops committing and reconnects, resuming from the last committed offset.
-- **AMQP carries message identity.** The publisher now sets the `message_id` property, and the
-  consumer accepts any string id (hashing a non-UUID one) and no longer falls back to the
-  delivery tag, which restarts at 1 on every channel and gave fresh messages the ids of
-  processed ones.
-- **Python: Ctrl+C now stops a route blocked in `run()` or `join()`.** Signal handlers used
-  to wait until the route ended by itself. Now a `KeyboardInterrupt`, or any exception a
-  handler raises, stops the route cleanly and is re-raised.
-- **`mq-bridge-app`: switching publishers, consumers and tabs is fast again.** Every switch
-  re-parsed and re-compiled the whole config schema, which took 1–2 s per click and grew to
-  several seconds in the desktop app. A parsed form is now reused per schema and only its data
-  is swapped; only the first visit to each tab still builds its form.
 
 ### Added
 
@@ -84,6 +78,46 @@ All notable changes to `mq-bridge`. Newest first.
   and must not be world-writable (sticky directories like `/tmp` are fine). As root, only
   root-owned libraries pass. Each discovered load is logged with its path and SHA-256. A
   library loaded by path is not checked. See "Which files discovery trusts" in PLUGINS.md.
+
+### Changed
+
+- A plugin endpoint that fails to start is now retried like a linked one, not stopped: only
+  an error wrapped in `InvalidConfig` (or a permanent error class) stops the route. A broker
+  that is down at startup used to stop a plugin route for good.
+
+## 0.4.14
+
+### Fixed
+
+- **`deduplication` no longer loses a message that failed and came straight back.** A nacked
+  key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
+  JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
+  duplicate, and the message was gone. A failed delivery now releases its key, and a copy that
+  arrives while another is still in flight waits for it instead of being acked on its
+  strength.
+- **`deduplication` writes its marker before acking the source**, not after. A crash between
+  the two now replays a message that is already recognised.
+- **`deduplication` on MongoDB no longer fails the route on every contested key.** The upsert
+  reports a duplicate key as a command error, which was not recognised; the route reconnected
+  and the batch it held was dropped. A store error now also hands the batch back to the source
+  instead of dropping it.
+- **A nacked Kafka batch is redelivered.** Kafka commits are cumulative, so the next batch's
+  commit used to cover the nacked offsets and they were never read again. After a nack the
+  consumer stops committing and reconnects, resuming from the last committed offset.
+- **AMQP carries message identity.** The publisher now sets the `message_id` property, and the
+  consumer accepts any string id (hashing a non-UUID one) and no longer falls back to the
+  delivery tag, which restarts at 1 on every channel and gave fresh messages the ids of
+  processed ones.
+- **Python: Ctrl+C now stops a route blocked in `run()` or `join()`.** Signal handlers used
+  to wait until the route ended by itself. Now a `KeyboardInterrupt`, or any exception a
+  handler raises, stops the route cleanly and is re-raised.
+- **`mq-bridge-app`: switching publishers, consumers and tabs is fast again.** Every switch
+  re-parsed and re-compiled the whole config schema, which took 1–2 s per click and grew to
+  several seconds in the desktop app. A parsed form is now reused per schema and only its data
+  is swapped; only the first visit to each tab still builds its form.
+
+### Added
+
 - **`DeliveryGuarantee` and `required_delivery`.** Each route's inferred guarantee —
   `at-most-once`, `at-least-once` or `effectively-once` — is logged at startup and available as
   `Route::delivery_guarantee()`. Setting `required_delivery` on a route fails it at startup when
@@ -117,9 +151,6 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
-- A plugin endpoint that fails to start is now retried like a linked one, not stopped: only
-  an error wrapped in `InvalidConfig` (or a permanent error class) stops the route. A broker
-  that is down at startup used to stop a plugin route for good.
 - The startup inference no longer reports `effectively-once` for a sink keyed on `mqb.src.*`
   over an input that has no replay position.
 - `DeduplicationMiddleware` has a new `replay_response` field; code building it as a struct

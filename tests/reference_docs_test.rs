@@ -242,6 +242,7 @@ async fn wrong_side_middleware_matches_documented_behaviour() {
         branch_by: None,
         required: Vec::new(),
         on_timeout: Default::default(),
+        ack: Default::default(),
     })])
     .await;
     assert!(

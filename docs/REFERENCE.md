@@ -85,6 +85,8 @@ middlewares:
 | [`pack`](#pack) | – | ✅ | – | Combine a batch into one physical transport message |
 | [`unpack`](#unpack) | ✅ | – | – | Split a packed physical message back into messages |
 | [`metrics`](#metrics) | ✅ | ✅ | `metrics` | Emit throughput/latency/error metrics |
+| [`otel`](#otel) | ✅ | ✅ | `otel` | OpenTelemetry span per message, continuing `traceparent` |
+| [`lookup`](#lookup) | – | ✅ | – | Enrich each message with another endpoint's response |
 | [`random_panic`](#random_panic) | ✅ | ✅ | – | Fault injection for testing |
 | [`custom`](#custom-middleware) | ✅ | ✅ | – | Your own middleware via a registered factory |
 
@@ -105,13 +107,14 @@ middlewares:
 above rather than assuming:
 
 - `dlq` / `retry` on an input log a warning and are skipped. The route still starts.
-- `deduplication`, `weak_join` and `id` on an output are **hard startup errors**. Deduplication
+- `deduplication`, `weak_join` and `id` on an output, and `lookup` on an input, are **hard
+  startup errors**. Deduplication
   cannot work on the publish side, and silently starting an un-deduplicated route is worse
   than refusing to start. `pack` on an input and `unpack` on an output are hard errors too —
   the pair is directional.
 
 A middleware whose feature is not compiled in (`deduplication` without `dedup`, `metrics`
-without `metrics`) is likewise a startup error, not a silent no-op.
+without `metrics`, `otel` without `otel`) is likewise a startup error, not a silent no-op.
 
 ---
 
@@ -473,6 +476,7 @@ Correlates messages by a metadata key and emits them as one joined message. Inpu
 | `branch_by` | string (metadata key) | – |
 | `required` | list of branch names | `[]` |
 | `on_timeout` | `fire` \| `discard` | `fire` |
+| `ack` | `on_join` \| `on_receive` | `on_join` |
 
 ```yaml middleware
 # Count mode: wait for any 3 messages sharing a correlation_id, emit a JSON array.
@@ -486,6 +490,7 @@ Correlates messages by a metadata key and emits them as one joined message. Inpu
     branch_by: "source"
     required: ["inventory", "pricing"]
     on_timeout: discard
+    ack: on_join
 ```
 
 `group_by` reads message **metadata** only — never the payload. A message that lacks the key
@@ -495,8 +500,17 @@ first (a `transform` mapping, or the source's own metadata options).
 
 Setting `branch_by` switches to branch mode, where `required` overrides `expected_count`.
 On timeout an incomplete group is either emitted partially (`fire`) or dropped (`discard`).
-Messages are acknowledged on receipt, so a crash before the group completes loses the
-buffered members.
+A discarded group's members are acknowledged at once.
+
+With `ack: on_join` (the default) a buffered message is acknowledged only once the joined
+message it went into is committed downstream; a Nack of the joined message nacks its members,
+and a crash before a group completes redelivers them. On a source that needs ordered commits
+(Kafka, file, SQL) a source batch is committed only after every older batch is, so an open
+group holds back later commits for up to `timeout_ms`. The source must also let enough
+messages stay unacknowledged: with a prefetch limit (`prefetch_count` on AMQP and
+NATS) below the number of messages held in open groups, groups can only finish by
+timeout. `ack: on_receive` acknowledges on receipt instead, which avoids that limit but loses
+the buffered members on a crash.
 
 ### `buffer`
 
@@ -853,6 +867,73 @@ Emits throughput, latency and error metrics for the endpoint. Input and output. 
 ```
 
 Input and output are labelled separately, so attaching it to both sides is meaningful.
+
+### `otel`
+
+Opens an OpenTelemetry span per message and carries its W3C trace context in the
+`traceparent` / `tracestate` metadata. Input and output. Requires the `otel` feature. Takes no
+options.
+
+```yaml middleware
+- otel: {}
+```
+
+- **Input**: a `Consumer` span named `<route> receive` that continues the incoming
+  `traceparent` and lasts until the message is committed. A Nack or a failed commit marks it
+  as an error. The metadata then points at this span, so the output continues the trace.
+- **Output**: a `Producer` span named `<route> send`, ending with the send result. The
+  published message carries the new `traceparent`, so a downstream service can continue the trace.
+- Attributes: `mqb.route` and `messaging.message.id`.
+
+The library only uses the OpenTelemetry API; the host exports the spans. The middleware
+activates itself when a tracer provider is installed (`opentelemetry::global::set_tracer_provider`,
+re-exported as `mq_bridge::opentelemetry`) **before the route starts**. Without one it is left
+out of the chain at startup and costs nothing per message. `mq-bridge-app` installs an OTLP
+HTTP exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set;
+`OTEL_SERVICE_NAME` defaults to `mq-bridge-app`.
+
+The activation check starts one unsampled `mq-bridge.probe` span per middleware. The default
+parent-based sampler drops it, but an `always_on` sampler exports it.
+
+### `lookup`
+
+Asks another endpoint per message and writes its response into the payload before the
+message is published. Output-only. The typical use is enriching an event with a record
+fetched by key, then routing on whether it was found.
+
+| Field | Type | Default |
+|---|---|---|
+| `from` | endpoint | required; must answer with a response |
+| `into` | dotted payload path | required |
+| `metadata` | map string→template | `{}` |
+| `payload` | template | the message's own payload and metadata |
+| `concurrency` | integer | `16` lookups in flight per batch |
+
+```yaml middleware
+- lookup:
+    from:
+      http:
+        url: "http://users:8080"
+        pass_through_status: true
+    metadata:
+      http_path: "/users/${payload:user_id}"
+      http_method: GET
+    into: user
+```
+
+- `metadata` and `payload` are [placeholder templates](#placeholders), rendered against the
+  outgoing message. `metadata` is added to the request, so it sets `http_path`, `http_method`
+  or `http_query` on an `http` endpoint.
+- The response is parsed as JSON; a non-JSON response is written as a string. An empty
+  response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
+  `false`, for a following [`switch`](#switch).
+- `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`. An
+  endpoint that only acknowledges fails the message as non-retryable.
+- HTTP 408, 429 and 5xx fail the message as retryable, other statuses as non-retryable.
+  Without `pass_through_status: true` the `http` endpoint already fails on any non-2xx
+  response, so a missing record is an error rather than `null`.
+- The payload must be a JSON object along `into`. A failed lookup fails only its message; the
+  rest of the batch is published. List `retry` / `dlq` after `lookup` to catch its failures.
 
 ### `random_panic`
 

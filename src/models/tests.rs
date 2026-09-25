@@ -292,6 +292,8 @@ kafka_to_nats:
                 Middleware::Unpack(_) => {}
                 Middleware::Id(_) => {}
                 Middleware::Filter(_) => {}
+                Middleware::Otel(_) => {}
+                Middleware::Lookup(_) => {}
             }
         }
 
