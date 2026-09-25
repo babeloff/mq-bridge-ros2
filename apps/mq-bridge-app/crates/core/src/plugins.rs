@@ -211,12 +211,16 @@ mod tests {
 
     #[test]
     fn an_empty_list_loads_nothing() {
-        assert!(load_trusted_plugins(&[], &HashMap::new())
-            .unwrap()
-            .is_empty());
-        assert!(load_trusted_plugins(&["  ".to_string()], &HashMap::new())
-            .unwrap()
-            .is_empty());
+        assert!(
+            load_trusted_plugins(&[], &HashMap::new())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            load_trusted_plugins(&["  ".to_string()], &HashMap::new())
+                .unwrap()
+                .is_empty()
+        );
         #[cfg(feature = "pulsar")]
         assert!(mq_bridge::extensions::get_endpoint_factory("pulsar").is_some());
         #[cfg(feature = "meilisearch")]
