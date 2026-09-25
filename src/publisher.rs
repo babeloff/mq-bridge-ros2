@@ -3,7 +3,11 @@ use std::any::Any;
 use anyhow::Context;
 use async_trait::async_trait;
 use futures::future::join_all;
-use mq_bridge::{errors::PublisherError, traits::MessagePublisher, CanonicalMessage, SentBatch};
+use mq_bridge::{
+    errors::{InvalidConfig, PublisherError},
+    traits::MessagePublisher,
+    CanonicalMessage, SentBatch,
+};
 use pulsar::{
     error::Error as PulsarError,
     producer::{Message as PulsarMessage, Producer, ProducerOptions},
@@ -29,7 +33,7 @@ pub(crate) async fn create(
     route_name: &str,
     value: &serde_json::Value,
 ) -> anyhow::Result<Box<dyn MessagePublisher>> {
-    let (config, topic, _) = config::resolve_for_publisher(route_name, value)?;
+    let (config, topic, _) = config::resolve(route_name, value).map_err(InvalidConfig)?;
     let client = connect(&config.url).await?;
     let producer = client
         .producer()
@@ -67,7 +71,7 @@ impl MessagePublisher for PulsarPublisher {
         // Every receipt is awaited: a broker rejecting one message must not hide
         // the fate of the rest. Receipts come back in send order, so the failures
         // zip straight back onto the messages the route has to retry.
-        let failed: Vec<(CanonicalMessage, PublisherError)> = join_all(receipts)
+        let failed = join_all(receipts)
             .await
             .into_iter()
             .zip(messages)
@@ -75,15 +79,7 @@ impl MessagePublisher for PulsarPublisher {
                 receipt.err().map(|error| (message, publisher_error(error)))
             })
             .collect();
-
-        if failed.is_empty() {
-            Ok(SentBatch::Ack)
-        } else {
-            Ok(SentBatch::Partial {
-                responses: None,
-                failed,
-            })
-        }
+        Ok(SentBatch::from_failures(failed))
     }
 
     async fn flush(&self) -> anyhow::Result<()> {

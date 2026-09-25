@@ -1,10 +1,10 @@
-use std::{any::Any, sync::Arc, time::Duration};
+use std::{any::Any, sync::Arc};
 
-use anyhow::{anyhow, Context};
+use anyhow::Context;
 use async_trait::async_trait;
-use futures::TryStreamExt;
 use mq_bridge::{
-    errors::ConsumerError as BridgeConsumerError,
+    errors::{ConsumerError as BridgeConsumerError, InvalidConfig},
+    support::stream_batch,
     traits::{BatchCommitFunc, BoxFuture, MessageConsumer, MessageDisposition},
     CanonicalMessage, ReceivedBatch,
 };
@@ -20,16 +20,13 @@ use crate::{
     connect,
 };
 
-/// Only applied while draining, so an idle topic yields an empty batch and lets
-/// `exit_on_empty` fire. Live consumption blocks until a message arrives.
-const FIRST_MESSAGE_WAIT: Duration = Duration::from_millis(250);
-const NEXT_MESSAGE_WAIT: Duration = Duration::from_millis(5);
-
 type SharedConsumer = Arc<Mutex<Consumer<Vec<u8>, TokioExecutor>>>;
 
 struct PulsarConsumer {
     inner: SharedConsumer,
     exit_on_empty: bool,
+    /// A stream error that ended the last batch early, reported on the next receive.
+    pending_error: Option<PulsarError>,
 }
 
 fn from_pulsar_message(
@@ -45,7 +42,8 @@ pub(crate) async fn create(
     route_name: &str,
     value: &serde_json::Value,
 ) -> anyhow::Result<Box<dyn MessageConsumer>> {
-    let (config, topic, subscription) = config::resolve_for_consumer(route_name, value)?;
+    let (config, topic, subscription) =
+        config::resolve(route_name, value).map_err(InvalidConfig)?;
     let client = connect(&config.url).await?;
     let consumer = client
         .consumer()
@@ -63,6 +61,7 @@ pub(crate) async fn create(
     Ok(Box::new(PulsarConsumer {
         inner: Arc::new(Mutex::new(consumer)),
         exit_on_empty: false,
+        pending_error: None,
     }))
 }
 
@@ -96,23 +95,34 @@ impl MessageConsumer for PulsarConsumer {
         if max_messages == 0 {
             return Ok(ReceivedBatch::empty());
         }
+        if let Some(error) = self.pending_error.take() {
+            return Err(consumer_error(error));
+        }
 
-        let exit_on_empty = self.exit_on_empty;
-        let mut messages = Vec::with_capacity(max_messages);
-        let mut acknowledgements = Vec::with_capacity(max_messages);
         let mut consumer = self.inner.lock().await;
+        let received = match stream_batch::next_batch(
+            &mut *consumer,
+            max_messages,
+            self.exit_on_empty,
+        )
+        .await
+        {
+            Ok(Some(received)) => received,
+            Ok(None) => return Err(BridgeConsumerError::EndOfStream),
+            Err(partial) if partial.items.is_empty() => return Err(consumer_error(partial.error)),
+            Err(partial) => {
+                self.pending_error = Some(partial.error);
+                partial.items
+            }
+        };
+        drop(consumer);
+        if received.is_empty() {
+            return Ok(ReceivedBatch::empty());
+        }
 
-        for index in 0..max_messages {
-            let next = match message_wait(index, exit_on_empty) {
-                Some(wait) => match tokio::time::timeout(wait, consumer.try_next()).await {
-                    Ok(result) => result.map_err(consumer_error)?,
-                    Err(_) => break,
-                },
-                None => consumer.try_next().await.map_err(consumer_error)?,
-            };
-            let Some(message) = next else {
-                return Err(BridgeConsumerError::EndOfStream);
-            };
+        let mut messages = Vec::with_capacity(received.len());
+        let mut acknowledgements = Vec::with_capacity(received.len());
+        for message in received {
             acknowledgements.push((message.topic.clone(), message.message_id().clone()));
             let properties = message
                 .metadata()
@@ -122,17 +132,10 @@ impl MessageConsumer for PulsarConsumer {
                 .collect::<Vec<_>>();
             messages.push(from_pulsar_message(message.payload.data, properties));
         }
-        drop(consumer);
 
-        if messages.is_empty() {
-            return Ok(ReceivedBatch::empty());
-        }
-
-        let expected = messages.len();
         let shared = Arc::clone(&self.inner);
         let commit: BatchCommitFunc = Box::new(move |dispositions| {
             Box::pin(async move {
-                validate_disposition_count(expected, dispositions.len())?;
                 let mut consumer = shared.lock().await;
                 for ((topic, id), disposition) in acknowledgements.into_iter().zip(dispositions) {
                     let result = match disposition {
@@ -152,17 +155,6 @@ impl MessageConsumer for PulsarConsumer {
     }
 }
 
-/// How long to wait for the message at `index`, or `None` to wait indefinitely.
-/// A live route blocks for its first message; a draining one gives up after
-/// [`FIRST_MESSAGE_WAIT`] so the empty batch can end the route.
-fn message_wait(index: usize, exit_on_empty: bool) -> Option<Duration> {
-    match index {
-        0 if !exit_on_empty => None,
-        0 => Some(FIRST_MESSAGE_WAIT),
-        _ => Some(NEXT_MESSAGE_WAIT),
-    }
-}
-
 /// Only honoured when Pulsar creates the subscription. An existing
 /// subscription resumes from its own cursor whatever this says.
 fn initial_position(position: InitialPosition) -> PulsarInitialPosition {
@@ -176,37 +168,9 @@ fn consumer_error(error: PulsarError) -> BridgeConsumerError {
     BridgeConsumerError::Connection(anyhow::Error::new(error))
 }
 
-fn validate_disposition_count(expected: usize, actual: usize) -> anyhow::Result<()> {
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "Pulsar batch commit received {actual} dispositions for {expected} messages"
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn batch_commit_requires_one_disposition_per_message() {
-        assert!(validate_disposition_count(2, 2).is_ok());
-        assert!(validate_disposition_count(2, 1).is_err());
-    }
-
-    #[test]
-    fn live_consumption_waits_for_the_first_message() {
-        assert_eq!(message_wait(0, false), None);
-        assert_eq!(message_wait(1, false), Some(NEXT_MESSAGE_WAIT));
-    }
-
-    #[test]
-    fn draining_gives_up_on_an_idle_topic() {
-        assert_eq!(message_wait(0, true), Some(FIRST_MESSAGE_WAIT));
-        assert_eq!(message_wait(1, true), Some(NEXT_MESSAGE_WAIT));
-    }
 
     #[test]
     fn earliest_maps_to_pulsars_backlog_reading_position() {

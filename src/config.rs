@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Context};
-use mq_bridge::errors::{ConsumerError, PublisherError};
 use serde::Deserialize;
 
 /// Where a newly created subscription starts reading. Pulsar applies this only
@@ -30,26 +29,9 @@ pub struct PulsarConfig {
     pub initial_position: InitialPosition,
 }
 
-/// A rejected configuration cannot heal by reconnecting, so both constructors
-/// below hand the route an error classified as permanent. An unclassified
-/// `anyhow::Error` reaches the route as a connection failure, which it retries
-/// on its reconnect interval forever.
-pub(crate) fn resolve_for_consumer(
-    route_name: &str,
-    value: &serde_json::Value,
-) -> anyhow::Result<(PulsarConfig, String, String)> {
-    resolve(route_name, value).map_err(|error| anyhow::Error::new(ConsumerError::Permanent(error)))
-}
-
-pub(crate) fn resolve_for_publisher(
-    route_name: &str,
-    value: &serde_json::Value,
-) -> anyhow::Result<(PulsarConfig, String, String)> {
-    resolve(route_name, value)
-        .map_err(|error| anyhow::Error::new(PublisherError::NonRetryable(error)))
-}
-
-fn resolve(
+/// Only the settings Pulsar can be asked for; a rejected one is returned as
+/// [`mq_bridge::errors::InvalidConfig`] by the constructors, so the route stops.
+pub(crate) fn resolve(
     route_name: &str,
     value: &serde_json::Value,
 ) -> anyhow::Result<(PulsarConfig, String, String)> {
@@ -132,22 +114,5 @@ mod tests {
             &serde_json::json!({"url": "pulsar://localhost:6650", "extra": true})
         )
         .is_err());
-    }
-
-    #[test]
-    fn a_rejected_configuration_is_permanent_so_the_route_stops_reconnecting() {
-        let value = serde_json::json!({"url": "pulsar://localhost:6650", "extra": true});
-
-        let consumer_error = resolve_for_consumer("route", &value).unwrap_err();
-        assert!(matches!(
-            consumer_error.downcast_ref::<ConsumerError>(),
-            Some(ConsumerError::Permanent(_))
-        ));
-
-        let publisher_error = resolve_for_publisher("route", &value).unwrap_err();
-        assert!(matches!(
-            publisher_error.downcast_ref::<PublisherError>(),
-            Some(PublisherError::NonRetryable(_))
-        ));
     }
 }
