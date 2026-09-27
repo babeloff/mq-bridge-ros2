@@ -32,8 +32,11 @@ integer `42`.
 
 - Paths accept `$.field`, `$.a.b`, `$.items[0]` (the `$.` prefix is optional). Dots in the
   *output* key nest the result. An absent optional source field is omitted, not emitted as null.
+- Paths have no quoting: a CSV column whose header contains `.` or `[` (e.g. `price.usd`)
+  cannot be addressed by a mapping.
 - Coercions are the lossless ones only: `string → integer`, `string → number`,
-  `string → boolean`, `number → string`.
+  `string → boolean`, `number → string`. `string → number` keeps integers exact
+  (`"42"` → `42`); fractional text goes through f64 (~17 significant digits).
 
 ## Decode an embedded JSON string
 

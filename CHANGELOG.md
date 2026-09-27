@@ -11,6 +11,34 @@ All notable changes to `mq-bridge`. Newest first.
   message is committed, and nacked with it (`ack: on_join`, the default); ordered sources
   still commit in source order. `ack: on_receive` keeps the old behaviour for sources whose
   prefetch limit would stall on unacked messages.
+- **CSV files: quoting, framing and headers.** The `object_store` source no longer splits a
+  quoted field that contains a line break into two rows. Values containing the record
+  `delimiter` are quoted. A string with no UTF-8 spelling (a lone `\ud800`) fails its message
+  instead of being written as an empty cell. Payloads whose keys carry JSON escapes keep their
+  number spelling (`1e3` was rewritten as `1000.0`). A leading UTF-8 BOM (Excel's "CSV UTF-8")
+  is stripped. Blank lines are skipped instead of read as rows of empty strings; a one-column
+  row with an empty value is written as `""` to stay distinct from them. Appending to a
+  non-empty file follows that file's header instead of the payload's sorted keys (plain,
+  compressed and encrypted files). Long multi-line quoted fields are no longer re-scanned
+  from the start on every line.
+- **CSV: repeated header names get unique keys.** `a,a` used to produce a JSON object with
+  the key `a` twice, which readers collapse to one value. Repeats are now named `a_2`,
+  `a_3`, … (never colliding with a real column), and a warning is logged once.
+- **JSON-lines files keep one message per record.** With `format: json`, a pretty-printed
+  payload's line breaks are dropped (they are insignificant JSON whitespace). With a custom
+  `delimiter`, `json`, `normal` and `text` records escape any occurrence of it inside a
+  string as `\uXXXX`; a delimiter that would occur in JSON syntax itself (e.g. `,`) fails
+  the message instead of writing a record the reader splits. `raw` is still written as is.
+- **`transform`: `number` coercion keeps integers exact.** `"9007199254740993"` was rounded
+  through f64; integral text now becomes an exact integer, so `"42"` gives `42` instead of
+  `42.0`. Fractional text still goes through f64 (~17 significant digits). Error paths
+  write keys containing `.`, `[`, `]` or quotes as `$['a.b']`.
+
+### Changed
+
+- **A CSV record `delimiter` may not contain `,` or `"`.** It separates rows, and those
+  characters are CSV field syntax, so such a file could not be read back. It is now
+  rejected when the endpoint is created. The field separator is always `,`.
 
 ### Added
 

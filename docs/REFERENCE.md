@@ -219,13 +219,17 @@ For calculated output, use `expression` (available with the `zen` Cargo feature)
 
 Paths accept `$.field`, `$.a.b`, and `$.items[0]`; the `$.` prefix is optional. Dots in the
 *output* key nest the result. An absent optional source field is omitted rather than emitted
-as null.
+as null. Paths have no quoting, so a source key that itself contains `.` or `[` (a CSV header
+such as `price.usd`) cannot be addressed: the path reads it as nesting and finds nothing.
+Error paths spell such keys unambiguously, as `$['price.usd']`.
 
 Schema keywords honoured: `type`, `properties`, `required`, `default`, `items`, `nullable`
 (also `"type": ["string","null"]`), `enum`, `contentMediaType`, `contentSchema`. Everything
 else is ignored, so an existing fuller schema can be used as-is. Coercions are limited to the
 lossless ones: `string → integer`, `string → number`, `string → boolean` (`true`/`false`/`1`/`0`),
-`number → string`.
+`number → string`. `string → number` keeps integral text an exact integer (`"42"` → `42`,
+`"9007199254740993"` unrounded); other text goes through f64, so digits beyond ~17
+significant ones are rounded.
 
 #### Empty strings
 

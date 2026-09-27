@@ -395,7 +395,7 @@ async fn mongo_find_answers_with_the_first_match() {
         url: "mongodb://localhost:27017".to_string(),
         database: "mq_bridge_test".to_string(),
         collection: Some(collection.clone()),
-        format: MongoDbFormat::Json,
+        format: MongoDbFormat::Raw,
         id_field: Some("id".to_string()),
         find: find.map(str::to_string),
         ..Default::default()
@@ -433,4 +433,27 @@ async fn mongo_find_answers_with_the_first_match() {
         miss.metadata.get("mongodb.found").map(String::as_str),
         Some("false")
     );
+
+    // Batched `$in`: `name` is not unique, so each key keeps only its first document.
+    writer
+        .send(CanonicalMessage::new(
+            br#"{"id":"u2","name":"Ada"}"#.to_vec(),
+            None,
+        ))
+        .await
+        .unwrap();
+    let batched = MongoDbPublisher::new(&config(Some(r#"{"name": {"$in": ["${payload:name}"]}}"#)))
+        .await
+        .unwrap();
+    let by_name =
+        |n: &str| CanonicalMessage::new(format!(r#"{{"name":"{n}"}}"#).into_bytes(), None);
+    let answers = batched
+        .lookup_batch(&[by_name("Ada"), by_name("Grace"), by_name("Ada")])
+        .await
+        .expect("an `$in` filter answers in batch")
+        .unwrap();
+    assert_eq!(answers.len(), 3);
+    assert_eq!(answers[0].as_ref().unwrap()["name"], "Ada");
+    assert_eq!(answers[1], None);
+    assert_eq!(answers[0], answers[2]);
 }

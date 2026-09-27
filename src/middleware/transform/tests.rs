@@ -37,6 +37,26 @@ fn run(cfg: &Compiled, payload: Value) -> Result<Value, TransformError> {
 
 // --- Path parsing ---
 
+/// Pinned limitation: paths have no quoting, so a key containing `.` or `[` (a CSV
+/// header like `price.usd`) cannot be addressed — the path reads it as nesting and finds
+/// nothing. Bracket-quoted keys are rejected when the config compiles, and a dotted
+/// output key always nests.
+#[test]
+fn test_path_cannot_address_keys_containing_dots_or_brackets() {
+    let cfg = compiled(json!({"mapping": {"p": "$.price.usd", "q": "$.a[1]"}}));
+    assert_eq!(
+        run(&cfg, json!({"price.usd": 5, "a[1]": 6})).unwrap(),
+        json!({})
+    );
+    assert!(CompiledPath::parse("$['price.usd']").is_err());
+
+    let cfg = compiled(json!({"mapping": {"price.usd": "$.x"}}));
+    assert_eq!(
+        run(&cfg, json!({"x": 1})).unwrap(),
+        json!({"price": {"usd": 1}})
+    );
+}
+
 #[test]
 fn test_path_parse_accepts_dollar_prefix_dots_and_indices() {
     let path = CompiledPath::parse("$.a.b[0]").unwrap();
@@ -323,6 +343,32 @@ fn test_coercion_matrix_accepts_every_safe_conversion() {
         out,
         json!({ "int": 42, "float": 3.5, "flag": true, "text": "7" })
     );
+}
+
+/// `number` never rounds integral text through f64; only fractional or exponent
+/// spellings take the float route, and those keep f64's ~17 significant digits.
+#[test]
+fn test_number_coercion_keeps_integers_exact() {
+    let cfg = compiled(json!({
+        "schema": { "type": "object", "properties": { "n": { "type": "number" } } }
+    }));
+
+    for (input, expected) in [
+        ("42", "42"),
+        (" 42 ", "42"),
+        ("9007199254740993", "9007199254740993"),
+        ("-9223372036854775808", "-9223372036854775808"),
+        ("18446744073709551615", "18446744073709551615"),
+        ("-0", "-0.0"),
+        ("2.5", "2.5"),
+        ("1e3", "1000.0"),
+        // Pinned limits: beyond u64, and beyond f64's precision, the value is rounded.
+        ("18446744073709551616", "1.8446744073709552e+19"),
+        ("0.12345678901234567891", "0.12345678901234568"),
+    ] {
+        let out = run(&cfg, json!({ "n": input })).unwrap();
+        assert_eq!(out["n"].to_string(), expected, "input {input:?}");
+    }
 }
 
 #[test]
@@ -1222,8 +1268,31 @@ mod fast_path_equivalence {
             (
                 "number",
                 &[
-                    "1.5", "-0.001", "0", "1e3", "2.5000", "0.1", " 2.5 ", "-0", "1e400", "NaN",
-                    "inf", "abc", "", "1.2.3",
+                    "1.5",
+                    "-0.001",
+                    "0",
+                    "1e3",
+                    "2.5000",
+                    "0.1",
+                    " 2.5 ",
+                    "-0",
+                    "1e400",
+                    "NaN",
+                    "inf",
+                    "abc",
+                    "",
+                    "1.2.3",
+                    // Integral text stays an exact integer, past f64's 2^53 too.
+                    "42",
+                    " 42 ",
+                    "+7",
+                    "007",
+                    "-00",
+                    "9007199254740993",
+                    "-9223372036854775808",
+                    "18446744073709551615",
+                    "18446744073709551616",
+                    "0.12345678901234567891",
                 ],
             ),
             (
@@ -1543,6 +1612,45 @@ mod fast_path_equivalence {
         assert_eq!(out.fast, Ok(r#"{"unmentioned":1e400}"#.to_string()));
     }
 
+    /// Keys that would read ambiguously in `$.a.b` notation are bracket-quoted, and both
+    /// paths name the failing field identically.
+    #[test]
+    fn error_paths_quote_ambiguous_keys() {
+        for (key, rendered) in [
+            ("plain", "$.plain"),
+            ("a.b", "$['a.b']"),
+            ("k[0]", "$['k[0]']"),
+            ("it's", r"$['it\'s']"),
+            ("", "$['']"),
+        ] {
+            let schema = json!({"type":"object","properties":{ key: {"type":"integer"} }});
+            let out = both(schema, &json!({ key: "x" }).to_string());
+            assert_eq!(out.slow, Err(format!("coercion:{rendered}")), "key {key:?}");
+            assert_eq!(out.fast, out.slow, "key {key:?}");
+        }
+
+        use super::super::coerce::{render_path, Crumb};
+        assert_eq!(
+            render_path(&[
+                Crumb::Key("o"),
+                Crumb::Key("a.b"),
+                Crumb::Index(1),
+                Crumb::Key(r"q'\"),
+            ]),
+            r"$.o['a.b'][1]['q\'\\']"
+        );
+    }
+
+    /// The same difference for a string with no UTF-8 spelling: a lone surrogate escape is
+    /// valid JSON text, copied through by the fast path, rejected by a whole-payload parse.
+    #[test]
+    fn known_difference_lone_surrogate_in_an_unmentioned_field() {
+        let payload = r#"{"s":"x","unmentioned":"\ud800"}"#;
+        let out = both(scalars(), payload);
+        assert!(out.slow.is_err(), "normal path used to reject this");
+        assert_eq!(out.fast, Ok(payload.to_string()));
+    }
+
     #[test]
     fn byte_output_is_identical_for_ordinary_payloads() {
         assert_byte_identical(scalars(), r#"{"s":"x","i":"42","n":"1.5","b":"true"}"#);
@@ -1605,6 +1713,115 @@ mod fast_path_equivalence {
                 as_json(&out.slow),
                 as_json(&out.fast_other_order),
                 "paths disagree under the opposite key ordering on payload: {payload}"
+            );
+        }
+    }
+
+    /// Every config the differential property runs: coercing schemas, flat and nested,
+    /// and projections that pick, rename, and reach into nested values.
+    fn differential_configs() -> Vec<TransformMiddleware> {
+        let schema = |schema: Value| TransformMiddleware {
+            schema: Some(schema),
+            ..Default::default()
+        };
+        vec![
+            schema(scalars()),
+            schema(json!({"type":"object","properties":{
+                "o":{"type":"object","properties":{"n":{"type":"number"},"i":{"type":"integer"}}},
+                "a":{"type":"array","items":{"type":"boolean"}},
+                "s":{"type":"string"}}})),
+            projection(&[("id", "$.id"), ("s", "$.s"), ("deep", "$.o.n")]),
+            projection(&[("first", "$.a[0]"), ("whole", "$.o"), ("é", "$.x")]),
+        ]
+    }
+
+    /// JSON text rather than `Value`, so the payload keeps spellings a `Value` would
+    /// normalise away: escaped keys, `1e3`, `2.5000`, `-0`, surrogate pairs.
+    fn payload_text() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        const NUMBERS: &[&str] = &[
+            "0",
+            "-0",
+            "42",
+            "-7",
+            "1.5",
+            "2.5000",
+            "1e3",
+            "-1E-2",
+            "0.1",
+            "9007199254740993",
+            "18446744073709551615",
+            "-9223372036854775808",
+        ];
+        const FRAGMENTS: &[&str] = &[
+            "42",
+            " 42 ",
+            "1.5",
+            "true",
+            "0",
+            "1",
+            "abc",
+            "",
+            r"\u0034\u0032",
+            r"\n",
+            r#"\""#,
+            r"\\",
+            "é",
+            "🎉",
+            r"\ud83c\udf89",
+            r#"{\"k\":1}"#,
+            "\u{7f}",
+        ];
+        let string = proptest::collection::vec(proptest::sample::select(FRAGMENTS), 0..3)
+            .prop_map(|parts| format!("\"{}\"", parts.concat()));
+        let leaf = prop_oneof![
+            proptest::sample::select(NUMBERS).prop_map(String::from),
+            string,
+            proptest::sample::select(&["true", "false", "null"][..]).prop_map(String::from),
+        ];
+        let value = leaf.prop_recursive(3, 24, 4, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..4)
+                    .prop_map(|items| format!("[{}]", items.join(","))),
+                object_text(inner),
+            ]
+        });
+        object_text(value)
+    }
+
+    /// Keys repeat freely and include an escaped spelling of `s`.
+    fn object_text(
+        values: impl proptest::strategy::Strategy<Value = String>,
+    ) -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        const KEYS: &[&str] = &["s", "i", "n", "b", "o", "a", "id", "x", "é", r"\u0073"];
+        proptest::collection::vec((proptest::sample::select(KEYS), values), 0..5).prop_map(
+            |entries| {
+                let fields: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| format!(r#""{k}":{v}"#))
+                    .collect();
+                format!("{{{}}}", fields.join(","))
+            },
+        )
+    }
+
+    proptest::proptest! {
+        /// Hand-picked cases only find the differences someone thought of. Random payloads
+        /// under each config must give the same result on both paths: the same JSON, or a
+        /// rejection. Which violation a rejection reports may differ when there are several
+        /// (`known_difference_which_violation_is_reported_when_several`); the other
+        /// documented differences are never generated.
+        #[test]
+        fn fast_and_slow_paths_agree_on_arbitrary_payloads(
+            payload in payload_text(),
+            config in 0..4usize,
+        ) {
+            let out = both_with(differential_configs().swap_remove(config), &payload);
+            let outcome = |r: &Result<String, String>| as_json(r).ok();
+            proptest::prop_assert_eq!(outcome(&out.slow), outcome(&out.fast), "{}", payload);
+            proptest::prop_assert_eq!(
+                outcome(&out.slow), outcome(&out.fast_other_order), "{}", payload
             );
         }
     }
@@ -1752,7 +1969,12 @@ mod fast_path_equivalence {
     /// the message. Asserted so it cannot change unnoticed.
     #[test]
     fn known_difference_unrepresentable_number_in_a_projected_payload() {
-        for payload in [r#"{"id":1e400}"#, r#"{"id":1,"dropped":1e400}"#] {
+        for payload in [
+            r#"{"id":1e400}"#,
+            r#"{"id":1,"dropped":1e400}"#,
+            r#"{"id":"\ud800"}"#,
+            r#"{"id":1,"dropped":"\ud800"}"#,
+        ] {
             let out = both_with(four_of_seven(), payload);
             assert!(out.slow.is_err(), "normal path used to reject {payload}");
             assert!(out.fast.is_ok(), "fast path rejected {payload}");

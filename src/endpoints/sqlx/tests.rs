@@ -1617,15 +1617,28 @@ async fn an_in_lookup_query_answers_a_batch_in_one_query() {
     let config = SqlxConfig {
         url,
         table: "users".to_string(),
-        lookup_query: Some("SELECT u.id, name FROM users u WHERE u.id IN (${payload:user_id})".into()),
+        lookup_query: Some(
+            "SELECT u.id, name FROM users u WHERE u.id IN (${payload:user_id})".into(),
+        ),
         ..Default::default()
     };
     let publisher = SqlxPublisher::new(&config).await.unwrap();
     let ask = |id: serde_json::Value| {
-        CanonicalMessage::new(serde_json::json!({ "user_id": id }).to_string().into_bytes(), None)
+        CanonicalMessage::new(
+            serde_json::json!({ "user_id": id })
+                .to_string()
+                .into_bytes(),
+            None,
+        )
     };
     let answers = publisher
-        .lookup_batch(&[ask(2.into()), ask(9.into()), ask(1.into()), ask(2.into()), ask(serde_json::Value::Null)])
+        .lookup_batch(&[
+            ask(2.into()),
+            ask(9.into()),
+            ask(1.into()),
+            ask(2.into()),
+            ask(serde_json::Value::Null),
+        ])
         .await
         .expect("an IN query batches")
         .unwrap();
@@ -1644,5 +1657,8 @@ async fn an_in_lookup_query_answers_a_batch_in_one_query() {
         serde_json::from_slice::<serde_json::Value>(&single.payload).unwrap(),
         serde_json::json!({"id": 1, "name": "Ada"})
     );
-    assert_eq!(single.metadata.get("sqlx.found").map(String::as_str), Some("true"));
+    assert_eq!(
+        single.metadata.get("sqlx.found").map(String::as_str),
+        Some("true")
+    );
 }

@@ -3,7 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use super::coerce::{coerce, render_path, type_name, Crumb, Ty};
+use super::coerce::{coerce, parse_number, render_path, type_name, Crumb, Ty};
 use super::compiled::Opts;
 use super::error::{ErrorKind, TransformError};
 use serde_json::Value;
@@ -371,10 +371,7 @@ impl CompiledSchema {
                     false
                 }
             }
-            Some(Ty::Number) => text
-                .parse::<f64>()
-                .ok()
-                .and_then(serde_json::Number::from_f64)
+            Some(Ty::Number) => parse_number(text)
                 .is_some_and(|number| serde_json::to_writer(&mut *out, &number).is_ok()),
             Some(Ty::Boolean) => match text {
                 "true" | "1" => {

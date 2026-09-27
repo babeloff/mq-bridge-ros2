@@ -74,6 +74,25 @@ pub(super) fn type_name(v: &Value) -> &'static str {
     }
 }
 
+/// The `number` coercion of already-trimmed text. Integral text becomes an exact
+/// integer, which f64 would round past 2^53; `-0` goes through f64 to keep its sign.
+pub(super) fn parse_number(text: &str) -> Option<serde_json::Number> {
+    let negative_zero = text
+        .strip_prefix('-')
+        .is_some_and(|digits| digits.bytes().all(|b| b == b'0'));
+    if !negative_zero {
+        if let Ok(value) = text.parse::<i64>() {
+            return Some(value.into());
+        }
+        if let Ok(value) = text.parse::<u64>() {
+            return Some(value.into());
+        }
+    }
+    text.parse::<f64>()
+        .ok()
+        .and_then(serde_json::Number::from_f64)
+}
+
 /// Applies the one safe coercion for `ty`, or fails. Never best-effort: a value that
 /// cannot be converted losslessly is an error, not a silent substitution.
 pub(super) fn coerce(
@@ -89,12 +108,7 @@ pub(super) fn coerce(
                 .map(Value::from)
                 .or_else(|| t.parse::<u64>().ok().map(Value::from))
         }
-        (Ty::Number, Value::String(s)) => s
-            .trim()
-            .parse::<f64>()
-            .ok()
-            .and_then(serde_json::Number::from_f64)
-            .map(Value::Number),
+        (Ty::Number, Value::String(s)) => parse_number(s.trim()).map(Value::Number),
         (Ty::Boolean, Value::String(s)) => match s.trim() {
             "true" | "1" => Some(Value::Bool(true)),
             "false" | "0" => Some(Value::Bool(false)),
@@ -126,10 +140,22 @@ pub(super) enum Crumb<'a> {
     Index(usize),
 }
 
+/// Renders a location as `$.a[0].b`. A key that would read ambiguously there is written
+/// `['…']`, with `'` and `\` backslash-escaped.
 pub(super) fn render_path(crumbs: &[Crumb<'_>]) -> String {
     let mut out = String::from("$");
     for crumb in crumbs {
         match crumb {
+            Crumb::Key(k) if k.is_empty() || k.contains(['.', '[', ']', '\'', '"']) => {
+                out.push_str("['");
+                for c in k.chars() {
+                    if matches!(c, '\'' | '\\') {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                out.push_str("']");
+            }
             Crumb::Key(k) => {
                 out.push('.');
                 out.push_str(k);

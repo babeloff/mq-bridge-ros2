@@ -423,6 +423,8 @@ metrics-util = "0.20"
 hex = "0.4"
 # Round-trip properties for the pure codecs (compression, crypto, zeromq frames, templates).
 proptest = "1"
+# Independent CSV parser: checks the file sink's output is readable by standard tools.
+csv = "1"
 criterion = { version = "0.8", features = ["async", "async_tokio"] }
 # Used by the router_bench microbench to model the proposed lock-free route table.
 arc-swap = "1"
