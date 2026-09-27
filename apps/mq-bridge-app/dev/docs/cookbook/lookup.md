@@ -62,8 +62,9 @@ input:
 ```
 
 Each entry sets `lookup.<into>.found`; `lookup.found` is `true` only when all of them found
-something. On an input a failed lookup nacks the whole batch, so the source redelivers it: a
-temporary error reconnects the route, a permanent one stops it.
+something. On an input a temporary error nacks the whole batch, so the source redelivers it,
+and reconnects the route. A permanent error (non-JSON payload, HTTP 4xx, a query error) is
+logged and drops only its message.
 
 ## Postgres gotchas
 

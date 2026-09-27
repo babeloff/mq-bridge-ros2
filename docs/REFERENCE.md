@@ -956,8 +956,10 @@ whether they were found. On an input, the handler already sees the enriched mess
 - The payload must be a JSON object along `into`.
 - On an output, a failed lookup fails only its message; the rest of the batch is published.
   List `retry` / `dlq` after `lookup` to catch its failures.
-- On an input, a failed lookup nacks the whole received batch, so the source redelivers it.
-  A retryable error reconnects the route; a non-retryable one stops it.
+- On an input, a retryable error (e.g. the database is down) nacks the whole received batch,
+  so the source redelivers it, and reconnects the route. A non-retryable error (non-JSON
+  payload, HTTP 4xx, a query error) is logged and acks and drops only its message; the rest
+  of the batch goes on. A misconfigured `from` therefore drops every message.
 
 `from` and every entry in `entries` run **in parallel** for each message, so a message waits
 for the slowest lookup, not the sum of all. Each one sets `lookup.<into>.found`, and

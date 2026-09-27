@@ -9,7 +9,7 @@ use crate::endpoints::create_publisher_from_route;
 use crate::models::{Endpoint, LookupMiddleware};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
-    BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
+    BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
@@ -306,8 +306,8 @@ impl MessagePublisher for LookupPublisher {
     }
 }
 
-/// Enriches each received batch before the handler sees it. A failed lookup nacks the whole
-/// batch: retryable errors reconnect the route, permanent ones stop it.
+/// Enriches each received batch before the handler sees it. A retryable failure nacks the
+/// whole batch and reconnects; a non-retryable one acks and drops only its message.
 pub struct LookupConsumer {
     inner: Box<dyn MessageConsumer>,
     lookup: Lookup,
@@ -345,32 +345,72 @@ impl MessageConsumer for LookupConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
-        let ReceivedBatch { messages, commit } = self.inner.receive_batch(max_messages).await?;
-        if messages.is_empty() {
-            return Ok(ReceivedBatch { messages, commit });
-        }
-        let len = messages.len();
-        let mut enriched = Vec::with_capacity(len);
-        for result in self.lookup.enrich_batch(messages).await {
-            match result {
-                Ok(m) => enriched.push(m),
-                Err((_, e)) => {
-                    if let Err(nack) = commit(vec![MessageDisposition::Nack; len]).await {
-                        tracing::warn!("lookup: failed to nack the batch: {nack}");
+        loop {
+            let ReceivedBatch { messages, commit } = self.inner.receive_batch(max_messages).await?;
+            if messages.is_empty() {
+                return Ok(ReceivedBatch { messages, commit });
+            }
+            let len = messages.len();
+            let mut enriched = Vec::with_capacity(len);
+            let mut kept = Vec::with_capacity(len);
+            let mut dropped = Vec::new();
+            let mut transient = None;
+            for (i, result) in self
+                .lookup
+                .enrich_batch(messages)
+                .await
+                .into_iter()
+                .enumerate()
+            {
+                match result {
+                    Ok(m) => {
+                        enriched.push(m);
+                        kept.push(i);
                     }
-                    return Err(match e {
-                        PublisherError::NonRetryable(e) => ConsumerError::Permanent(e),
-                        PublisherError::Retryable(e) | PublisherError::Connection(e) => {
-                            ConsumerError::Connection(e)
-                        }
-                    });
+                    Err((m, PublisherError::NonRetryable(e))) => dropped.push((m.message_id, e)),
+                    Err((_, PublisherError::Retryable(e) | PublisherError::Connection(e))) => {
+                        transient = Some(e);
+                        break;
+                    }
                 }
             }
+            if let Some(e) = transient {
+                if let Err(nack) = commit(vec![MessageDisposition::Nack; len]).await {
+                    tracing::warn!("lookup: failed to nack the batch: {nack}");
+                }
+                return Err(ConsumerError::Connection(e));
+            }
+            for (id, e) in dropped {
+                tracing::error!(
+                    message_id = format_args!("{id:032x}"),
+                    "lookup: dropping input message: {e:#}"
+                );
+            }
+            if enriched.is_empty() {
+                commit(vec![MessageDisposition::Ack; len])
+                    .await
+                    .map_err(ConsumerError::Connection)?;
+                continue;
+            }
+            if kept.len() == len {
+                return Ok(ReceivedBatch {
+                    messages: enriched,
+                    commit,
+                });
+            }
+            // Dropped messages are acked; the kept ones take the route's dispositions.
+            let commit: BatchCommitFunc = Box::new(move |dispositions| {
+                let mut all = vec![MessageDisposition::Ack; len];
+                for (i, d) in kept.into_iter().zip(dispositions) {
+                    all[i] = d;
+                }
+                commit(all)
+            });
+            return Ok(ReceivedBatch {
+                messages: enriched,
+                commit,
+            });
         }
-        Ok(ReceivedBatch {
-            messages: enriched,
-            commit,
-        })
     }
 
     async fn status(&self) -> EndpointStatus {
@@ -546,23 +586,59 @@ entries:
     }
 
     #[tokio::test]
-    async fn a_failed_consumer_lookup_nacks_the_batch_for_redelivery() {
-        let source = memory_source("lookup_consumer_fail");
-        let channel = source.channel();
-        channel
+    async fn a_retryable_consumer_lookup_nacks_the_batch_for_redelivery() {
+        let source = memory_source("lookup_consumer_retry");
+        source
+            .channel()
             .fill_messages(vec![msg(json!({"id": 1}))])
             .await
             .unwrap();
-        let config: LookupMiddleware =
-            serde_yaml_ng::from_str("{ from: { null: null }, into: prev }").unwrap();
+        let config: LookupMiddleware = serde_yaml_ng::from_str(
+            r#"{ from: { static: { body: "", raw: true, metadata: { http_status_code: "503" } } }, into: prev }"#,
+        )
+        .unwrap();
         let mut consumer = LookupConsumer::new(Box::new(source), &config, "lookup_test")
             .await
             .unwrap();
         let err = consumer.receive_batch(10).await.err().unwrap();
-        assert!(matches!(err, ConsumerError::Permanent(_)), "{err}");
+        assert!(matches!(err, ConsumerError::Connection(_)), "{err}");
 
-        let mut again = memory_source("lookup_consumer_fail");
+        let mut again = memory_source("lookup_consumer_retry");
         let batch = again.receive_batch(10).await.unwrap();
         assert_eq!(payload(&batch.messages[0]), json!({"id": 1}));
+    }
+
+    #[tokio::test]
+    async fn a_non_retryable_consumer_lookup_drops_only_its_message() {
+        let source = memory_source("lookup_consumer_drop");
+        let channel = source.channel();
+        channel
+            .fill_messages(vec![
+                msg(json!({"id": 1})),
+                CanonicalMessage::new(b"not json".to_vec(), None),
+                msg(json!({"id": 3})),
+            ])
+            .await
+            .unwrap();
+        let config: LookupMiddleware = serde_yaml_ng::from_str(
+            r#"{ from: { static: { body: '{"v":"${payload:id}"}', raw: true } }, into: prev }"#,
+        )
+        .unwrap();
+        let mut consumer = LookupConsumer::new(Box::new(source), &config, "lookup_test")
+            .await
+            .unwrap();
+        let batch = consumer.receive_batch(10).await.unwrap();
+        let ids: Vec<_> = batch
+            .messages
+            .iter()
+            .map(|m| payload(m)["id"].clone())
+            .collect();
+        assert_eq!(ids, vec![json!(1), json!(3)]);
+        (batch.commit)(vec![MessageDisposition::Ack, MessageDisposition::Nack])
+            .await
+            .unwrap();
+        let requeued = channel.drain_messages();
+        assert_eq!(requeued.len(), 1);
+        assert_eq!(payload(&requeued[0])["id"], 3);
     }
 }
