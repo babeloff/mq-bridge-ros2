@@ -1556,6 +1556,24 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// Serializes tests that write the process-wide `MQB__` environment.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Removes the given environment variables when dropped, even on panic.
+    struct EnvVarsGuard(Vec<String>);
+
+    impl Drop for EnvVarsGuard {
+        fn drop(&mut self) {
+            for key in &self.0 {
+                unsafe { std::env::remove_var(key) };
+            }
+        }
+    }
+
     #[derive(Default)]
     struct RecordingSecretStore {
         stored: Mutex<Vec<HashMap<String, String>>>,
@@ -1635,6 +1653,7 @@ routes:
     }
     #[test]
     fn test_config_from_env_vars() {
+        let _env = env_lock();
         // Set environment variables
         // Clear the var first to avoid interference from other tests
         unsafe {
@@ -2332,6 +2351,8 @@ publishers:
         assert!(!saved.contains("rt_pass") && !saved.contains("rt_token"));
 
         let stored = secret_store.stored.lock().unwrap()[0].clone();
+        let _env = env_lock();
+        let _vars = EnvVarsGuard(stored.keys().cloned().collect());
         unsafe {
             for (key, value) in &stored {
                 std::env::set_var(key, value);
@@ -2339,11 +2360,6 @@ publishers:
         }
         let cli = load_config_internal(Some(path_str.clone()), None, None, None, false, true);
         let desktop = load_config_at_path(path_str);
-        unsafe {
-            for key in stored.keys() {
-                std::env::remove_var(key);
-            }
-        }
         let _ = std::fs::remove_file(path);
 
         for (loaded, _) in [cli.unwrap(), desktop.unwrap()] {
@@ -2474,51 +2490,5 @@ publishers:
         }
 
         let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn tmp_probe_basic_auth_balanced_round_trip() {
-        let config: AppConfig = serde_yaml_ng::from_str(
-            r#"
-config_security:
-  mode: balanced
-consumers:
-  - name: "srv"
-    endpoint:
-      http:
-        url: "0.0.0.0:1299"
-        basic_auth: ["u", "p"]
-publishers:
-  - name: "cli"
-    endpoint:
-      http:
-        url: "http://localhost:1299"
-        basic_auth: ["u", "p"]
-"#,
-        )
-        .unwrap();
-        let path = std::env::temp_dir().join("mqb-probe-basic-auth.yml");
-        let store = RecordingSecretStore::default();
-        config
-            .save_with_secret_store(path.to_str().unwrap(), &store)
-            .unwrap();
-        let stored = store.stored.lock().unwrap().clone();
-        eprintln!("SAVED FILE:\n{}", std::fs::read_to_string(&path).unwrap());
-        eprintln!("SECRETS: {:#?}", stored);
-        for m in &stored {
-            for (k, v) in m {
-                unsafe {
-                    std::env::set_var(k, v);
-                }
-            }
-        }
-        let (loaded, _) =
-            load_config(Some(path.to_str().unwrap().to_string()), None, None, None).unwrap();
-        for c in &loaded.consumers {
-            eprintln!("CONSUMER {:?}", c.endpoint.endpoint_type);
-        }
-        for p in &loaded.publishers {
-            eprintln!("PUBLISHER {:?}", p.endpoint.endpoint_type);
-        }
     }
 }

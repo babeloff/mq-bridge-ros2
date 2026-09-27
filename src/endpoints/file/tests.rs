@@ -2265,6 +2265,30 @@ async fn test_file_csv_blank_lines_are_not_rows() {
         rows,
         vec![json!({"a": "1", "b": "2"}), json!({"a": "3", "b": "4"})]
     );
+
+    // Consume { delete: true }: a blank line is deleted with the row behind it, never
+    // in place of an unacked row.
+    let path = dir.path().join("queue.csv");
+    tokio::fs::write(&path, "a,b\n1,2\n\n3,4\r\n\r\n")
+        .await
+        .unwrap();
+    let config = FileConfig {
+        mode: Some(FileConsumerMode::Consume { delete: true }),
+        ..csv_config(&path)
+    };
+    let mut source = FileConsumer::new(&config).await.unwrap();
+    let batch = source.receive_batch(8).await.unwrap();
+    assert_eq!(batch.messages.len(), 2);
+    (batch.commit)(vec![
+        crate::traits::MessageDisposition::Ack,
+        crate::traits::MessageDisposition::Nack,
+    ])
+    .await
+    .unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(&path).await.unwrap(),
+        "\n3,4\r\n\r\n"
+    );
 }
 #[tokio::test]
 async fn test_file_csv_value_types_and_escaping() {

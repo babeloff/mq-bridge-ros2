@@ -251,7 +251,12 @@ impl Lookup {
         mut doc: Value,
         results: impl Iterator<Item = Result<Option<Value>, PublisherError>>,
     ) -> Result<CanonicalMessage, (CanonicalMessage, PublisherError)> {
-        let results = match results.collect::<Result<Vec<_>, _>>() {
+        // Drain every entry first, so the per-entry iterators stay aligned across messages.
+        let results = match results
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+        {
             Ok(results) => results,
             Err(e) => return Err((msg, e)),
         };

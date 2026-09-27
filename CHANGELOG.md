@@ -130,8 +130,8 @@ All notable changes to `mq-bridge`. Newest first.
   key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
   JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
   duplicate, and the message was gone. A failed delivery now releases its key, and a copy that
-  arrives while another is still in flight waits for it instead of being acked on its
-  strength.
+  arrives while another is still in flight waits for it instead of being acked as a
+  duplicate before the first one has succeeded.
 - **`deduplication` writes its marker before acking the source**, not after. A crash between
   the two now replays a message that is already recognised.
 - **`deduplication` on MongoDB no longer fails the route on every contested key.** The upsert

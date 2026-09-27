@@ -50,8 +50,8 @@ orders_bridge:
 
 `mq-bridge-app` exports the spans over OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` (or
 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set; `OTEL_SERVICE_NAME` defaults to
-`mq-bridge-app`. Without that variable no exporter is installed and the middleware is left out
-of the chain, so it costs nothing per message.
+`mq-bridge-app`. When neither endpoint variable is set, no exporter is installed and the
+middleware is left out of the chain, so it costs nothing per message.
 
 ## Logging
 

@@ -35,8 +35,9 @@ integer `42`.
 - Paths have no quoting: a CSV column whose header contains `.` or `[` (e.g. `price.usd`)
   cannot be addressed by a mapping.
 - Coercions are the lossless ones only: `string → integer`, `string → number`,
-  `string → boolean`, `number → string`. `string → number` keeps integers exact
-  (`"42"` → `42`); fractional text goes through f64 (~17 significant digits).
+  `string → boolean`, `number → string`. `string → number` keeps integers exact within
+  the i64/u64 range (`"42"` → `42`); larger integers and fractional text go through f64
+  (~17 significant digits) and may lose precision.
 
 ## Decode an embedded JSON string
 

@@ -1867,9 +1867,14 @@ fn run_file_tail_task_sync(
     }
 }
 
+/// Blank lines that precede a queued message in the file, by message id; acking the
+/// message deletes them too.
+type ExtraLines = Arc<StdMutex<HashMap<u128, usize>>>;
+
 struct FileQueueConsumer {
     msg_rx: async_channel::Receiver<Vec<CanonicalMessage>>,
     lines_in_memory: Arc<AtomicUsize>,
+    extra_lines: ExtraLines,
     path: String,
     file_lock: Arc<Mutex<()>>,
     buffer: Arc<Mutex<Vec<CanonicalMessage>>>,
@@ -1892,6 +1897,7 @@ fn run_file_queue_task(
     delimiter: Vec<u8>,
     format: FileFormat,
     ready: Arc<AtomicBool>,
+    extra_lines: ExtraLines,
 ) {
     let mut current_sleep = std::time::Duration::from_millis(1);
     const MAX_SLEEP: std::time::Duration = std::time::Duration::from_millis(100);
@@ -1905,6 +1911,7 @@ fn run_file_queue_task(
         buf.clear();
         let mut batch = Vec::with_capacity(128);
         let mut lines_read = 0;
+        let mut blanks = 0;
 
         {
             let _guard = runtime_handle.block_on(file_lock.lock());
@@ -1952,12 +1959,19 @@ fn run_file_queue_task(
                             }
                             match parse_message(&buf, &format, &mut csv_header) {
                                 Some(msg) => {
+                                    if blanks > 0 {
+                                        extra_lines
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .insert(msg.message_id, blanks);
+                                    }
+                                    lines_read += 1 + blanks;
+                                    blanks = 0;
                                     batch.push(msg);
-                                    lines_read += 1;
                                 }
-                                None => {
-                                    // CSV header line: remove it immediately so it never
-                                    // occupies a slot in the ack/delete line accounting.
+                                // A header or blank line at the file's front: nothing unacked
+                                // precedes it, so remove it now, outside the line accounting.
+                                None if skip_count == 0 && lines_read == 0 && blanks == 0 => {
                                     if let Err(e) = runtime_handle.block_on(remove_lines_from_file(
                                         &path, 1, &delimiter, &format,
                                     )) {
@@ -1968,6 +1982,8 @@ fn run_file_queue_task(
                                         );
                                     }
                                 }
+                                // A blank line behind unacked rows is deleted with the next row.
+                                None => blanks += 1,
                             }
                         }
                         Err(_) => break,
@@ -2482,6 +2498,8 @@ impl FileConsumer {
                 let (msg_tx, msg_rx) = async_channel::bounded(100);
                 let file_lock = get_file_lock(&config.path);
                 let lines_in_memory = Arc::new(AtomicUsize::new(0));
+                let extra_lines = ExtraLines::default();
+                let extra_lines_clone = extra_lines.clone();
                 let ready = Arc::new(AtomicBool::new(false));
                 let ready_clone = ready.clone();
                 let lines_clone = lines_in_memory.clone();
@@ -2501,6 +2519,7 @@ impl FileConsumer {
                         delimiter_clone,
                         format_clone,
                         ready_clone,
+                        extra_lines_clone,
                     );
                 });
 
@@ -2508,6 +2527,7 @@ impl FileConsumer {
                 Ok(Self::wrap(ConsumerBackend::Queue(FileQueueConsumer {
                     msg_rx,
                     lines_in_memory,
+                    extra_lines,
                     path: config.path.clone(),
                     file_lock,
                     buffer: Arc::new(Mutex::new(Vec::new())),
@@ -2908,6 +2928,7 @@ impl FileConsumer {
                 let lock = c.file_lock.clone();
                 let buffer_clone = c.buffer.clone();
                 let lines_mem = c.lines_in_memory.clone();
+                let extra_lines = c.extra_lines.clone();
                 let batch_for_commit = batch.clone();
                 let delimiter = c.delimiter.clone();
                 let format = c.format.clone();
@@ -2949,14 +2970,21 @@ impl FileConsumer {
                             }
 
                             if leading_acks > 0 {
+                                let lines = {
+                                    let mut extra =
+                                        extra_lines.lock().unwrap_or_else(|e| e.into_inner());
+                                    batch_for_commit[..leading_acks]
+                                        .iter()
+                                        .map(|m| 1 + extra.remove(&m.message_id).unwrap_or(0))
+                                        .sum()
+                                };
                                 let _guard = lock.lock().await;
                                 if let Err(e) =
-                                    remove_lines_from_file(&path, leading_acks, &delimiter, &format)
-                                        .await
+                                    remove_lines_from_file(&path, lines, &delimiter, &format).await
                                 {
                                     tracing::error!("Failed to remove lines from {}: {}", path, e);
                                 }
-                                lines_mem.fetch_sub(leading_acks, Ordering::SeqCst);
+                                lines_mem.fetch_sub(lines, Ordering::SeqCst);
                             }
                             Ok(())
                         })
