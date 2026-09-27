@@ -26,6 +26,8 @@ All notable changes to `mq-bridge`. Newest first.
 - **Read-by-key on MongoDB and SQLx publishers**, for `lookup`: `mongodb.find` (a filter
   template) and `sqlx.select_one_query` answer each send with the first match and write
   nothing.
+- **`clickhouse.select_one_query`**, for `lookup`: the same read-by-key on ClickHouse, with
+  `${payload:…}` / `${metadata:…}` tokens sent as typed query parameters.
 
 ## 0.4.15
 

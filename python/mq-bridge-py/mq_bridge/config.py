@@ -23,6 +23,8 @@ IbmMqConfig = dict
 IbmTlsConfig = dict
 KafkaConfig = dict
 LimiterMiddleware = dict
+LookupEntry = dict
+LookupMiddleware = dict
 MemoryConfig = dict
 MetricsMiddleware = dict
 Middleware = dict
@@ -30,6 +32,7 @@ MongoDbConfig = dict
 MqttConfig = dict
 NatsConfig = dict
 ObjectStoreConfig = dict
+OtelMiddleware = dict
 PackMiddleware = dict
 PostgresCdcConfig = dict
 RandomPanicMiddleware = dict
@@ -71,6 +74,7 @@ SpoolDone = str
 SpoolFsync = str
 StaticConfig = str
 TransformErrorPolicy = str
+WeakJoinAck = str
 WeakJoinTimeout = str
 WebSocketExecutionMode = str
 ZeroMqBackend = str
@@ -111,6 +115,8 @@ __all__ = [
     "IbmTlsConfig",
     "KafkaConfig",
     "LimiterMiddleware",
+    "LookupEntry",
+    "LookupMiddleware",
     "MappingRule",
     "MemoryConfig",
     "MetricsMiddleware",
@@ -124,6 +130,7 @@ __all__ = [
     "NatsConfig",
     "NatsDeliverPolicy",
     "ObjectStoreConfig",
+    "OtelMiddleware",
     "PackFormat",
     "PackMiddleware",
     "PostgresCdcConfig",
@@ -151,6 +158,7 @@ __all__ = [
     "TransformErrorPolicy",
     "TransformMiddleware",
     "UnpackMiddleware",
+    "WeakJoinAck",
     "WeakJoinMiddleware",
     "WeakJoinTimeout",
     "WebSocketConfig",

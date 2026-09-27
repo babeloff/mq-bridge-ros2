@@ -646,6 +646,7 @@ export interface ClickHouseConfig {
   columns?: Record<string, string> | null;
   async_insert?: boolean;
   wait_for_async_insert?: boolean | null;
+  select_one_query?: string | null;
   cursor_column?: string | null;
   cursor_id?: string | null;
   checkpoint_store?: string | null;

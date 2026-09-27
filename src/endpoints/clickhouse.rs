@@ -21,7 +21,7 @@ use crate::checkpoint::{self, CheckpointBackend, CheckpointStore};
 use crate::models::{ClickHouseConfig, Compression};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher, PublisherError, ReceivedBatch, SentBatch,
+    MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
 };
 use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
@@ -94,6 +94,89 @@ fn build_row(
         },
     }
 }
+
+/// A `select_one_query` split around its `${payload:…}` / `${metadata:…}` tokens. Each token is
+/// sent as a typed query parameter `{pN:Type}`, so values never enter the SQL text.
+struct SelectOne {
+    parts: Vec<String>,
+    tokens: Vec<String>,
+}
+
+impl SelectOne {
+    fn parse(sql: &str) -> anyhow::Result<Self> {
+        let mut parts = Vec::new();
+        let mut tokens = Vec::new();
+        let mut rest = sql;
+        while let Some(start) = rest.find("${") {
+            let len = rest[start..].find('}').ok_or_else(|| {
+                anyhow!(
+                    "select_one_query: unterminated token at '{}'",
+                    &rest[start..]
+                )
+            })? + 1;
+            let token = &rest[start..start + len];
+            if !(token.starts_with("${payload:") || token.starts_with("${metadata:")) {
+                return Err(anyhow!(
+                    "select_one_query: unsupported token '{token}'; use ${{payload:…}} or ${{metadata:…}}"
+                ));
+            }
+            parts.push(rest[..start].to_string());
+            tokens.push(token.to_string());
+            rest = &rest[start + len..];
+        }
+        parts.push(rest.to_string());
+        Ok(Self { parts, tokens })
+    }
+
+    /// The SQL with `{pN:Type}` slots, and the matching `param_pN` values, for one message.
+    fn render(&self, msg: &CanonicalMessage) -> (String, Vec<(String, String)>) {
+        let payload_json: Option<serde_json::Value> = serde_json::from_slice(&msg.payload).ok();
+        let mut sql = self.parts[0].clone();
+        let mut params = Vec::with_capacity(self.tokens.len());
+        for (i, (token, part)) in self.tokens.iter().zip(&self.parts[1..]).enumerate() {
+            let (ty, value) = query_param(&resolve_token(token, msg, &payload_json));
+            sql.push_str(&format!("{{p{i}:{ty}}}"));
+            sql.push_str(part);
+            params.push((format!("param_p{i}"), value));
+        }
+        (sql, params)
+    }
+}
+
+/// ClickHouse type and escaped value for a typed query parameter.
+fn query_param(value: &serde_json::Value) -> (&'static str, String) {
+    use serde_json::Value;
+    let escape = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    };
+    match value {
+        Value::Null => ("Nullable(String)", "\\N".into()),
+        Value::Bool(b) => ("Bool", b.to_string()),
+        Value::Number(n) if n.is_i64() => ("Int64", n.to_string()),
+        Value::Number(n) if n.is_u64() => ("UInt64", n.to_string()),
+        Value::Number(n) => ("Float64", n.to_string()),
+        Value::String(s) => ("String", escape(s)),
+        other => ("String", escape(&other.to_string())),
+    }
+}
+
+/// A non-2xx answer from ClickHouse, kept typed so callers can tell client errors apart.
+#[derive(Debug)]
+struct ChHttpError {
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+impl std::fmt::Display for ChHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClickHouse returned {}: {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for ChHttpError {}
 
 /// Whether the URL names this machine, where a clear-text password never leaves it.
 fn is_loopback(url: &url::Url) -> bool {
@@ -321,7 +404,11 @@ impl ChClient {
             _ => String::from_utf8_lossy(&bytes).into_owned(),
         };
         if !status.is_success() {
-            return Err(anyhow!("ClickHouse returned {}: {}", status, text.trim()));
+            return Err(ChHttpError {
+                status,
+                body: text.trim().to_string(),
+            }
+            .into());
         }
         Ok(text)
     }
@@ -347,7 +434,12 @@ pub struct ClickHousePublisher {
     columns: Option<std::collections::BTreeMap<String, String>>,
     async_insert: bool,
     wait_for_async_insert: bool,
+    /// Set by `select_one_query`: a read-only lookup publisher.
+    select_one: Option<SelectOne>,
 }
+
+/// Metadata key telling whether a `select_one_query` returned a row.
+const FOUND_KEY: &str = "clickhouse.found";
 
 impl ClickHousePublisher {
     pub async fn new(config: &ClickHouseConfig) -> anyhow::Result<Self> {
@@ -376,7 +468,44 @@ impl ClickHousePublisher {
             columns: config.columns.clone(),
             async_insert: config.async_insert,
             wait_for_async_insert: config.wait_for_async_insert.unwrap_or(true),
+            select_one: config
+                .select_one_query
+                .as_deref()
+                .map(SelectOne::parse)
+                .transpose()?,
         })
+    }
+
+    /// Runs `select_one_query` and answers with its first row, or an empty payload.
+    async fn select_one(&self, message: &CanonicalMessage) -> Result<Sent, PublisherError> {
+        let Some(query) = &self.select_one else {
+            return Err(PublisherError::NonRetryable(anyhow!(
+                "ClickHouse publisher has no select_one_query"
+            )));
+        };
+        let (sql, params) = query.render(message);
+        let mut extra: Vec<(&str, &str)> = vec![
+            ("default_format", "JSONEachRow"),
+            ("output_format_json_quote_64bit_integers", "0"),
+        ];
+        extra.extend(params.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let body = self.client.run(&sql, &extra, false).await.map_err(|e| {
+            match e.downcast_ref::<ChHttpError>() {
+                Some(h)
+                    if h.status.is_client_error() && !matches!(h.status.as_u16(), 408 | 429) =>
+                {
+                    PublisherError::NonRetryable(e)
+                }
+                _ => PublisherError::Retryable(e),
+            }
+        })?;
+        let row = body.lines().find(|l| !l.trim().is_empty());
+        let payload = row.map(|r| r.as_bytes().to_vec()).unwrap_or_default();
+        let mut response = CanonicalMessage::new(payload, Some(message.message_id));
+        response
+            .metadata
+            .insert(FOUND_KEY.to_string(), row.is_some().to_string());
+        Ok(Sent::Response(response))
     }
 }
 
@@ -388,6 +517,12 @@ impl MessagePublisher for ClickHousePublisher {
     ) -> Result<SentBatch, PublisherError> {
         if messages.is_empty() {
             return Ok(SentBatch::Ack);
+        }
+        if self.select_one.is_some() {
+            return crate::traits::send_batch_helper(self, messages, |p, m| {
+                Box::pin(async move { p.select_one(&m).await })
+            })
+            .await;
         }
         let mut body = format!("INSERT INTO {} FORMAT JSONEachRow\n", self.table);
         for msg in &messages {
@@ -889,6 +1024,39 @@ mod tests {
                 "source": "clickhouse",
                 "missing": null,
             })
+        );
+    }
+
+    #[test]
+    fn select_one_binds_tokens_as_typed_params() {
+        let q = SelectOne::parse(
+            "SELECT * FROM c WHERE id = ${payload:id} AND name = ${payload:name} \
+             AND region = ${metadata:region} AND x = ${payload:missing} LIMIT 1",
+        )
+        .unwrap();
+        let m = msg(
+            &serde_json::json!({"id": 7, "name": "a\tb\\c"}),
+            &[("region", "eu")],
+        );
+        let (sql, params) = q.render(&m);
+        assert_eq!(
+            sql,
+            "SELECT * FROM c WHERE id = {p0:Int64} AND name = {p1:String} \
+             AND region = {p2:String} AND x = {p3:Nullable(String)} LIMIT 1"
+        );
+        let values: Vec<&str> = params.iter().map(|(_, v)| v.as_str()).collect();
+        assert_eq!(values, ["7", "a\\tb\\\\c", "eu", "\\N"]);
+        assert_eq!(params[0].0, "param_p0");
+    }
+
+    #[test]
+    fn select_one_rejects_bad_tokens() {
+        assert!(SelectOne::parse("SELECT ${payload:id").is_err());
+        assert!(SelectOne::parse("SELECT ${env:HOME}").is_err());
+        let plain = SelectOne::parse("SELECT 1").unwrap();
+        assert_eq!(
+            plain.render(&msg(&serde_json::json!({}), &[])).0,
+            "SELECT 1"
         );
     }
 

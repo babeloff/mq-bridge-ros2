@@ -325,6 +325,13 @@
             "null"
           ]
         },
+        "select_one_query": {
+          "description": "(Publisher only) SELECT with `${payload:field}` / `${metadata:key}` tokens. Each send\nanswers with the first row as a JSON object and writes nothing. For `lookup`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "table": {
           "description": "The table to read from / write to. May be schema-qualified (`db.table`).",
           "type": "string"
@@ -2102,6 +2109,94 @@
         "messages_per_second"
       ]
     },
+    "LookupEntry": {
+      "description": "One lookup of a `lookup` middleware.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "The endpoint to ask; it must answer with a response.",
+          "$ref": "#/$defs/Endpoint"
+        },
+        "into": {
+          "description": "Dotted payload path the response is written to, e.g. `customer.profile`.",
+          "type": "string"
+        },
+        "metadata": {
+          "description": "Request metadata templates, e.g. `http_path: \"/users/${payload:user_id}\"`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "payload": {
+          "description": "Request payload template. Defaults to the message's own payload and metadata.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "into"
+      ]
+    },
+    "LookupMiddleware": {
+      "description": "Lookup (enrich) middleware configuration.\n\nSends a request per message to a request-capable endpoint (HTTP, NATS/Memory\n`request_reply`, MongoDB `find`, SQLx `select_one_query`) and writes the response into\nthe payload. Several `entries` run in parallel per message.",
+      "type": "object",
+      "properties": {
+        "concurrency": {
+          "description": "Messages enriched at once per batch.",
+          "type": "integer",
+          "format": "uint",
+          "default": 16,
+          "minimum": 0
+        },
+        "entries": {
+          "description": "Further lookups, run in parallel with `from`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LookupEntry"
+          }
+        },
+        "from": {
+          "description": "The endpoint to ask; it must answer with a response. Use `entries` for several.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "into": {
+          "description": "Dotted payload path the response is written to, e.g. `customer.profile`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "description": "Request metadata templates, e.g. `http_path: \"/users/${payload:user_id}\"`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "payload": {
+          "description": "Request payload template. Defaults to the message's own payload and metadata.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "MappingRule": {
       "description": "How one output field is produced from the input document.\n\nEither a bare path string (`\"$.first_name\"`) or an object with a `path` plus an\noptional `default` and `required` flag.",
       "anyOf": [
@@ -2219,6 +2314,32 @@
           "additionalProperties": false,
           "required": [
             "metrics"
+          ]
+        },
+        {
+          "description": "Per-message OpenTelemetry spans, continuing the `traceparent` metadata. Input and output.",
+          "type": "object",
+          "properties": {
+            "otel": {
+              "$ref": "#/$defs/OtelMiddleware"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "otel"
+          ]
+        },
+        {
+          "description": "Asks other endpoints per message and writes their responses into the payload. Input and output.",
+          "type": "object",
+          "properties": {
+            "lookup": {
+              "$ref": "#/$defs/LookupMiddleware"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "lookup"
           ]
         },
         {
@@ -2507,6 +2628,13 @@
         "database": {
           "description": "The database name.",
           "type": "string"
+        },
+        "find": {
+          "description": "(Publisher only) Extended-JSON filter template, e.g. `{\"_id\": \"${payload:id}\"}`. Each send\nreturns the first match as the response and writes nothing. For the `lookup` middleware.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "format": {
           "description": "Format for storing messages. Defaults to Normal.",
@@ -3049,6 +3177,11 @@
       "required": [
         "url"
       ]
+    },
+    "OtelMiddleware": {
+      "description": "OpenTelemetry middleware configuration.\n\nOpens a span per message and carries the W3C `traceparent` in metadata. Inactive unless\nthe host installed an OpenTelemetry tracer provider before the route started.",
+      "type": "object",
+      "additionalProperties": false
     },
     "PackFormat": {
       "description": "Batch envelope used by the `pack` / `unpack` middlewares.",
@@ -3756,6 +3889,13 @@
             "null"
           ]
         },
+        "select_one_query": {
+          "description": "(Publisher only) SELECT with `${payload:field}` / `${metadata:key}` tokens. Each send\nanswers with the first row as a JSON object and writes nothing. For `lookup`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "select_query": {
           "description": "(Consumer only) Optional. A custom SQL SELECT query to fetch messages. This is only supported for PostgreSQL and Microsoft SQL Server.\nThe query must include a placeholder for the batch size (`$1` for PostgreSQL, `@p1` for SQL Server).\nThe bridge will bind the route's `batch_size` to this placeholder.",
           "type": [
@@ -4117,10 +4257,30 @@
       },
       "additionalProperties": false
     },
+    "WeakJoinAck": {
+      "description": "When a weak join acknowledges the source messages it buffers.",
+      "oneOf": [
+        {
+          "description": "Ack members once their joined message is committed; a crash redelivers open groups.",
+          "type": "string",
+          "const": "on_join"
+        },
+        {
+          "description": "Ack on receipt; open groups are lost on a crash. For sources whose prefetch limit is\nsmaller than the messages held in open groups.",
+          "type": "string",
+          "const": "on_receive"
+        }
+      ]
+    },
     "WeakJoinMiddleware": {
       "description": "Weak Join middleware configuration.\n\nCorrelates messages by a metadata key and joins them within a timeout window.\nCount mode (default) waits for `expected_count` messages and emits a JSON array.\nBranch mode (set `branch_by`) waits for named branches and emits a branch-keyed object.",
       "type": "object",
       "properties": {
+        "ack": {
+          "description": "When source messages are acknowledged: after the joined message is committed (default) or on receipt.",
+          "$ref": "#/$defs/WeakJoinAck",
+          "default": "on_join"
+        },
         "branch_by": {
           "description": "Metadata key naming each message's branch; enables branch mode when set.",
           "type": [

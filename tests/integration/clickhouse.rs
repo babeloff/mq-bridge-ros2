@@ -4,7 +4,9 @@
 use mq_bridge::endpoints::clickhouse::{ClickHouseCursorReader, ClickHousePublisher};
 use mq_bridge::models::ClickHouseConfig;
 use mq_bridge::test_utils::{run_test_with_docker, setup_logging};
-use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
+use mq_bridge::traits::{
+    MessageConsumer, MessageDisposition, MessagePublisher, PublisherError, Sent,
+};
 use mq_bridge::CanonicalMessage;
 
 const DOCKER_COMPOSE_FILE: &str = "tests/integration/docker-compose/clickhouse.yml";
@@ -128,7 +130,52 @@ pub async fn test_clickhouse_roundtrip() {
             "mapped row mismatch: {got}"
         );
 
-        println!("[ClickHouse] round-trip + cursor + column-mapping OK");
+        // --- select_one_query: read-by-key for `lookup` ---
+        let sel_cfg = ClickHouseConfig {
+            table: "ch_events".into(),
+            select_one_query: Some(
+                "SELECT id, name FROM ch_events WHERE id = ${payload:id} AND name = ${payload:name} LIMIT 1"
+                    .into(),
+            ),
+            ..base_config()
+        };
+        let sel_pub = ClickHousePublisher::new(&sel_cfg).await.unwrap();
+        let hit = sel_pub
+            .send(CanonicalMessage::new(br#"{"id":7,"name":"msg-7"}"#.to_vec(), None))
+            .await
+            .unwrap();
+        let Sent::Response(hit) = hit else {
+            panic!("select_one_query must answer with a response")
+        };
+        let row: serde_json::Value = serde_json::from_slice(&hit.payload).unwrap();
+        assert_eq!(row, serde_json::json!({"id": 7, "name": "msg-7"}));
+        assert_eq!(hit.metadata.get("clickhouse.found").unwrap(), "true");
+
+        let miss = sel_pub
+            .send(CanonicalMessage::new(br#"{"id":999,"name":"it's\n\\x"}"#.to_vec(), None))
+            .await
+            .unwrap();
+        let Sent::Response(miss) = miss else {
+            panic!("select_one_query must answer with a response")
+        };
+        assert!(miss.payload.is_empty());
+        assert_eq!(miss.metadata.get("clickhouse.found").unwrap(), "false");
+
+        let bad_cfg = ClickHouseConfig {
+            select_one_query: Some("SELECT nope FROM ch_events WHERE id = ${payload:id}".into()),
+            ..sel_cfg
+        };
+        let bad = ClickHousePublisher::new(&bad_cfg)
+            .await
+            .unwrap()
+            .send(CanonicalMessage::new(br#"{"id":1}"#.to_vec(), None))
+            .await;
+        assert!(
+            matches!(bad, Err(PublisherError::NonRetryable(_))),
+            "a query error must not be retried: {bad:?}"
+        );
+
+        println!("[ClickHouse] round-trip + cursor + column-mapping + select_one OK");
     })
     .await;
 }

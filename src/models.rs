@@ -2676,6 +2676,10 @@ pub struct ClickHouseConfig {
     /// true (durable). False = fire-and-forget: faster, but a crash before flush can drop the batch.
     #[serde(default)]
     pub wait_for_async_insert: Option<bool>,
+    /// (Publisher only) SELECT with `${payload:field}` / `${metadata:key}` tokens. Each send
+    /// answers with the first row as a JSON object and writes nothing. For `lookup`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select_one_query: Option<String>,
     /// (Consumer only) Read an existing table **non-destructively** and resumably, paging by this
     /// monotonic column (`SELECT … WHERE {cursor_column} > {last} ORDER BY {cursor_column} ASC LIMIT n`)
     /// and persisting the last read value under `cursor_id`.

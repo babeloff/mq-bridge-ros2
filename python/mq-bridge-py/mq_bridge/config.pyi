@@ -57,6 +57,7 @@ class ClickHouseConfig(TypedDict, total=False):
     polling_interval_ms: Optional[int]
     request_timeout_ms: Optional[int]
     select_columns: Optional[str]
+    select_one_query: Optional[str]
     table: Required[str]
     tls: TlsConfig
     url: Required[str]
@@ -294,6 +295,34 @@ class LimiterMiddleware(TypedDict, total=False):
     messages_per_second: Required[float]
 
 
+# One lookup of a `lookup` middleware.
+LookupEntry = TypedDict(
+    "LookupEntry",
+    {
+        "from": Required[Endpoint],
+        "into": Required[str],
+        "metadata": Dict[str, str],
+        "payload": Optional[str],
+    },
+    total=False,
+)
+
+
+# Lookup (enrich) middleware configuration.
+LookupMiddleware = TypedDict(
+    "LookupMiddleware",
+    {
+        "concurrency": int,
+        "entries": List[LookupEntry],
+        "from": Optional[Endpoint],
+        "into": Optional[str],
+        "metadata": Dict[str, str],
+        "payload": Optional[str],
+    },
+    total=False,
+)
+
+
 class MemoryConfig(TypedDict, total=False):
     capacity: Optional[int]
     enable_nack: bool
@@ -322,7 +351,9 @@ class Middleware(TypedDict, total=False):
     filter: str
     id: str
     limiter: LimiterMiddleware
+    lookup: LookupMiddleware
     metrics: MetricsMiddleware
+    otel: OtelMiddleware
     pack: PackMiddleware
     random_panic: RandomPanicMiddleware
     retry: RetryMiddleware
@@ -341,6 +372,7 @@ class MongoDbConfig(TypedDict, total=False):
     consume: Optional[MongoConsume]
     cursor_id: Optional[str]
     database: Required[str]
+    find: Optional[str]
     format: MongoDbFormat
     id_field: Optional[str]
     meta_collection: Optional[str]
@@ -416,6 +448,11 @@ class ObjectStoreConfig(TypedDict, total=False):
     name_by: NameBy
     polling_interval_ms: Optional[int]
     url: Required[str]
+
+
+class OtelMiddleware(TypedDict, total=False):
+    """OpenTelemetry middleware configuration."""
+    pass
 
 
 class PackMiddleware(TypedDict, total=False):
@@ -536,6 +573,7 @@ class SqlxConfig(TypedDict, total=False):
     password: Optional[str]
     polling_interval_ms: Optional[int]
     publication: Optional[str]
+    select_one_query: Optional[str]
     select_query: Optional[str]
     shared: Optional[bool]
     slot_name: Optional[str]
@@ -608,6 +646,7 @@ class UnpackMiddleware(TypedDict, total=False):
 
 class WeakJoinMiddleware(TypedDict, total=False):
     """Weak Join middleware configuration."""
+    ack: WeakJoinAck
     branch_by: Optional[str]
     expected_count: Required[int]
     group_by: Required[str]
@@ -657,6 +696,7 @@ SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]
 StaticConfig = Union[str, Dict[str, Any]]
 TransformErrorPolicy = Literal["reject", "pass_through"]
+WeakJoinAck = Literal["on_join", "on_receive"]
 WeakJoinTimeout = Literal["fire", "discard"]
 WebSocketExecutionMode = Literal["auto", "direct_only", "routed"]
 ZeroMqBackend = Union[Literal["zmq", "omq"], Literal["try_omq"]]

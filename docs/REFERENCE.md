@@ -929,12 +929,18 @@ whether they were found. On an input, the handler already sees the enriched mess
   response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
   `false`, for a following [`switch`](#switch).
 - `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
-  `mongodb` with `find`, or `sqlx` with `select_one_query`. An endpoint that only acknowledges
-  fails the message as non-retryable.
+  `mongodb` with `find`, `sqlx` or `clickhouse` with `select_one_query`, or `grpc` to an
+  mq-bridge `grpc` input whose route replies. An endpoint that only acknowledges fails the
+  message as non-retryable.
 - `mongodb.find` is an Extended-JSON filter template and answers with the first matching
   document; `sqlx.select_one_query` binds `${payload:…}` / `${metadata:…}` tokens like
   `insert_query` and answers with the first row as a JSON object. Neither writes anything;
   they also set `mongodb.found` / `sqlx.found`.
+- `clickhouse.select_one_query` takes the same tokens and sends each as a typed query
+  parameter (`Int64`, `UInt64`, `Float64`, `Bool`, `String`; a missing field is `NULL`), so
+  compare against a matching column or wrap it, e.g. `toDate(${payload:day})`. Add `LIMIT 1`
+  and no `FORMAT` clause. It sets `clickhouse.found`; a query error (HTTP 4xx other than 408
+  / 429) is non-retryable.
 - On Postgres, cast placeholders to the column type (`WHERE id = ${payload:author_id}::int`):
   tokens are bound untyped, and a field missing from the payload (e.g. on a CDC delete) is
   bound as text. Cast `NUMERIC`, `TIMESTAMPTZ` and similar result columns to `::text`; the
@@ -984,6 +990,14 @@ for the slowest lookup, not the sum of all. Each one sets `lookup.<into>.found`,
             select_one_query: >-
               SELECT avg(amount)::text AS avg20 FROM (SELECT amount FROM payments
               WHERE card_id = ${payload:card_id} ORDER BY ts DESC LIMIT 20) t
+      - into: features.risk
+        from:
+          clickhouse:
+            url: "http://localhost:8123"
+            table: "card_risk"
+            select_one_query: >-
+              SELECT score, updated_at FROM card_risk
+              WHERE card_id = ${payload:card_id} ORDER BY updated_at DESC LIMIT 1
 ```
 
 ### `random_panic`
