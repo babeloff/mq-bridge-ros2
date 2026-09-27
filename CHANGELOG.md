@@ -10,7 +10,12 @@ All notable changes to `mq-bridge`. Newest first.
   receipt, so a crash with open groups dropped them. They are now acked once the joined
   message is committed, and nacked with it (`ack: on_join`, the default); ordered sources
   still commit in source order. `ack: on_receive` keeps the old behaviour for sources whose
-  prefetch limit would stall on unacked messages.
+  prefetch limit would stall on unacked messages. When one due commit fails on an
+  unordered source, the others still run.
+- **`lookup`: an incoming message no longer steers an `http` lookup.** Without a `payload`
+  template the request copied the message's metadata, so its `http_method`, `http_path` and
+  `http_query` chose the lookup's method and path. Those keys are now only set by the
+  entry's `metadata`.
 - **CSV files: quoting, framing and headers.** The `object_store` source no longer splits a
   quoted field that contains a line break into two rows. Values containing the record
   `delimiter` are quoted. A string with no UTF-8 spelling (a lone `\ud800`) fails its message

@@ -928,7 +928,7 @@ whether they were found. On an input, the handler already sees the enriched mess
 
 - `metadata` and `payload` are [placeholder templates](#placeholders), rendered against the
   outgoing message. `metadata` is added to the request, so it sets `http_path`, `http_method`
-  or `http_query` on an `http` endpoint.
+  or `http_query` on an `http` endpoint. Those three keys are not inherited from the message.
 - The response is parsed as JSON; a non-JSON response is written as a string. An empty
   response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
   `false`, for a following [`switch`](#switch).

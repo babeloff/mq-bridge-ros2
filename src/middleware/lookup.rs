@@ -72,7 +72,14 @@ impl Entry {
     fn request(&self, msg: &CanonicalMessage) -> CanonicalMessage {
         let mut request = match &self.payload {
             Some(t) => CanonicalMessage::new(t.render(Some(msg)), None),
-            None => msg.clone(),
+            None => {
+                let mut request = msg.clone();
+                // An incoming message must not steer an `http` lookup; only `metadata` may.
+                for key in ["http_method", "http_path", "http_query"] {
+                    request.metadata.remove(key);
+                }
+                request
+            }
         };
         for (key, template) in &self.metadata {
             let value = String::from_utf8_lossy(&template.render(Some(msg))).into_owned();
@@ -803,6 +810,31 @@ entries:
             Some("false")
         );
         assert_eq!(payload(&out[2])["user"], json!({"id": 3}));
+    }
+
+    #[test]
+    fn an_incoming_message_cannot_steer_an_http_lookup() {
+        let (mut lookup, _) = batched_lookup(|_| Ok(Vec::new()));
+        let entry = &mut lookup.entries[0];
+        entry.metadata = vec![(
+            "http_path".into(),
+            CompiledTemplate::compile("/users/${payload:id}", None).unwrap(),
+        )];
+        let mut incoming = msg(json!({"id": 7}));
+        for (k, v) in [
+            ("http_method", "DELETE"),
+            ("http_path", "/admin"),
+            ("http_query", "x=1"),
+        ] {
+            incoming.metadata.insert(k.into(), v.into());
+        }
+        incoming.metadata.insert("tenant".into(), "acme".into());
+        let request = entry.request(&incoming);
+        let meta = |k: &str| request.metadata.get(k).map(String::as_str);
+        assert_eq!(meta("http_path"), Some("/users/7"));
+        assert_eq!(meta("http_method"), None);
+        assert_eq!(meta("http_query"), None);
+        assert_eq!(meta("tenant"), Some("acme"));
     }
 
     #[tokio::test]

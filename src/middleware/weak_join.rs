@@ -92,10 +92,17 @@ async fn settle_and_commit(
         tracker.settle(slot, disposition, &mut due);
     }
     tracker.collect_due(&mut due);
+    // Unordered commits are independent, so one failure must not drop the rest.
+    let mut first_err = None;
     for (commit, dispositions) in due {
-        commit(dispositions).await?;
+        if let Err(e) = commit(dispositions).await {
+            if tracker.ordered {
+                return Err(e);
+            }
+            first_err.get_or_insert(e);
+        }
     }
-    Ok(())
+    first_err.map_or(Ok(()), Err)
 }
 
 pub struct WeakJoinConsumer {
