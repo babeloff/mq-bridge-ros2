@@ -282,6 +282,13 @@
             "null"
           ]
         },
+        "lookup_query": {
+          "description": "(Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN\n(${payload:id})` to answer a whole batch in one query, matching rows by `id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "max_polling_interval_ms": {
           "description": "(Consumer only) If set, the poll interval backs off exponentially from `polling_interval_ms`\nup to this value while drained, resetting on new rows. Unset = constant interval.",
           "type": [
@@ -320,13 +327,6 @@
         },
         "select_columns": {
           "description": "(Consumer only) Columns to select in `cursor_column` mode. Defaults to `*`.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "select_one_query": {
-          "description": "(Publisher only) SELECT with `${payload:field}` / `${metadata:key}` tokens. Each send\nanswers with the first row as a JSON object and writes nothing. For `lookup`.",
           "type": [
             "string",
             "null"
@@ -2144,11 +2144,11 @@
       ]
     },
     "LookupMiddleware": {
-      "description": "Lookup (enrich) middleware configuration.\n\nSends a request per message to a request-capable endpoint (HTTP, NATS/Memory\n`request_reply`, MongoDB `find`, SQLx `select_one_query`) and writes the response into\nthe payload. Several `entries` run in parallel per message.",
+      "description": "Lookup (enrich) middleware configuration.\n\nAsks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`,\nSQLx/ClickHouse `lookup_query`) about each message and writes the response into the\npayload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other\nendpoints get one request per message. Several `entries` run in parallel.",
       "type": "object",
       "properties": {
         "concurrency": {
-          "description": "Messages enriched at once per batch.",
+          "description": "Requests in flight per entry when the endpoint cannot answer a batch at once.",
           "type": "integer",
           "format": "uint",
           "default": 16,
@@ -2630,7 +2630,7 @@
           "type": "string"
         },
         "find": {
-          "description": "(Publisher only) Extended-JSON filter template, e.g. `{\"_id\": \"${payload:id}\"}`. Each send\nreturns the first match as the response and writes nothing. For the `lookup` middleware.",
+          "description": "(Publisher only) Extended-JSON filter template for `lookup`, e.g. `{\"_id\": \"${payload:id}\"}`.\nAnswers with the first match. `{\"_id\": {\"$in\": [\"${payload:id}\"]}}` answers a batch at once.",
           "type": [
             "string",
             "null"
@@ -3828,6 +3828,13 @@
             "null"
           ]
         },
+        "lookup_query": {
+          "description": "(Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN\n(${payload:id})` to answer a whole batch in one query, matching rows by `id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "max_connections": {
           "description": "Maximum number of connections in the pool. Defaults to 10.",
           "type": [
@@ -3884,13 +3891,6 @@
         },
         "publication": {
           "description": "(Consumer only, PostgreSQL) If set, consume via logical-replication CDC instead of cursor\npolling: streams inserts/updates/deletes from this publication. Requires the `postgres-cdc`\nfeature and a Postgres URL. For full control use the dedicated `postgres_cdc` endpoint.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "select_one_query": {
-          "description": "(Publisher only) SELECT with `${payload:field}` / `${metadata:key}` tokens. Each send\nanswers with the first row as a JSON object and writes nothing. For `lookup`.",
           "type": [
             "string",
             "null"

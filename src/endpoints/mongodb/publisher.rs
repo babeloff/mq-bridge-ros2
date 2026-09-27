@@ -4,6 +4,7 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 use super::*;
+use crate::support::lookup_batch::{self, ListQuery};
 
 pub struct MongoDbPublisher {
     collection: Collection<Document>,
@@ -20,6 +21,8 @@ pub struct MongoDbPublisher {
     id_template: Option<CompiledTemplate>,
     report_outcome: bool,
     find: Option<CompiledTemplate>,
+    /// Set when `find` holds `"field": {"$in": [${…}]}`: one query answers a whole batch.
+    find_list: Option<(ListQuery, CompiledTemplate)>,
 }
 
 /// Metadata key carrying the insert outcome when `report_outcome` is enabled.
@@ -75,6 +78,16 @@ impl MongoDbPublisher {
                     .context("invalid MongoDB `find` template")
             })
             .transpose()?;
+        let find_list = match config.find.as_deref().map(lookup_batch::parse_mongodb) {
+            Some(parsed) => parsed?.map(|list| {
+                let element = format!("{}{}{}", list.prefix, list.token, list.suffix);
+                CompiledTemplate::compile(&element, Some("application/json"))
+                    .context("invalid MongoDB `find` template")
+                    .map(|element| (list, element))
+            }),
+            None => None,
+        }
+        .transpose()?;
         let shared_client = create_shared_client(config).await?;
         let client = (*shared_client).clone();
         let db = client.database(&config.database);
@@ -94,6 +107,7 @@ impl MongoDbPublisher {
                 id_template: None,
                 report_outcome: false,
                 find,
+                find_list,
             });
         }
 
@@ -196,6 +210,7 @@ impl MongoDbPublisher {
             id_template,
             report_outcome: config.report_outcome,
             find: None,
+            find_list: None,
         })
     }
 
@@ -205,20 +220,25 @@ impl MongoDbPublisher {
         template: &CompiledTemplate,
         message: &CanonicalMessage,
     ) -> Result<Sent, PublisherError> {
-        let rendered = template.render(Some(message));
-        let filter = serde_json::from_slice::<serde_json::Value>(&rendered)
-            .map_err(anyhow::Error::from)
-            .and_then(|v| Ok(Bson::try_from(v)?))
-            .and_then(|b| match b {
-                Bson::Document(d) => Ok(d),
-                other => Err(anyhow!(
-                    "filter is a {:?}, not a document",
-                    other.element_type()
-                )),
-            })
-            .map_err(|e| {
-                PublisherError::NonRetryable(e.context("invalid MongoDB `find` filter"))
-            })?;
+        if let Some((list, element)) = &self.find_list {
+            let found = self
+                .find_many(list, element, std::slice::from_ref(message))
+                .await?
+                .pop()
+                .flatten();
+            let payload = match &found {
+                Some(doc) => {
+                    serde_json::to_vec(doc).map_err(|e| PublisherError::NonRetryable(e.into()))?
+                }
+                None => Vec::new(),
+            };
+            let mut response = CanonicalMessage::new(payload, Some(message.message_id));
+            response
+                .metadata
+                .insert(FOUND_KEY.to_string(), found.is_some().to_string());
+            return Ok(Sent::Response(response));
+        }
+        let filter = find_filter(&template.render(Some(message)))?;
         let found = self
             .collection
             .find_one(filter)
@@ -234,6 +254,69 @@ impl MongoDbPublisher {
             .metadata
             .insert(FOUND_KEY.to_string(), found.is_some().to_string());
         Ok(Sent::Response(response))
+    }
+
+    /// Answers every message with one `$in` query per chunk of distinct keys.
+    async fn find_many(
+        &self,
+        list: &ListQuery,
+        element: &CompiledTemplate,
+        messages: &[CanonicalMessage],
+    ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
+        // A token without a value renders no key: that message is simply not found.
+        let elements: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| {
+                element
+                    .render_resolved(Some(m))
+                    .and_then(|b| String::from_utf8(b).ok())
+            })
+            .collect();
+        let keys: Vec<Option<String>> = elements
+            .iter()
+            .map(|e| {
+                e.as_deref()
+                    .and_then(|e| serde_json::from_str::<serde_json::Value>(e).ok())
+                    .and_then(|v| lookup_batch::key_of(&v))
+            })
+            .collect();
+        let mut records = Vec::new();
+        for chunk in lookup_batch::distinct(&keys).chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            let listed: Vec<&str> = chunk
+                .iter()
+                .filter_map(|&i| elements[i].as_deref())
+                .collect();
+            let rendered = format!("{}{}{}", list.before, listed.join(", "), list.after);
+            let filter = find_filter(rendered.as_bytes())?;
+            let mut cursor = self
+                .collection
+                .find(filter)
+                .await
+                .map_err(|e| PublisherError::Retryable(e.into()))?;
+            let wanted: std::collections::HashSet<&str> =
+                chunk.iter().filter_map(|&i| keys[i].as_deref()).collect();
+            let mut matched = std::collections::HashSet::with_capacity(wanted.len());
+            // Keep the first document per key and stop once every key has one.
+            while let Some(doc) = cursor.next().await {
+                let doc = doc.map_err(|e| PublisherError::Retryable(e.into()))?;
+                let record = Bson::Document(doc).into_relaxed_extjson();
+                match lookup_batch::field(&record, &list.key) {
+                    // `answer` reports the missing key field.
+                    None => records.push(record),
+                    Some(v) => {
+                        if let Some(k) = lookup_batch::key_of(v) {
+                            if wanted.contains(k.as_str()) && matched.insert(k) {
+                                records.push(record);
+                            }
+                        }
+                    }
+                }
+                if matched.len() == wanted.len() {
+                    break;
+                }
+            }
+        }
+        lookup_batch::answer(&keys, records, &list.key).map_err(PublisherError::NonRetryable)
     }
 
     async fn recover_correlation_id_from_duplicate(
@@ -302,6 +385,21 @@ pub(crate) fn tag_outcome(
     } else {
         Sent::Ack
     }
+}
+
+/// Parses a rendered `find` filter into a BSON document.
+fn find_filter(rendered: &[u8]) -> Result<Document, PublisherError> {
+    serde_json::from_slice::<serde_json::Value>(rendered)
+        .map_err(anyhow::Error::from)
+        .and_then(|v| Ok(Bson::try_from(v)?))
+        .and_then(|b| match b {
+            Bson::Document(d) => Ok(d),
+            other => Err(anyhow!(
+                "filter is a {:?}, not a document",
+                other.element_type()
+            )),
+        })
+        .map_err(|e| PublisherError::NonRetryable(e.context("invalid MongoDB `find` filter")))
 }
 
 #[async_trait]
@@ -616,6 +714,14 @@ impl MessagePublisher for MongoDbPublisher {
             details: serde_json::json!({ "database": self.db.name(), "request_reply": self.request_reply }),
             ..Default::default()
         }
+    }
+
+    async fn lookup_batch(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
+        let (list, element) = self.find_list.as_ref()?;
+        Some(self.find_many(list, element, requests).await)
     }
 
     fn as_any(&self) -> &dyn Any {

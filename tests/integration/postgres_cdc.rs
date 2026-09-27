@@ -575,7 +575,7 @@ pub async fn test_postgres_cdc_restart_safety() {
 }
 
 /// Issue #109: build one document per `books` change from `books` + `authors` + `book_stats`
-/// with `lookup` + `sqlx.select_one_query`, configured the way a user would in YAML.
+/// with `lookup` + `sqlx.lookup_query` (one batched `IN`, one per message), configured the way a user would in YAML.
 pub async fn test_postgres_cdc_lookup_join() {
     setup_logging();
     run_test_with_docker(COMPOSE, || async {
@@ -614,14 +614,14 @@ output:
           sqlx:
             url: "{URL}"
             table: join_authors
-            select_one_query: "SELECT name FROM join_authors WHERE id = ${{payload:author_id}}::int"
+            lookup_query: "SELECT id, name FROM join_authors WHERE id IN (${{payload:author_id}}::int)"
         into: author
     - lookup:
         from:
           sqlx:
             url: "{URL}"
             table: join_book_stats
-            select_one_query: "SELECT rating::text AS rating, reads, updated_at::text AS updated_at FROM join_book_stats WHERE book_id = ${{payload:id}}::int"
+            lookup_query: "SELECT rating::text AS rating, reads, updated_at::text AS updated_at FROM join_book_stats WHERE book_id = ${{payload:id}}::int"
         into: stats
   memory: {{ topic: join_out, capacity: 100 }}
 "#
@@ -657,7 +657,7 @@ output:
         let (op, dune) = &docs[0];
         assert_eq!(op, "insert");
         assert_eq!(dune["title"], "Dune");
-        assert_eq!(dune["author"], serde_json::json!({"name": "Herbert"}));
+        assert_eq!(dune["author"], serde_json::json!({"id": 7, "name": "Herbert"}));
         assert_eq!(dune["stats"]["reads"], 900);
         println!("stats as delivered: {}", dune["stats"]);
 

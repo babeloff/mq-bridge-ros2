@@ -468,7 +468,7 @@ but before the branch's downstream send committed, the replay hits a duplicate k
 
 To branch on whether a record *already exists* without writing it, read it first. The
 [`lookup`](REFERENCE.md#lookup) middleware asks a read-by-key endpoint (MongoDB `find`, SQLx
-`select_one_query`, HTTP) and sets `lookup.found`, which a `switch` routes on:
+`lookup_query`, HTTP) and sets `lookup.found`, which a `switch` routes on:
 
 ```yaml
 orders_enrich_branch:
@@ -480,7 +480,7 @@ orders_enrich_branch:
             sqlx:
               url: "postgres://app@localhost/crm"
               table: "customers"
-              select_one_query: "SELECT name, tier FROM customers WHERE id = ${payload:customer_id}::int"
+              lookup_query: "SELECT id, name, tier FROM customers WHERE id IN (${payload:customer_id}::int)"
           into: customer
     switch:
       metadata_key: "lookup.found"

@@ -68,8 +68,8 @@ impl Entry {
         })
     }
 
-    /// Asks `from` for this message; `None` when it found nothing.
-    async fn fetch(&self, msg: &CanonicalMessage) -> Result<Option<Value>, PublisherError> {
+    /// The request `from` answers for this message.
+    fn request(&self, msg: &CanonicalMessage) -> CanonicalMessage {
         let mut request = match &self.payload {
             Some(t) => CanonicalMessage::new(t.render(Some(msg)), None),
             None => msg.clone(),
@@ -78,6 +78,41 @@ impl Entry {
             let value = String::from_utf8_lossy(&template.render(Some(msg))).into_owned();
             request.metadata.insert(key.clone(), value);
         }
+        request
+    }
+
+    /// Answers every message, in order: one batched lookup when `from` supports it, else one
+    /// request per message, `concurrency` at a time. `None` = not found.
+    async fn fetch_many(
+        &self,
+        msgs: &[&CanonicalMessage],
+        concurrency: usize,
+    ) -> Vec<Result<Option<Value>, PublisherError>> {
+        let requests: Vec<CanonicalMessage> = msgs.iter().map(|m| self.request(m)).collect();
+        let n = requests.len();
+        match self.from.lookup_batch(&requests).await {
+            Some(Ok(found)) if found.len() == n => found.into_iter().map(Ok).collect(),
+            Some(Ok(found)) => (0..n)
+                .map(|_| {
+                    Err(PublisherError::NonRetryable(anyhow::anyhow!(
+                        "lookup: `from` answered {} of {n} requests",
+                        found.len()
+                    )))
+                })
+                .collect(),
+            Some(Err(e)) => (0..n).map(|_| Err(duplicate(&e))).collect(),
+            None => {
+                futures::stream::iter(requests)
+                    .map(|r| self.fetch(r))
+                    .buffered(concurrency)
+                    .collect()
+                    .await
+            }
+        }
+    }
+
+    /// Sends one request; `None` when `from` found nothing.
+    async fn fetch(&self, request: CanonicalMessage) -> Result<Option<Value>, PublisherError> {
         let response = match self.from.send(request).await? {
             Sent::Response(response) => response,
             Sent::Ack => {
@@ -116,6 +151,16 @@ impl Entry {
     }
 }
 
+/// A copy of a batch-wide error for each message it fails.
+fn duplicate(e: &PublisherError) -> PublisherError {
+    let copy = anyhow::anyhow!("{e:#}");
+    match e {
+        PublisherError::Retryable(_) => PublisherError::Retryable(copy),
+        PublisherError::NonRetryable(_) => PublisherError::NonRetryable(copy),
+        PublisherError::Connection(_) => PublisherError::Connection(copy),
+    }
+}
+
 /// The entries of one `lookup` middleware, shared by its publisher and consumer side.
 struct Lookup {
     entries: Vec<Entry>,
@@ -146,22 +191,67 @@ impl Lookup {
         })
     }
 
-    /// Runs all entries for this message in parallel and writes their results.
     async fn enrich(
         &self,
-        mut msg: CanonicalMessage,
+        msg: CanonicalMessage,
     ) -> Result<CanonicalMessage, (CanonicalMessage, PublisherError)> {
-        let mut doc: Value = match serde_json::from_slice(&msg.payload) {
-            Ok(doc) => doc,
-            Err(e) => {
-                let e = PublisherError::NonRetryable(anyhow::anyhow!(
-                    "lookup: payload is not JSON: {e}"
-                ));
-                return Err((msg, e));
-            }
-        };
-        let fetches = self.entries.iter().map(|entry| entry.fetch(&msg));
-        let results = match futures::future::try_join_all(fetches).await {
+        self.enrich_batch(vec![msg])
+            .await
+            .pop()
+            .expect("one result per message")
+    }
+
+    /// Runs every entry once for the whole batch, in parallel, and writes their results.
+    async fn enrich_batch(
+        &self,
+        messages: Vec<CanonicalMessage>,
+    ) -> Vec<Result<CanonicalMessage, (CanonicalMessage, PublisherError)>> {
+        let docs: Vec<Result<Value, PublisherError>> = messages
+            .iter()
+            .map(|m| {
+                serde_json::from_slice(&m.payload).map_err(|e| {
+                    PublisherError::NonRetryable(anyhow::anyhow!(
+                        "lookup: payload is not JSON: {e}"
+                    ))
+                })
+            })
+            .collect();
+        let targets: Vec<&CanonicalMessage> = messages
+            .iter()
+            .zip(&docs)
+            .filter(|(_, d)| d.is_ok())
+            .map(|(m, _)| m)
+            .collect();
+        let fetches = self
+            .entries
+            .iter()
+            .map(|entry| entry.fetch_many(&targets, self.concurrency));
+        let mut per_entry: Vec<_> = futures::future::join_all(fetches)
+            .await
+            .into_iter()
+            .map(Vec::into_iter)
+            .collect();
+        messages
+            .into_iter()
+            .zip(docs)
+            .map(|(msg, doc)| {
+                let doc = doc.map_err(|e| (msg.clone(), e));
+                let results = per_entry
+                    .iter_mut()
+                    .map(|r| r.next().expect("one result per message"));
+                self.apply(msg, doc?, results)
+            })
+            .collect()
+    }
+
+    /// Writes each entry's result into the message, or fails it on the first entry error.
+    fn apply(
+        &self,
+        mut msg: CanonicalMessage,
+        mut doc: Value,
+        results: impl Iterator<Item = Result<Option<Value>, PublisherError>>,
+    ) -> Result<CanonicalMessage, (CanonicalMessage, PublisherError)> {
+        let results = match results.collect::<Result<Vec<_>, _>>() {
             Ok(results) => results,
             Err(e) => return Err((msg, e)),
         };
@@ -183,17 +273,6 @@ impl Lookup {
             }
             Err(e) => Err((msg, PublisherError::NonRetryable(e.into()))),
         }
-    }
-
-    async fn enrich_batch(
-        &self,
-        messages: Vec<CanonicalMessage>,
-    ) -> Vec<Result<CanonicalMessage, (CanonicalMessage, PublisherError)>> {
-        futures::stream::iter(messages)
-            .map(|m| self.enrich(m))
-            .buffered(self.concurrency)
-            .collect()
-            .await
     }
 }
 
@@ -640,5 +719,110 @@ entries:
         let requeued = channel.drain_messages();
         assert_eq!(requeued.len(), 1);
         assert_eq!(payload(&requeued[0])["id"], 3);
+    }
+
+    type Answer = fn(&[CanonicalMessage]) -> Result<Vec<Option<Value>>, PublisherError>;
+
+    /// Answers `lookup_batch` with `answer` and counts the calls.
+    struct Batched {
+        answer: Answer,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl MessagePublisher for Batched {
+        async fn send_batch(&self, _: Vec<CanonicalMessage>) -> Result<SentBatch, PublisherError> {
+            panic!("a batched lookup must not fall back to send");
+        }
+
+        async fn lookup_batch(
+            &self,
+            requests: &[CanonicalMessage],
+        ) -> Option<Result<Vec<Option<Value>>, PublisherError>> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some((self.answer)(requests))
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    fn batched_lookup(answer: Answer) -> (Lookup, Arc<Batched>) {
+        let from = Arc::new(Batched {
+            answer,
+            calls: Default::default(),
+        });
+        let entry = Entry {
+            from: from.clone(),
+            metadata: Vec::new(),
+            payload: None,
+            into: vec!["user".into()],
+            found_key: "lookup.user.found".into(),
+        };
+        let lookup = Lookup {
+            entries: vec![entry],
+            concurrency: 16,
+        };
+        (lookup, from)
+    }
+
+    #[tokio::test]
+    async fn a_batched_from_answers_the_whole_batch_in_one_call() {
+        let (lookup, from) = batched_lookup(|requests| {
+            Ok(requests
+                .iter()
+                .map(|r| {
+                    let id = payload(r)["id"].as_i64().unwrap();
+                    (id % 2 == 1).then(|| json!({"id": id}))
+                })
+                .collect())
+        });
+        let batch = vec![
+            msg(json!({"id": 1})),
+            msg(json!({"id": 2})),
+            msg(json!({"id": 3})),
+        ];
+        let out: Vec<_> = lookup
+            .enrich_batch(batch)
+            .await
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(from.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(payload(&out[0])["user"], json!({"id": 1}));
+        assert_eq!(payload(&out[1])["user"], Value::Null);
+        assert_eq!(
+            out[1].metadata.get(FOUND).map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(payload(&out[2])["user"], json!({"id": 3}));
+    }
+
+    #[tokio::test]
+    async fn a_batched_failure_fails_every_message_but_not_unparsed_ones_twice() {
+        let (lookup, _) =
+            batched_lookup(|_| Err(PublisherError::Retryable(anyhow::anyhow!("db down"))));
+        let batch = vec![
+            msg(json!({"id": 1})),
+            CanonicalMessage::new(b"not json".to_vec(), None),
+        ];
+        let out = lookup.enrich_batch(batch).await;
+        assert!(
+            matches!(&out[0], Err((_, PublisherError::Retryable(e))) if e.to_string().contains("db down"))
+        );
+        assert!(matches!(&out[1], Err((_, PublisherError::NonRetryable(_)))));
+    }
+
+    #[tokio::test]
+    async fn a_short_batched_answer_is_rejected() {
+        let (lookup, _) = batched_lookup(|_| Ok(vec![None]));
+        let out = lookup
+            .enrich_batch(vec![msg(json!({"id": 1})), msg(json!({"id": 2}))])
+            .await;
+        assert!(out
+            .iter()
+            .all(|r| matches!(r, Err((_, PublisherError::NonRetryable(_))))));
     }
 }

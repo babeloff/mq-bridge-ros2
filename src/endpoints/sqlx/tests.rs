@@ -1551,7 +1551,7 @@ async fn test_sqlx_cursor_reader_rejects_text_cursor_for_source_metadata() {
 }
 
 #[tokio::test]
-async fn select_one_query_answers_with_the_first_row() {
+async fn lookup_query_answers_with_the_first_row() {
     let (_dir, url) = setup_db_file().await;
     let pool = AnyPool::connect(&url).await.unwrap();
     sqlx::query("CREATE TABLE users (id TEXT, name TEXT, age INTEGER)")
@@ -1566,7 +1566,7 @@ async fn select_one_query_answers_with_the_first_row() {
     let config = SqlxConfig {
         url: url.clone(),
         table: "users".to_string(),
-        select_one_query: Some("SELECT name, age FROM users WHERE id = ${payload:user_id}".into()),
+        lookup_query: Some("SELECT name, age FROM users WHERE id = ${payload:user_id}".into()),
         ..Default::default()
     };
     let publisher = SqlxPublisher::new(&config).await.unwrap();
@@ -1578,7 +1578,7 @@ async fn select_one_query_answers_with_the_first_row() {
         .await
         .unwrap();
     let SentBatch::Partial { responses, failed } = result else {
-        panic!("select_one_query must answer with responses");
+        panic!("lookup_query must answer with responses");
     };
     assert!(failed.is_empty());
     let responses = responses.unwrap();
@@ -1599,4 +1599,50 @@ async fn select_one_query_answers_with_the_first_row() {
         .await
         .unwrap();
     assert_eq!(rows, 1, "a lookup must write nothing");
+}
+
+#[tokio::test]
+async fn an_in_lookup_query_answers_a_batch_in_one_query() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE users (id INTEGER, name TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users VALUES (1, 'Ada'), (2, 'Bob')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let config = SqlxConfig {
+        url,
+        table: "users".to_string(),
+        lookup_query: Some("SELECT u.id, name FROM users u WHERE u.id IN (${payload:user_id})".into()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    let ask = |id: serde_json::Value| {
+        CanonicalMessage::new(serde_json::json!({ "user_id": id }).to_string().into_bytes(), None)
+    };
+    let answers = publisher
+        .lookup_batch(&[ask(2.into()), ask(9.into()), ask(1.into()), ask(2.into()), ask(serde_json::Value::Null)])
+        .await
+        .expect("an IN query batches")
+        .unwrap();
+    let name = |i: usize| answers[i].as_ref().map(|r| r["name"].clone());
+    assert_eq!(name(0), Some("Bob".into()));
+    assert_eq!(name(1), None);
+    assert_eq!(name(2), Some("Ada".into()));
+    assert_eq!(name(3), Some("Bob".into()));
+    assert_eq!(name(4), None);
+
+    let single = publisher.send(ask(1.into())).await.unwrap();
+    let Sent::Response(single) = single else {
+        panic!("a lookup answers with a response");
+    };
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&single.payload).unwrap(),
+        serde_json::json!({"id": 1, "name": "Ada"})
+    );
+    assert_eq!(single.metadata.get("sqlx.found").map(String::as_str), Some("true"));
 }

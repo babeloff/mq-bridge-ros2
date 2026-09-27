@@ -613,7 +613,7 @@ export interface SqlxConfig {
   password?: string | null;
   table: string;
   insert_query?: string | null;
-  select_one_query?: string | null;
+  lookup_query?: string | null;
   select_query?: string | null;
   delete_after_read?: boolean;
   cursor_column?: string | null;
@@ -646,7 +646,7 @@ export interface ClickHouseConfig {
   columns?: Record<string, string> | null;
   async_insert?: boolean;
   wait_for_async_insert?: boolean | null;
-  select_one_query?: string | null;
+  lookup_query?: string | null;
   cursor_column?: string | null;
   cursor_id?: string | null;
   checkpoint_store?: string | null;

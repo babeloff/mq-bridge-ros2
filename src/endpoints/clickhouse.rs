@@ -19,6 +19,7 @@
 use super::poll::PollBackoff;
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore};
 use crate::models::{ClickHouseConfig, Compression};
+use crate::support::lookup_batch::{self, ListQuery};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
@@ -95,29 +96,29 @@ fn build_row(
     }
 }
 
-/// A `select_one_query` split around its `${payload:…}` / `${metadata:…}` tokens. Each token is
+/// A `lookup_query` split around its `${payload:…}` / `${metadata:…}` tokens. Each token is
 /// sent as a typed query parameter `{pN:Type}`, so values never enter the SQL text.
-struct SelectOne {
+struct LookupQuery {
     parts: Vec<String>,
     tokens: Vec<String>,
+    /// Set when the token sits in `key IN (…)`: one query answers a whole batch.
+    list: Option<ListQuery>,
 }
 
-impl SelectOne {
+impl LookupQuery {
     fn parse(sql: &str) -> anyhow::Result<Self> {
+        let list = lookup_batch::parse_sql(sql)?;
         let mut parts = Vec::new();
         let mut tokens = Vec::new();
         let mut rest = sql;
         while let Some(start) = rest.find("${") {
             let len = rest[start..].find('}').ok_or_else(|| {
-                anyhow!(
-                    "select_one_query: unterminated token at '{}'",
-                    &rest[start..]
-                )
+                anyhow!("lookup_query: unterminated token at '{}'", &rest[start..])
             })? + 1;
             let token = &rest[start..start + len];
             if !(token.starts_with("${payload:") || token.starts_with("${metadata:")) {
                 return Err(anyhow!(
-                    "select_one_query: unsupported token '{token}'; use ${{payload:…}} or ${{metadata:…}}"
+                    "lookup_query: unsupported token '{token}'; use ${{payload:…}} or ${{metadata:…}}"
                 ));
             }
             parts.push(rest[..start].to_string());
@@ -125,7 +126,11 @@ impl SelectOne {
             rest = &rest[start + len..];
         }
         parts.push(rest.to_string());
-        Ok(Self { parts, tokens })
+        Ok(Self {
+            parts,
+            tokens,
+            list,
+        })
     }
 
     /// The SQL with `{pN:Type}` slots, and the matching `param_pN` values, for one message.
@@ -434,11 +439,11 @@ pub struct ClickHousePublisher {
     columns: Option<std::collections::BTreeMap<String, String>>,
     async_insert: bool,
     wait_for_async_insert: bool,
-    /// Set by `select_one_query`: a read-only lookup publisher.
-    select_one: Option<SelectOne>,
+    /// Set by `lookup_query`: a read-only lookup publisher.
+    lookup: Option<LookupQuery>,
 }
 
-/// Metadata key telling whether a `select_one_query` returned a row.
+/// Metadata key telling whether a `lookup_query` returned a row.
 const FOUND_KEY: &str = "clickhouse.found";
 
 impl ClickHousePublisher {
@@ -468,28 +473,85 @@ impl ClickHousePublisher {
             columns: config.columns.clone(),
             async_insert: config.async_insert,
             wait_for_async_insert: config.wait_for_async_insert.unwrap_or(true),
-            select_one: config
-                .select_one_query
+            lookup: config
+                .lookup_query
                 .as_deref()
-                .map(SelectOne::parse)
+                .map(LookupQuery::parse)
                 .transpose()?,
         })
     }
 
-    /// Runs `select_one_query` and answers with its first row, or an empty payload.
-    async fn select_one(&self, message: &CanonicalMessage) -> Result<Sent, PublisherError> {
-        let Some(query) = &self.select_one else {
+    /// Runs `lookup_query` and answers with its first row, or an empty payload.
+    async fn lookup_one(&self, message: &CanonicalMessage) -> Result<Sent, PublisherError> {
+        let Some(query) = &self.lookup else {
             return Err(PublisherError::NonRetryable(anyhow!(
-                "ClickHouse publisher has no select_one_query"
+                "ClickHouse publisher has no lookup_query"
             )));
         };
-        let (sql, params) = query.render(message);
+        let row = match &query.list {
+            Some(list) => self
+                .lookup_list(list, std::slice::from_ref(message))
+                .await?
+                .pop()
+                .flatten()
+                .map(|v| v.to_string().into_bytes()),
+            None => {
+                let (sql, params) = query.render(message);
+                let body = self.select(&sql, &params).await?;
+                body.lines()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|r| r.as_bytes().to_vec())
+            }
+        };
+        let found = row.is_some();
+        let mut response = CanonicalMessage::new(row.unwrap_or_default(), Some(message.message_id));
+        response
+            .metadata
+            .insert(FOUND_KEY.to_string(), found.to_string());
+        Ok(Sent::Response(response))
+    }
+
+    /// Answers every message with one `IN (…)` query per chunk of distinct keys.
+    async fn lookup_list(
+        &self,
+        list: &ListQuery,
+        messages: &[CanonicalMessage],
+    ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
+        let values: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| resolve_token(&list.token, m, &serde_json::from_slice(&m.payload).ok()))
+            .collect();
+        let keys: Vec<Option<String>> = values.iter().map(lookup_batch::key_of).collect();
+        let mut records = Vec::new();
+        for chunk in lookup_batch::distinct(&keys).chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            let mut params = Vec::with_capacity(chunk.len());
+            let sql = list.expand(chunk.len(), |i| {
+                let (ty, value) = query_param(&values[chunk[i]]);
+                params.push((format!("param_p{i}"), value));
+                format!("{{p{i}:{ty}}}")
+            });
+            let body = self.select(&sql, &params).await?;
+            for line in body.lines().filter(|l| !l.trim().is_empty()) {
+                records.push(serde_json::from_str(line).map_err(|e| {
+                    PublisherError::NonRetryable(anyhow!("ClickHouse returned a non-JSON row: {e}"))
+                })?);
+            }
+        }
+        lookup_batch::answer(&keys, records, &list.key).map_err(PublisherError::NonRetryable)
+    }
+
+    /// Runs a read query with typed `param_pN` values and returns its JSONEachRow body.
+    async fn select(
+        &self,
+        sql: &str,
+        params: &[(String, String)],
+    ) -> Result<String, PublisherError> {
         let mut extra: Vec<(&str, &str)> = vec![
             ("default_format", "JSONEachRow"),
             ("output_format_json_quote_64bit_integers", "0"),
         ];
         extra.extend(params.iter().map(|(k, v)| (k.as_str(), v.as_str())));
-        let body = self.client.run(&sql, &extra, false).await.map_err(|e| {
+        self.client.run(sql, &extra, false).await.map_err(|e| {
             match e.downcast_ref::<ChHttpError>() {
                 Some(h)
                     if h.status.is_client_error() && !matches!(h.status.as_u16(), 408 | 429) =>
@@ -498,14 +560,7 @@ impl ClickHousePublisher {
                 }
                 _ => PublisherError::Retryable(e),
             }
-        })?;
-        let row = body.lines().find(|l| !l.trim().is_empty());
-        let payload = row.map(|r| r.as_bytes().to_vec()).unwrap_or_default();
-        let mut response = CanonicalMessage::new(payload, Some(message.message_id));
-        response
-            .metadata
-            .insert(FOUND_KEY.to_string(), row.is_some().to_string());
-        Ok(Sent::Response(response))
+        })
     }
 }
 
@@ -518,9 +573,9 @@ impl MessagePublisher for ClickHousePublisher {
         if messages.is_empty() {
             return Ok(SentBatch::Ack);
         }
-        if self.select_one.is_some() {
+        if self.lookup.is_some() {
             return crate::traits::send_batch_helper(self, messages, |p, m| {
-                Box::pin(async move { p.select_one(&m).await })
+                Box::pin(async move { p.lookup_one(&m).await })
             })
             .await;
         }
@@ -561,6 +616,14 @@ impl MessagePublisher for ClickHousePublisher {
             error,
             ..Default::default()
         }
+    }
+
+    async fn lookup_batch(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
+        let list = self.lookup.as_ref()?.list.as_ref()?;
+        Some(self.lookup_list(list, requests).await)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1028,8 +1091,8 @@ mod tests {
     }
 
     #[test]
-    fn select_one_binds_tokens_as_typed_params() {
-        let q = SelectOne::parse(
+    fn lookup_query_binds_tokens_as_typed_params() {
+        let q = LookupQuery::parse(
             "SELECT * FROM c WHERE id = ${payload:id} AND name = ${payload:name} \
              AND region = ${metadata:region} AND x = ${payload:missing} LIMIT 1",
         )
@@ -1050,10 +1113,10 @@ mod tests {
     }
 
     #[test]
-    fn select_one_rejects_bad_tokens() {
-        assert!(SelectOne::parse("SELECT ${payload:id").is_err());
-        assert!(SelectOne::parse("SELECT ${env:HOME}").is_err());
-        let plain = SelectOne::parse("SELECT 1").unwrap();
+    fn lookup_query_rejects_bad_tokens() {
+        assert!(LookupQuery::parse("SELECT ${payload:id").is_err());
+        assert!(LookupQuery::parse("SELECT ${env:HOME}").is_err());
+        let plain = LookupQuery::parse("SELECT 1").unwrap();
         assert_eq!(
             plain.render(&msg(&serde_json::json!({}), &[])).0,
             "SELECT 1"

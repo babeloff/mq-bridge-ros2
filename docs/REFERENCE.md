@@ -908,7 +908,7 @@ whether they were found. On an input, the handler already sees the enriched mess
 | `metadata` | map string→template | `{}` |
 | `payload` | template | the message's own payload and metadata |
 | `entries` | list of `{from, into, metadata, payload}` | `[]`; further lookups |
-| `concurrency` | integer | `16` messages enriched at once per batch |
+| `concurrency` | integer | `16` requests in flight per entry, when `from` cannot answer a batch at once |
 
 ```yaml middleware
 - lookup:
@@ -929,14 +929,14 @@ whether they were found. On an input, the handler already sees the enriched mess
   response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
   `false`, for a following [`switch`](#switch).
 - `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
-  `mongodb` with `find`, `sqlx` or `clickhouse` with `select_one_query`, or `grpc` to an
+  `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, or `grpc` to an
   mq-bridge `grpc` input whose route replies. An endpoint that only acknowledges fails the
   message as non-retryable.
 - `mongodb.find` is an Extended-JSON filter template and answers with the first matching
-  document; `sqlx.select_one_query` binds `${payload:…}` / `${metadata:…}` tokens like
+  document; `sqlx.lookup_query` binds `${payload:…}` / `${metadata:…}` tokens like
   `insert_query` and answers with the first row as a JSON object. Neither writes anything;
   they also set `mongodb.found` / `sqlx.found`.
-- `clickhouse.select_one_query` takes the same tokens and sends each as a typed query
+- `clickhouse.lookup_query` takes the same tokens and sends each as a typed query
   parameter (`Int64`, `UInt64`, `Float64`, `Bool`, `String`; a missing field is `NULL`), so
   compare against a matching column or wrap it, e.g. `toDate(${payload:day})`. Add `LIMIT 1`
   and no `FORMAT` clause. It sets `clickhouse.found`; a query error (HTTP 4xx other than 408
@@ -945,6 +945,32 @@ whether they were found. On an input, the handler already sees the enriched mess
   tokens are bound untyped, and a field missing from the payload (e.g. on a CDC delete) is
   bound as text. Cast `NUMERIC`, `TIMESTAMPTZ` and similar result columns to `::text`; the
   `Any` driver cannot decode them and fails the message as non-retryable.
+
+**Batched lookups.** Put the token inside `IN (…)` (SQL) or `$in: […]` (MongoDB) and one
+query answers the whole batch instead of one query per message:
+
+```yaml middleware
+- lookup:
+    from:
+      sqlx:
+        url: "postgres://localhost/crm"
+        table: "customers"
+        lookup_query: "SELECT id, name, tier FROM customers WHERE id IN (${payload:customer_id}::bigint)"
+    into: customer
+```
+
+- The query's shape picks the mode: a token compared directly (`id = ${…}`) runs once per
+  message; the same token as the only element of `id IN (…)` runs once per batch, with the
+  element repeated for each distinct key (at most 1000 per query).
+- Rows are matched back to messages by the column left of `IN` (`c.id` matches the result
+  column `id`), so select that column under that name. A message whose key is missing or
+  matches no row gets `null`; if several rows match, the first wins.
+- A batched query takes no other token and no plain `LIMIT` (it would cap the whole batch;
+  ClickHouse's `LIMIT 1 BY id` is fine). An error fails every message of the batch.
+- MongoDB: `find: '{"_id": {"$in": ["${payload:customer_id}"]}}'` matches documents by the
+  field that holds `$in` (dotted paths work).
+- Only the endpoint itself batches: `middlewares` on `from` (e.g. `retry`) fall back to one
+  request per message.
 
 ```yaml middleware
 - lookup:
@@ -967,8 +993,9 @@ whether they were found. On an input, the handler already sees the enriched mess
   payload, HTTP 4xx, a query error) is logged and acks and drops only its message; the rest
   of the batch goes on. A misconfigured `from` therefore drops every message.
 
-`from` and every entry in `entries` run **in parallel** for each message, so a message waits
-for the slowest lookup, not the sum of all. Each one sets `lookup.<into>.found`, and
+`from` and every entry in `entries` run **in parallel**, so a batch waits for the slowest
+lookup, not the sum of all. Each batched entry costs one query per batch; for a lookup that
+needs another's result (e.g. a merchant id from the fetched user), chain a second `lookup`. Each one sets `lookup.<into>.found`, and
 `lookup.found` is `true` only when all of them found something.
 
 ```yaml middleware
@@ -987,7 +1014,7 @@ for the slowest lookup, not the sum of all. Each one sets `lookup.<into>.found`,
           sqlx:
             url: "postgres://localhost/payments"
             table: "payments"
-            select_one_query: >-
+            lookup_query: >-
               SELECT avg(amount)::text AS avg20 FROM (SELECT amount FROM payments
               WHERE card_id = ${payload:card_id} ORDER BY ts DESC LIMIT 20) t
       - into: features.risk
@@ -995,7 +1022,7 @@ for the slowest lookup, not the sum of all. Each one sets `lookup.<into>.found`,
           clickhouse:
             url: "http://localhost:8123"
             table: "card_risk"
-            select_one_query: >-
+            lookup_query: >-
               SELECT score, updated_at FROM card_risk
               WHERE card_id = ${payload:card_id} ORDER BY updated_at DESC LIMIT 1
 ```

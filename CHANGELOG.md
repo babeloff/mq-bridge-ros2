@@ -23,11 +23,13 @@ All notable changes to `mq-bridge`. Newest first.
   response at a payload path, with `lookup.found` in metadata. Several `entries` run in
   parallel per message. On an input the handler sees the enriched message; a retryable
   failure nacks the batch for redelivery, a non-retryable one drops only its message.
-- **Read-by-key on MongoDB and SQLx publishers**, for `lookup`: `mongodb.find` (a filter
-  template) and `sqlx.select_one_query` answer each send with the first match and write
-  nothing.
-- **`clickhouse.select_one_query`**, for `lookup`: the same read-by-key on ClickHouse, with
-  `${payload:…}` / `${metadata:…}` tokens sent as typed query parameters.
+- **Read-by-key on MongoDB, SQLx and ClickHouse publishers**, for `lookup`: `mongodb.find`
+  (a filter template) and `sqlx.lookup_query` / `clickhouse.lookup_query` answer each send
+  with the first match and write nothing. ClickHouse sends `${payload:…}` / `${metadata:…}`
+  tokens as typed query parameters.
+- **Batched lookups.** With the token inside `id IN (…)` (or MongoDB `$in: […]`), one query
+  answers a whole batch and rows are matched back by that column, instead of one query per
+  message.
 
 ## 0.4.15
 

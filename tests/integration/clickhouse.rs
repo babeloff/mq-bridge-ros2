@@ -130,10 +130,10 @@ pub async fn test_clickhouse_roundtrip() {
             "mapped row mismatch: {got}"
         );
 
-        // --- select_one_query: read-by-key for `lookup` ---
+        // --- lookup_query: read-by-key for `lookup` ---
         let sel_cfg = ClickHouseConfig {
             table: "ch_events".into(),
-            select_one_query: Some(
+            lookup_query: Some(
                 "SELECT id, name FROM ch_events WHERE id = ${payload:id} AND name = ${payload:name} LIMIT 1"
                     .into(),
             ),
@@ -145,7 +145,7 @@ pub async fn test_clickhouse_roundtrip() {
             .await
             .unwrap();
         let Sent::Response(hit) = hit else {
-            panic!("select_one_query must answer with a response")
+            panic!("lookup_query must answer with a response")
         };
         let row: serde_json::Value = serde_json::from_slice(&hit.payload).unwrap();
         assert_eq!(row, serde_json::json!({"id": 7, "name": "msg-7"}));
@@ -156,13 +156,33 @@ pub async fn test_clickhouse_roundtrip() {
             .await
             .unwrap();
         let Sent::Response(miss) = miss else {
-            panic!("select_one_query must answer with a response")
+            panic!("lookup_query must answer with a response")
         };
         assert!(miss.payload.is_empty());
         assert_eq!(miss.metadata.get("clickhouse.found").unwrap(), "false");
 
+        let in_cfg = ClickHouseConfig {
+            lookup_query: Some("SELECT id, name FROM ch_events WHERE id IN (${payload:id})".into()),
+            ..sel_cfg.clone()
+        };
+        let in_pub = ClickHousePublisher::new(&in_cfg).await.unwrap();
+        let ask = |id: i64| CanonicalMessage::new(format!(r#"{{"id":{id}}}"#).into_bytes(), None);
+        let answers = in_pub
+            .lookup_batch(&[ask(7), ask(999), ask(3), ask(7)])
+            .await
+            .expect("an IN query batches")
+            .unwrap();
+        let names: Vec<_> = answers
+            .iter()
+            .map(|a| a.as_ref().map(|r| r["name"].clone()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![Some("msg-7".into()), None, Some("msg-3".into()), Some("msg-7".into())]
+        );
+
         let bad_cfg = ClickHouseConfig {
-            select_one_query: Some("SELECT nope FROM ch_events WHERE id = ${payload:id}".into()),
+            lookup_query: Some("SELECT nope FROM ch_events WHERE id = ${payload:id}".into()),
             ..sel_cfg
         };
         let bad = ClickHousePublisher::new(&bad_cfg)
@@ -175,7 +195,7 @@ pub async fn test_clickhouse_roundtrip() {
             "a query error must not be retried: {bad:?}"
         );
 
-        println!("[ClickHouse] round-trip + cursor + column-mapping + select_one OK");
+        println!("[ClickHouse] round-trip + cursor + column-mapping + lookup OK");
     })
     .await;
 }

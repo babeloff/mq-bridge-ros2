@@ -508,9 +508,10 @@ pub struct OtelMiddleware {}
 
 /// Lookup (enrich) middleware configuration.
 ///
-/// Sends a request per message to a request-capable endpoint (HTTP, NATS/Memory
-/// `request_reply`, MongoDB `find`, SQLx `select_one_query`) and writes the response into
-/// the payload. Several `entries` run in parallel per message.
+/// Asks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`,
+/// SQLx/ClickHouse `lookup_query`) about each message and writes the response into the
+/// payload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other
+/// endpoints get one request per message. Several `entries` run in parallel.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -530,7 +531,7 @@ pub struct LookupMiddleware {
     /// Further lookups, run in parallel with `from`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<LookupEntry>,
-    /// Messages enriched at once per batch.
+    /// Requests in flight per entry when the endpoint cannot answer a batch at once.
     #[serde(default = "default_lookup_concurrency")]
     pub concurrency: usize,
 }
@@ -1797,8 +1798,8 @@ pub struct MongoDbConfig {
     /// (dup-key) so a `request`+`switch` can branch. Sink collections only; pair with `id_field`.
     #[serde(default)]
     pub report_outcome: bool,
-    /// (Publisher only) Extended-JSON filter template, e.g. `{"_id": "${payload:id}"}`. Each send
-    /// returns the first match as the response and writes nothing. For the `lookup` middleware.
+    /// (Publisher only) Extended-JSON filter template for `lookup`, e.g. `{"_id": "${payload:id}"}`.
+    /// Answers with the first match. `{"_id": {"$in": ["${payload:id}"]}}` answers a batch at once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub find: Option<String>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
@@ -2557,10 +2558,10 @@ pub struct SqlxConfig {
     /// Add an explicit cast next to the token — it is preserved verbatim in the SQL:
     /// `VALUES (${payload:amount}::numeric, ${payload:created_at}::timestamptz)`.
     pub insert_query: Option<String>,
-    /// (Publisher only) SELECT with `${payload:field}` / `${metadata:key}` tokens. Each send
-    /// answers with the first row as a JSON object and writes nothing. For `lookup`.
+    /// (Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN
+    /// (${payload:id})` to answer a whole batch in one query, matching rows by `id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub select_one_query: Option<String>,
+    pub lookup_query: Option<String>,
     /// (Consumer only) Optional. A custom SQL SELECT query to fetch messages. This is only supported for PostgreSQL and Microsoft SQL Server.
     /// The query must include a placeholder for the batch size (`$1` for PostgreSQL, `@p1` for SQL Server).
     /// The bridge will bind the route's `batch_size` to this placeholder.
@@ -2676,10 +2677,10 @@ pub struct ClickHouseConfig {
     /// true (durable). False = fire-and-forget: faster, but a crash before flush can drop the batch.
     #[serde(default)]
     pub wait_for_async_insert: Option<bool>,
-    /// (Publisher only) SELECT with `${payload:field}` / `${metadata:key}` tokens. Each send
-    /// answers with the first row as a JSON object and writes nothing. For `lookup`.
+    /// (Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN
+    /// (${payload:id})` to answer a whole batch in one query, matching rows by `id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub select_one_query: Option<String>,
+    pub lookup_query: Option<String>,
     /// (Consumer only) Read an existing table **non-destructively** and resumably, paging by this
     /// monotonic column (`SELECT … WHERE {cursor_column} > {last} ORDER BY {cursor_column} ASC LIMIT n`)
     /// and persisting the last read value under `cursor_id`.

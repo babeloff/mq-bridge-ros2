@@ -3,7 +3,7 @@
 The [`lookup`](../engine/reference.md#lookup) middleware asks another endpoint for each message
 and writes the answer into the payload. Use it to join an event with master data, or to add
 features such as a previous value or a moving average. The endpoint asked must answer:
-`http`, `mongodb` with `find`, `sqlx` or `clickhouse` with `select_one_query`, `nats` /
+`http`, `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, `nats` /
 `memory` with `request_reply: true`, or `grpc` to an mq-bridge `grpc` input whose route replies.
 
 ## Enrich, then route on the result
@@ -21,7 +21,7 @@ orders_enrich:
             sqlx:
               url: "postgres://localhost/crm"
               table: "customers"
-              select_one_query: "SELECT name, tier FROM customers WHERE id = ${payload:customer_id}::int"
+              lookup_query: "SELECT id, name, tier FROM customers WHERE id IN (${payload:customer_id}::int)"
           into: customer
     switch:
       metadata_key: "lookup.found"
@@ -30,12 +30,14 @@ orders_enrich:
         "false": { kafka: { topic: "orders.unknown_customer", url: "localhost:9092" } }
 ```
 
-A failed lookup fails only its message; list `retry` / `dlq` after `lookup` to handle it.
+Because the key sits inside `IN (…)`, one query answers the whole batch and rows are matched
+back to messages by `id`. Write `WHERE id = ${payload:customer_id}` instead for one query per
+message. A failed lookup fails only its message; list `retry` / `dlq` after `lookup` to handle it.
 
 ## Several lookups, before the handler
 
 On an input, the handler already sees the enriched message. Lookups in `entries` run in
-parallel, so a message waits for the slowest one, not the sum:
+parallel, so a batch waits for the slowest one, not the sum:
 
 ```yaml
 input:
@@ -56,7 +58,7 @@ input:
               sqlx:
                 url: "postgres://localhost/payments"
                 table: "payments"
-                select_one_query: >-
+                lookup_query: >-
                   SELECT avg(amount)::text AS avg20 FROM (SELECT amount FROM payments
                   WHERE card_id = ${payload:card_id} ORDER BY ts DESC LIMIT 20) t
 ```
@@ -72,4 +74,5 @@ logged and drops only its message.
   missing from the payload, e.g. on a CDC delete, is otherwise bound as text and fails.
 - Cast `NUMERIC`, `TIMESTAMPTZ` and similar result columns to `::text`. They arrive as JSON
   strings.
-- `select_one_query` returns the first row only; use `ORDER BY … LIMIT 1` for "the latest".
+- A per-message `lookup_query` returns the first row only; use `ORDER BY … LIMIT 1` for
+  "the latest". A batched (`IN`) query takes no plain `LIMIT`.
