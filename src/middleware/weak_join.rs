@@ -69,14 +69,16 @@ impl AckTracker {
         }
     }
 
-    fn collect_due(&mut self, due: &mut DueCommits) {
+    /// Pops the settled prefix one batch at a time, so batches behind a failed commit stay tracked.
+    fn pop_due(&mut self) -> Option<(BatchCommitFunc, Vec<MessageDisposition>)> {
         while self.batches.front().is_some_and(|b| b.remaining == 0) {
             let batch = self.batches.pop_front().expect("front checked");
             self.base += 1;
             if let Some(commit) = batch.commit {
-                due.push((commit, batch.dispositions));
+                return Some((commit, batch.dispositions));
             }
         }
+        None
     }
 }
 
@@ -91,14 +93,17 @@ async fn settle_and_commit(
     for (slot, disposition) in settled {
         tracker.settle(slot, disposition, &mut due);
     }
-    tracker.collect_due(&mut due);
+    while let Some((commit, dispositions)) = tracker.pop_due() {
+        if tracker.ordered {
+            commit(dispositions).await?;
+        } else {
+            due.push((commit, dispositions));
+        }
+    }
     // Unordered commits are independent, so one failure must not drop the rest.
     let mut first_err = None;
     for (commit, dispositions) in due {
         if let Err(e) = commit(dispositions).await {
-            if tracker.ordered {
-                return Err(e);
-            }
             first_err.get_or_insert(e);
         }
     }
@@ -664,6 +669,7 @@ mod tests {
         next: usize,
         ordered: bool,
         log: CommitLog,
+        fail: Option<usize>,
     }
 
     impl ScriptedSource {
@@ -674,6 +680,7 @@ mod tests {
                 next: 0,
                 ordered,
                 log: log.clone(),
+                fail: None,
             };
             (source, log)
         }
@@ -690,10 +697,14 @@ mod tests {
             let id = self.next;
             self.next += 1;
             let log = self.log.clone();
+            let fail = self.fail == Some(id);
             Ok(ReceivedBatch {
                 messages,
                 commit: Box::new(move |dispositions| {
                     Box::pin(async move {
+                        if fail {
+                            anyhow::bail!("commit {id} failed");
+                        }
                         let named = dispositions
                             .iter()
                             .map(|d| match d {
@@ -803,6 +814,36 @@ mod tests {
                 assert_eq!(order, vec![1, 0, 2]);
             }
         }
+    }
+
+    /// Three source batches become due at once and the oldest commit fails: the later two
+    /// must stay tracked and commit, in order, on the next settle.
+    #[tokio::test]
+    async fn a_failed_ordered_commit_keeps_later_batches() {
+        let (mut source, log) = ScriptedSource::new(
+            vec![
+                vec![member("A")],
+                vec![member("B")],
+                vec![member("A"), member("B")],
+                vec![member("C"), member("C")],
+            ],
+            true,
+        );
+        source.fail = Some(0);
+        let config = pair_config(WeakJoinAck::OnJoin, WeakJoinTimeout::Fire, 10_000);
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+        assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+        assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+        let ab = join.receive_batch(10).await.unwrap();
+        assert_eq!(ab.messages.len(), 2);
+        assert!((ab.commit)(vec![MessageDisposition::Ack; 2]).await.is_err());
+        assert!(logged(&log).is_empty());
+
+        let c = join.receive_batch(10).await.unwrap();
+        (c.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        let order: Vec<usize> = logged(&log).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(order, vec![1, 2, 3]);
     }
 
     #[tokio::test]

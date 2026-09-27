@@ -1945,7 +1945,9 @@ fn run_file_queue_task(
             }
 
             if !error {
-                for _ in 0..128 {
+                // Bounded by emitted rows, not records: a run of blank records must not end the
+                // read early, or an empty batch would pose as EOF.
+                while batch.len() < 128 {
                     buf.clear();
                     match read_record_sync(&mut reader, &delimiter, &format, &mut buf) {
                         Ok(0) => break,

@@ -2290,6 +2290,28 @@ async fn test_file_csv_blank_lines_are_not_rows() {
         "\n3,4\r\n\r\n"
     );
 }
+
+/// More leading blank records than one read pass holds must not surface as an empty
+/// (end-of-file) batch before the header and data behind them are read.
+#[tokio::test]
+async fn test_file_csv_queue_many_leading_blank_lines() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("queue.csv");
+    tokio::fs::write(&path, format!("{}a,b\n1,2\n", "\n".repeat(200)))
+        .await
+        .unwrap();
+    let config = FileConfig {
+        mode: Some(FileConsumerMode::Consume { delete: true }),
+        ..csv_config(&path)
+    };
+    let mut source = FileConsumer::new(&config).await.unwrap();
+    let batch = source.receive_batch(8).await.unwrap();
+    assert_eq!(batch.messages.len(), 1);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&batch.messages[0].payload).unwrap(),
+        json!({"a": "1", "b": "2"})
+    );
+}
 #[tokio::test]
 async fn test_file_csv_value_types_and_escaping() {
     let dir = tempdir().unwrap();

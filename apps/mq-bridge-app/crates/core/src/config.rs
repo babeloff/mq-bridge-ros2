@@ -132,7 +132,14 @@ pub fn app_config_schema() -> serde_json::Value {
     for (name, declared) in registered_endpoint_schemas() {
         let prefix = pascal_case(&name);
         let definition = format!("{prefix}Config");
-        add_variant_definition(&mut schema, "Endpoint", &name, &prefix, &definition, declared);
+        add_variant_definition(
+            &mut schema,
+            "Endpoint",
+            &name,
+            &prefix,
+            &definition,
+            declared,
+        );
     }
     // A middleware that declares nothing is still offered, with a free-form config.
     for (name, declared) in mq_bridge::extensions::middleware_config_schemas() {
@@ -1563,13 +1570,29 @@ mod tests {
         ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Removes the given environment variables when dropped, even on panic.
-    struct EnvVarsGuard(Vec<String>);
+    /// Restores the given environment variables to their prior values when dropped, even on panic.
+    struct EnvVarsGuard(Vec<(String, Option<std::ffi::OsString>)>);
+
+    impl EnvVarsGuard {
+        fn capture(keys: impl IntoIterator<Item = String>) -> Self {
+            Self(
+                keys.into_iter()
+                    .map(|key| {
+                        let prior = std::env::var_os(&key);
+                        (key, prior)
+                    })
+                    .collect(),
+            )
+        }
+    }
 
     impl Drop for EnvVarsGuard {
         fn drop(&mut self) {
-            for key in &self.0 {
-                unsafe { std::env::remove_var(key) };
+            for (key, prior) in &self.0 {
+                match prior {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
             }
         }
     }
@@ -2352,7 +2375,7 @@ publishers:
 
         let stored = secret_store.stored.lock().unwrap()[0].clone();
         let _env = env_lock();
-        let _vars = EnvVarsGuard(stored.keys().cloned().collect());
+        let _vars = EnvVarsGuard::capture(stored.keys().cloned());
         unsafe {
             for (key, value) in &stored {
                 std::env::set_var(key, value);
