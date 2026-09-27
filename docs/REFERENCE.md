@@ -86,7 +86,7 @@ middlewares:
 | [`unpack`](#unpack) | ✅ | – | – | Split a packed physical message back into messages |
 | [`metrics`](#metrics) | ✅ | ✅ | `metrics` | Emit throughput/latency/error metrics |
 | [`otel`](#otel) | ✅ | ✅ | `otel` | OpenTelemetry span per message, continuing `traceparent` |
-| [`lookup`](#lookup) | – | ✅ | – | Enrich each message with another endpoint's response |
+| [`lookup`](#lookup) | ✅ | ✅ | – | Enrich each message with other endpoints' responses |
 | [`random_panic`](#random_panic) | ✅ | ✅ | – | Fault injection for testing |
 | [`custom`](#custom-middleware) | ✅ | ✅ | – | Your own middleware via a registered factory |
 
@@ -107,7 +107,7 @@ middlewares:
 above rather than assuming:
 
 - `dlq` / `retry` on an input log a warning and are skipped. The route still starts.
-- `deduplication`, `weak_join` and `id` on an output, and `lookup` on an input, are **hard
+- `deduplication`, `weak_join` and `id` on an output are **hard
   startup errors**. Deduplication
   cannot work on the publish side, and silently starting an un-deduplicated route is worse
   than refusing to start. `pack` on an input and `unpack` on an output are hard errors too —
@@ -897,17 +897,18 @@ parent-based sampler drops it, but an `always_on` sampler exports it.
 
 ### `lookup`
 
-Asks another endpoint per message and writes its response into the payload before the
-message is published. Output-only. The typical use is enriching an event with a record
-fetched by key, then routing on whether it was found.
+Asks other endpoints per message and writes their responses into the payload. Input and
+output. The typical use is enriching an event with records fetched by key, then routing on
+whether they were found. On an input, the handler already sees the enriched message.
 
 | Field | Type | Default |
 |---|---|---|
-| `from` | endpoint | required; must answer with a response |
-| `into` | dotted payload path | required |
+| `from` | endpoint | must answer with a response; required unless `entries` is set |
+| `into` | dotted payload path | required with `from` |
 | `metadata` | map string→template | `{}` |
 | `payload` | template | the message's own payload and metadata |
-| `concurrency` | integer | `16` lookups in flight per batch |
+| `entries` | list of `{from, into, metadata, payload}` | `[]`; further lookups |
+| `concurrency` | integer | `16` messages enriched at once per batch |
 
 ```yaml middleware
 - lookup:
@@ -952,8 +953,36 @@ fetched by key, then routing on whether it was found.
 - HTTP 408, 429 and 5xx fail the message as retryable, other statuses as non-retryable.
   Without `pass_through_status: true` the `http` endpoint already fails on any non-2xx
   response, so a missing record is an error rather than `null`.
-- The payload must be a JSON object along `into`. A failed lookup fails only its message; the
-  rest of the batch is published. List `retry` / `dlq` after `lookup` to catch its failures.
+- The payload must be a JSON object along `into`.
+- On an output, a failed lookup fails only its message; the rest of the batch is published.
+  List `retry` / `dlq` after `lookup` to catch its failures.
+- On an input, a failed lookup nacks the whole received batch, so the source redelivers it.
+  A retryable error reconnects the route; a non-retryable one stops it.
+
+`from` and every entry in `entries` run **in parallel** for each message, so a message waits
+for the slowest lookup, not the sum of all. Each one sets `lookup.<into>.found`, and
+`lookup.found` is `true` only when all of them found something.
+
+```yaml middleware
+- lookup:
+    concurrency: 64
+    entries:
+      - into: features.user
+        from:
+          mongodb:
+            url: "mongodb://localhost:27017"
+            database: "features"
+            collection: "users"
+            find: '{"_id": "${payload:user_id}"}'
+      - into: features.card_avg
+        from:
+          sqlx:
+            url: "postgres://localhost/payments"
+            table: "payments"
+            select_one_query: >-
+              SELECT avg(amount)::text AS avg20 FROM (SELECT amount FROM payments
+              WHERE card_id = ${payload:card_id} ORDER BY ts DESC LIMIT 20) t
+```
 
 ### `random_panic`
 

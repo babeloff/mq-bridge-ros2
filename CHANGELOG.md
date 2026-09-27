@@ -20,7 +20,9 @@ All notable changes to `mq-bridge`. Newest first.
   `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
 - **`lookup` middleware: enrich a message from another endpoint.** Per message, it sends a
   request built from templates to any request-capable endpoint (e.g. HTTP) and writes the
-  response at a payload path, with `lookup.found` in metadata. Output-only.
+  response at a payload path, with `lookup.found` in metadata. Several `entries` run in
+  parallel per message. On an input the handler sees the enriched message, and a failed
+  lookup nacks the batch for redelivery.
 - **Read-by-key on MongoDB and SQLx publishers**, for `lookup`: `mongodb.find` (a filter
   template) and `sqlx.select_one_query` answer each send with the first match and write
   nothing.

@@ -426,7 +426,7 @@ pub enum Middleware {
     Metrics(MetricsMiddleware),
     /// Per-message OpenTelemetry spans, continuing the `traceparent` metadata. Input and output.
     Otel(OtelMiddleware),
-    /// Asks another endpoint per message and writes its response into the payload. Output-only.
+    /// Asks other endpoints per message and writes their responses into the payload. Input and output.
     Lookup(Box<LookupMiddleware>),
     Dlq(Box<DeadLetterQueueMiddleware>),
     Retry(RetryMiddleware),
@@ -510,11 +510,36 @@ pub struct OtelMiddleware {}
 ///
 /// Sends a request per message to a request-capable endpoint (HTTP, NATS/Memory
 /// `request_reply`, MongoDB `find`, SQLx `select_one_query`) and writes the response into
-/// the payload before the message is published.
+/// the payload. Several `entries` run in parallel per message.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LookupMiddleware {
+    /// The endpoint to ask; it must answer with a response. Use `entries` for several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Endpoint>,
+    /// Request metadata templates, e.g. `http_path: "/users/${payload:user_id}"`.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    /// Request payload template. Defaults to the message's own payload and metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// Dotted payload path the response is written to, e.g. `customer.profile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    /// Further lookups, run in parallel with `from`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<LookupEntry>,
+    /// Messages enriched at once per batch.
+    #[serde(default = "default_lookup_concurrency")]
+    pub concurrency: usize,
+}
+
+/// One lookup of a `lookup` middleware.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LookupEntry {
     /// The endpoint to ask; it must answer with a response.
     pub from: Endpoint,
     /// Request metadata templates, e.g. `http_path: "/users/${payload:user_id}"`.
@@ -525,9 +550,6 @@ pub struct LookupMiddleware {
     pub payload: Option<String>,
     /// Dotted payload path the response is written to, e.g. `customer.profile`.
     pub into: String,
-    /// Lookups in flight per batch.
-    #[serde(default = "default_lookup_concurrency")]
-    pub concurrency: usize,
 }
 
 fn default_lookup_concurrency() -> usize {

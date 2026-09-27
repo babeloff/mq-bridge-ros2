@@ -147,10 +147,8 @@ pub async fn apply_middlewares_to_consumer(
                     "[middleware:{route_name}] `pack` is an output-only middleware. Put `pack` on the route's output endpoint and `unpack` on its input."
                 ))
             }
-            Middleware::Lookup(_) => {
-                return Err(anyhow::anyhow!(
-                    "[middleware:{route_name}] `lookup` enriches outgoing messages and is output-only. Move it to the route's output endpoint."
-                ))
+            Middleware::Lookup(cfg) => {
+                Box::new(lookup::LookupConsumer::new(consumer, cfg, route_name).await?)
             }
             Middleware::Timeout(_) => {
                 return Err(anyhow::anyhow!(
