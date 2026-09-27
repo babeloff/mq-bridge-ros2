@@ -464,6 +464,34 @@ but before the branch's downstream send committed, the replay hits a duplicate k
 `existed`, and a genuinely-new record takes the duplicate branch. Write the `existed` branch as
 "may or may not have been handled — check and repair", not "definitely already done".
 
+### Read by key, then branch (`lookup`)
+
+To branch on whether a record *already exists* without writing it, read it first. The
+[`lookup`](REFERENCE.md#lookup) middleware asks a read-by-key endpoint (MongoDB `find`, SQLx
+`select_one_query`, HTTP) and sets `lookup.found`, which a `switch` routes on:
+
+```yaml
+orders_enrich_branch:
+  input: { nats: { url: "nats://localhost:4222", subject: "orders" } }
+  output:
+    middlewares:
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://app@localhost/crm"
+              table: "customers"
+              select_one_query: "SELECT name, tier FROM customers WHERE id = ${payload:customer_id}::int"
+          into: customer
+    switch:
+      metadata_key: "lookup.found"
+      cases:
+        "true": { ref: "known_customer_orders" }
+      default: { ref: "new_customer_orders" }
+```
+
+A read is not a reservation: two messages for the same new key can both see `false`. When
+exactly one of them must win, insert with `report_outcome` (above) instead.
+
 ### Files & object storage — `name_by`
 
 > **Check first whether you need any of this.** If your records already carry a business key — an

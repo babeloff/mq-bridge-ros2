@@ -1549,3 +1549,54 @@ async fn test_sqlx_cursor_reader_rejects_text_cursor_for_source_metadata() {
     );
     assert!(err.to_string().contains("integer"), "got: {err}");
 }
+
+#[tokio::test]
+async fn select_one_query_answers_with_the_first_row() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE users (id TEXT, name TEXT, age INTEGER)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users VALUES ('u1', 'Ada', 36)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let config = SqlxConfig {
+        url: url.clone(),
+        table: "users".to_string(),
+        select_one_query: Some("SELECT name, age FROM users WHERE id = ${payload:user_id}".into()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    let ask =
+        |id: &str| CanonicalMessage::new(format!(r#"{{"user_id":"{id}"}}"#).into_bytes(), None);
+
+    let result = publisher
+        .send_batch(vec![ask("u1"), ask("nobody")])
+        .await
+        .unwrap();
+    let SentBatch::Partial { responses, failed } = result else {
+        panic!("select_one_query must answer with responses");
+    };
+    assert!(failed.is_empty());
+    let responses = responses.unwrap();
+    let hit: serde_json::Value = serde_json::from_slice(&responses[0].payload).unwrap();
+    assert_eq!(hit, serde_json::json!({"name": "Ada", "age": 36}));
+    assert_eq!(
+        responses[0].metadata.get("sqlx.found").map(String::as_str),
+        Some("true")
+    );
+    assert!(responses[1].payload.is_empty());
+    assert_eq!(
+        responses[1].metadata.get("sqlx.found").map(String::as_str),
+        Some("false")
+    );
+
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "a lookup must write nothing");
+}

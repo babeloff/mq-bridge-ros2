@@ -211,9 +211,14 @@ impl MongoDbPublisher {
             .and_then(|v| Ok(Bson::try_from(v)?))
             .and_then(|b| match b {
                 Bson::Document(d) => Ok(d),
-                other => Err(anyhow!("filter is a {:?}, not a document", other.element_type())),
+                other => Err(anyhow!(
+                    "filter is a {:?}, not a document",
+                    other.element_type()
+                )),
             })
-            .map_err(|e| PublisherError::NonRetryable(e.context("invalid MongoDB `find` filter")))?;
+            .map_err(|e| {
+                PublisherError::NonRetryable(e.context("invalid MongoDB `find` filter"))
+            })?;
         let found = self
             .collection
             .find_one(filter)

@@ -402,25 +402,35 @@ async fn mongo_find_answers_with_the_first_match() {
     };
     let writer = MongoDbPublisher::new(&config(None)).await.unwrap();
     writer
-        .send(CanonicalMessage::new(br#"{"id":"u1","name":"Ada"}"#.to_vec(), None))
+        .send(CanonicalMessage::new(
+            br#"{"id":"u1","name":"Ada"}"#.to_vec(),
+            None,
+        ))
         .await
         .unwrap();
 
     let finder = MongoDbPublisher::new(&config(Some(r#"{"_id": "${payload:user_id}"}"#)))
         .await
         .unwrap();
-    let ask = |id: &str| CanonicalMessage::new(format!(r#"{{"user_id":"{id}"}}"#).into_bytes(), None);
+    let ask =
+        |id: &str| CanonicalMessage::new(format!(r#"{{"user_id":"{id}"}}"#).into_bytes(), None);
 
     let Sent::Response(hit) = finder.send(ask("u1")).await.unwrap() else {
         panic!("find must answer with a response");
     };
     let doc: serde_json::Value = serde_json::from_slice(&hit.payload).unwrap();
     assert_eq!(doc["name"], "Ada");
-    assert_eq!(hit.metadata.get("mongodb.found").map(String::as_str), Some("true"));
+    assert_eq!(
+        hit.metadata.get("mongodb.found").map(String::as_str),
+        Some("true")
+    );
 
     let Sent::Response(miss) = finder.send(ask("nobody")).await.unwrap() else {
         panic!("find must answer with a response");
     };
     assert!(miss.payload.is_empty());
-    assert_eq!(miss.metadata.get("mongodb.found").map(String::as_str), Some("false"));
+    assert_eq!(
+        miss.metadata.get("mongodb.found").map(String::as_str),
+        Some("false")
+    );
 }

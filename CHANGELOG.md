@@ -21,6 +21,9 @@ All notable changes to `mq-bridge`. Newest first.
 - **`lookup` middleware: enrich a message from another endpoint.** Per message, it sends a
   request built from templates to any request-capable endpoint (e.g. HTTP) and writes the
   response at a payload path, with `lookup.found` in metadata. Output-only.
+- **Read-by-key on MongoDB and SQLx publishers**, for `lookup`: `mongodb.find` (a filter
+  template) and `sqlx.select_one_query` answer each send with the first match and write
+  nothing.
 
 ## 0.4.15
 

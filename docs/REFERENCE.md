@@ -927,8 +927,28 @@ fetched by key, then routing on whether it was found.
 - The response is parsed as JSON; a non-JSON response is written as a string. An empty
   response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
   `false`, for a following [`switch`](#switch).
-- `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`. An
-  endpoint that only acknowledges fails the message as non-retryable.
+- `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
+  `mongodb` with `find`, or `sqlx` with `select_one_query`. An endpoint that only acknowledges
+  fails the message as non-retryable.
+- `mongodb.find` is an Extended-JSON filter template and answers with the first matching
+  document; `sqlx.select_one_query` binds `${payload:…}` / `${metadata:…}` tokens like
+  `insert_query` and answers with the first row as a JSON object. Neither writes anything;
+  they also set `mongodb.found` / `sqlx.found`.
+- On Postgres, cast placeholders to the column type (`WHERE id = ${payload:author_id}::int`):
+  tokens are bound untyped, and a field missing from the payload (e.g. on a CDC delete) is
+  bound as text. Cast `NUMERIC`, `TIMESTAMPTZ` and similar result columns to `::text`; the
+  `Any` driver cannot decode them and fails the message as non-retryable.
+
+```yaml middleware
+- lookup:
+    from:
+      mongodb:
+        url: "mongodb://localhost:27017"
+        database: "crm"
+        collection: "customers"
+        find: '{"_id": "${payload:customer_id}"}'
+    into: customer
+```
 - HTTP 408, 429 and 5xx fail the message as retryable, other statuses as non-retryable.
   Without `pass_through_status: true` the `http` endpoint already fails on any non-2xx
   response, so a missing record is an error rather than `null`.

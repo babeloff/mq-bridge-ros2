@@ -2535,6 +2535,10 @@ pub struct SqlxConfig {
     /// Add an explicit cast next to the token — it is preserved verbatim in the SQL:
     /// `VALUES (${payload:amount}::numeric, ${payload:created_at}::timestamptz)`.
     pub insert_query: Option<String>,
+    /// (Publisher only) SELECT with `${payload:field}` / `${metadata:key}` tokens. Each send
+    /// answers with the first row as a JSON object and writes nothing. For `lookup`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub select_one_query: Option<String>,
     /// (Consumer only) Optional. A custom SQL SELECT query to fetch messages. This is only supported for PostgreSQL and Microsoft SQL Server.
     /// The query must include a placeholder for the batch size (`$1` for PostgreSQL, `@p1` for SQL Server).
     /// The bridge will bind the route's `batch_size` to this placeholder.

@@ -463,7 +463,12 @@ pub struct SqlxPublisher {
     /// Present when `bulk_copy` is enabled (PostgreSQL, token-based query). When set,
     /// `send_batch` streams rows via `COPY FROM STDIN` instead of a multi-row INSERT.
     copy: Option<PgCopySink>,
+    /// Set by `select_one_query`: a read-only lookup publisher.
+    select_one: Option<(String, Vec<ColumnSource>)>,
 }
+
+/// Metadata key telling whether a `select_one_query` returned a row.
+const FOUND_KEY: &str = "sqlx.found";
 
 /// Bulk-load sink using PostgreSQL `COPY FROM STDIN`. `columns[i]` receives the value
 /// resolved from `sources[i]` — positional, mirroring the token-based INSERT.
@@ -657,6 +662,19 @@ impl SqlxPublisher {
 
         info!(table = %config.table, driver = %driver_name, "SQLx publisher connected");
 
+        if let Some(select) = &config.select_one_query {
+            return Ok(Self {
+                pool,
+                _shared_pool: shared_pool,
+                insert_query: String::new(),
+                column_sources: Vec::new(),
+                select_one: Some(parse_insert_template(select, &driver_name)?),
+                driver_name,
+                table,
+                copy: None,
+            });
+        }
+
         // Resolve the insert query and parse any `${metadata:...}`/`${payload:...}`
         // tokens into ordered value sources, rewriting them to positional placeholders.
         let raw_insert_query =
@@ -799,13 +817,46 @@ impl SqlxPublisher {
             driver_name,
             table,
             copy,
+            select_one: None,
         })
+    }
+
+    /// Runs `select_one_query` and answers with its first row, or an empty payload.
+    async fn select_one(
+        &self,
+        sql: &str,
+        sources: &[ColumnSource],
+        message: &CanonicalMessage,
+    ) -> Result<Sent, PublisherError> {
+        let query = bind_message_sources(sqlx::query(audited_sql(sql)), message, sources)?;
+        let row = query.fetch_optional(&self.pool).await.map_err(|e| {
+            if is_permanent_decode_error(&e) {
+                PublisherError::NonRetryable(anyhow!(
+                    "select_one_query returned a column the SQL `Any` driver cannot decode: {e}. \
+                     Cast it in the query, e.g. `amount::text AS amount`."
+                ))
+            } else {
+                classify_sql_error(e)
+            }
+        })?;
+        let mut payload = Vec::new();
+        if let Some(row) = &row {
+            JsonRowSchema::from_row(row).encode_row(row, &mut payload);
+        }
+        let mut response = CanonicalMessage::new(payload, Some(message.message_id));
+        response
+            .metadata
+            .insert(FOUND_KEY.to_string(), row.is_some().to_string());
+        Ok(Sent::Response(response))
     }
 }
 
 #[async_trait]
 impl MessagePublisher for SqlxPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if let Some((sql, sources)) = &self.select_one {
+            return self.select_one(sql, sources, &message).await;
+        }
         trace!(message_id = %format!("{:032x}", message.message_id), table = %self.table, "Publishing to SQL");
         let query = sqlx::query(audited_sql(&self.insert_query));
         let query = if self.column_sources.is_empty() {
@@ -826,6 +877,11 @@ impl MessagePublisher for SqlxPublisher {
     ) -> Result<SentBatch, PublisherError> {
         if messages.is_empty() {
             return Ok(SentBatch::Ack);
+        }
+
+        if self.select_one.is_some() {
+            return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
+                .await;
         }
 
         if let Some(sink) = &self.copy {

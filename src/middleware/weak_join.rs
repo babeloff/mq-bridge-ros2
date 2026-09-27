@@ -285,15 +285,21 @@ impl WeakJoinConsumer {
         }
     }
 
+    /// Joins stay in `ready_buffer` until the discarded members are acked, so a failed
+    /// ack loses none of them.
+    async fn ack_then_take_ready(
+        &self,
+        discarded: Vec<Slot>,
+        max_messages: usize,
+    ) -> Result<ReceivedBatch, ConsumerError> {
+        self.ack_discarded(discarded).await?;
+        let mut state = self.state.lock().await;
+        Ok(self.take_ready(&mut state, max_messages))
+    }
+
     /// Returns up to `max_messages` ready joins; the rest wait in `ready_buffer`. Their
     /// commit settles every member slot with the joined message's disposition.
-    fn take_ready(
-        &self,
-        state: &mut JoinState,
-        ready: Vec<(CanonicalMessage, Vec<Slot>)>,
-        max_messages: usize,
-    ) -> ReceivedBatch {
-        state.ready_buffer.extend(ready);
+    fn take_ready(&self, state: &mut JoinState, max_messages: usize) -> ReceivedBatch {
         let count = state.ready_buffer.len().min(max_messages);
         let (messages, slots): (Vec<_>, Vec<_>) = state.ready_buffer.drain(..count).unzip();
         let commit: BatchCommitFunc = match self.tracker.clone() {
@@ -349,7 +355,7 @@ impl MessageConsumer for WeakJoinConsumer {
         let mut state = self.state.lock().await;
 
         if !state.ready_buffer.is_empty() {
-            return Ok(self.take_ready(&mut state, Vec::new(), max_messages));
+            return Ok(self.take_ready(&mut state, max_messages));
         }
 
         let now = Instant::now();
@@ -424,18 +430,16 @@ impl MessageConsumer for WeakJoinConsumer {
                     }
                 }
 
-                let batch = self.take_ready(&mut state, ready, max_messages);
+                state.ready_buffer.extend(ready);
                 drop(state);
-                self.ack_discarded(discarded).await?;
-                Ok(batch)
+                self.ack_then_take_ready(discarded, max_messages).await
             }
             _ = timeout_future => {
                 let mut state = self.state.lock().await;
                 self.check_timeouts(&mut state, &mut ready, &mut discarded);
-                let batch = self.take_ready(&mut state, ready, max_messages);
+                state.ready_buffer.extend(ready);
                 drop(state);
-                self.ack_discarded(discarded).await?;
-                Ok(batch)
+                self.ack_then_take_ready(discarded, max_messages).await
             }
         }
     }
