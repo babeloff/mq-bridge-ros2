@@ -27,7 +27,8 @@ If you need to move data or events reliably between systems and you write code (
 
 **Prefer not to write code?** [`mq-bridge-app`](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app) runs the exact same engine as a **standalone, zero-code ETL service** configured entirely by **YAML or environment variables** — move data from A to B without writing a line. It ships a **Postman-style UI** to build, send, and inspect messages against a route, and can **import Postman collections and AsyncAPI documents** to scaffold routes and endpoints for you.
 
-*   **16+ transports, one API**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, **Postgres CDC** (logical replication), PostgreSQL / MySQL / SQLite (SQLx), ClickHouse, HTTP, WebSocket, gRPC, ZeroMQ, Redis Streams, AWS SQS/SNS, cloud object storage (S3 / GCS / Azure), IBM MQ, files, `dir_spool` (a crash-safe directory FIFO queue), and in-memory channels — all behind the same `receive_batch` / `send_batch` shape.
+*   **16+ native transports, 100+ more via plugin, one API**: Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, **Postgres CDC** (logical replication), PostgreSQL / MySQL / SQLite (SQLx), ClickHouse, HTTP, WebSocket, gRPC, ZeroMQ, Redis Streams, AWS SQS/SNS, cloud object storage (S3 / GCS / Azure), IBM MQ, files, `dir_spool` (a crash-safe directory FIFO queue), and in-memory channels — all behind the same `receive_batch` / `send_batch` shape.
+*   **Redpanda Connect reach**: the [Connect plugin](https://github.com/marcomq/mq-bridge-connect) adds Redpanda Connect's production-proven components — **51 inputs and 63 outputs as endpoints, plus 68 processors**, most of which also run as middleware on any endpoint — while mq-bridge keeps routing, batching, retries, DLQ and deduplication.
 *   **Change Data Capture**: stream row-level changes from **Postgres** (logical replication / `pgoutput`) and **MongoDB** (change streams) as flat rows with an operation marker.
 *   **Restart-safe delivery**: batch-aware ack/nack with commit sequencing for cumulative-ack brokers; the integration suite shows **no data loss during in-flight broker restarts**, including a Postgres CDC restart-safety test.
 *   **Reliability middleware, not a framework**: retries, dead-letter queues, deduplication, rate limiting, and cookie/session persistence wrap any endpoint.
@@ -205,7 +206,7 @@ These endpoints live in their own repositories and load as [plugins](docs/PLUGIN
 | :--- | :--- | :--- |
 | **[Pulsar](https://github.com/marcomq/mq-bridge-pulsar)** | Apache Pulsar input and output | Built in |
 | **[Meilisearch](https://github.com/marcomq/mq-bridge-meilisearch)** | Document sink into a search index; index scan as input | Built in |
-| **[Connect](https://github.com/marcomq/mq-bridge-connect)** | Redpanda Connect connectors as endpoints (`connect+mqtt://…`) | Separate install (size) |
+| **[Connect](https://github.com/marcomq/mq-bridge-connect)** | Redpanda Connect's 51 inputs, 63 outputs (`connect+mqtt://…`) and 68 processors; per-message processors also run as middleware | Separate install (size) |
 
 Outside `mqb` (Python, Node.js, your own Rust host), or for Connect, install the plugin with `brew install marcomq/tap/<repo>` or `conda install -c marcomq <repo>`; it is then discovered automatically.
 
