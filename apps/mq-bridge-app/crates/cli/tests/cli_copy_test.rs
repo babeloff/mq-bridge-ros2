@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 fn cli() -> Command {
@@ -2402,7 +2402,7 @@ fn a_transform_schema_file_types_every_row_and_fills_in_defaults() {
         read_json_rows(&destination),
         vec![
             serde_json::json!({"id": 1, "amount": 2.5, "active": true, "tier": "standard"}),
-            serde_json::json!({"id": 2, "amount": 7.0, "active": false, "tier": "standard"}),
+            serde_json::json!({"id": 2, "amount": 7, "active": false, "tier": "standard"}),
         ]
     );
 }
