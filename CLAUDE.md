@@ -183,7 +183,7 @@ kafka_to_nats:
 2. **New middleware**: Add to `middleware/mod.rs`, implement middleware wrapper types
 3. **Configuration changes**: Update `models.rs` with new config structs, add to `EndpointType`/`Middleware` enums
 4. **Tests**: Add integration tests in `tests/integration/`, update Docker Compose if needed
-5. **Documentation**: Update README.md and add doc comments
+5. **Documentation**: Update README.md and add doc comments; when middleware or endpoint behaviour changes, also check the book's hand-written pages in `apps/mq-bridge-app/dev/docs/cookbook` and `operations`
 
 ### Dependencies
 

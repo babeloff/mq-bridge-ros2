@@ -31,6 +31,28 @@ running server and build dashboards on the emitted throughput/latency/error seri
 > throughput. Benchmark numbers should be taken **without** it attached (see
 > [Reading throughput honestly](#reading-throughput-honestly)).
 
+## Tracing (OpenTelemetry)
+
+Attach the [`otel`](../engine/reference.md#otel) middleware to get one span per message. The
+input span continues the incoming W3C `traceparent`, and the output writes a new
+`traceparent` into the published message, so a trace runs through the bridge into the next
+service:
+
+```yaml
+orders_bridge:
+  input:
+    middlewares: [ { otel: {} } ]
+    kafka: { topic: "orders", url: "localhost:9092" }
+  output:
+    middlewares: [ { otel: {} } ]
+    nats: { subject: "orders.processed", url: "nats://localhost:4222" }
+```
+
+`mq-bridge-app` exports the spans over OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` (or
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) is set; `OTEL_SERVICE_NAME` defaults to
+`mq-bridge-app`. Without that variable no exporter is installed and the middleware is left out
+of the chain, so it costs nothing per message.
+
 ## Logging
 
 Logs are structured JSON, suited to shipping into a log aggregator. Two things to keep in mind:

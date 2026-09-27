@@ -28,6 +28,7 @@
 - [Retries & backoff](cookbook/retries.md)
 - [Transform & schema mapping](cookbook/transform.md)
 - [Content-based routing (switch)](cookbook/switch.md)
+- [Enrichment & lookups](cookbook/lookup.md)
 - [Fan-out](cookbook/fanout.md)
 - [Weak join / correlation](cookbook/weak-join.md)
 - [Encryption at rest](cookbook/encryption.md)

@@ -1,0 +1,74 @@
+# Enrichment & lookups
+
+The [`lookup`](../engine/reference.md#lookup) middleware asks another endpoint for each message
+and writes the answer into the payload. Use it to join an event with master data, or to add
+features such as a previous value or a moving average. The endpoint asked must answer:
+`http`, `mongodb` with `find`, `sqlx` with `select_one_query`, or `nats` / `memory` with
+`request_reply: true`.
+
+## Enrich, then route on the result
+
+On an output, the enriched message goes on to the next endpoint. `lookup.found` tells a
+`switch` whether the record exists:
+
+```yaml
+orders_enrich:
+  input: { kafka: { topic: "orders", url: "localhost:9092" } }
+  output:
+    middlewares:
+      - lookup:
+          from:
+            sqlx:
+              url: "postgres://localhost/crm"
+              table: "customers"
+              select_one_query: "SELECT name, tier FROM customers WHERE id = ${payload:customer_id}::int"
+          into: customer
+    switch:
+      metadata_key: "lookup.found"
+      cases:
+        "true":  { kafka: { topic: "orders.enriched", url: "localhost:9092" } }
+        "false": { kafka: { topic: "orders.unknown_customer", url: "localhost:9092" } }
+```
+
+A failed lookup fails only its message; list `retry` / `dlq` after `lookup` to handle it.
+
+## Several lookups, before the handler
+
+On an input, the handler already sees the enriched message. Lookups in `entries` run in
+parallel, so a message waits for the slowest one, not the sum:
+
+```yaml
+input:
+  kafka: { topic: "payments", url: "localhost:9092" }
+  middlewares:
+    - lookup:
+        concurrency: 64
+        entries:
+          - into: features.user
+            from:
+              mongodb:
+                url: "mongodb://localhost:27017"
+                database: "features"
+                collection: "users"
+                find: '{"_id": "${payload:user_id}"}'
+          - into: features.card_avg
+            from:
+              sqlx:
+                url: "postgres://localhost/payments"
+                table: "payments"
+                select_one_query: >-
+                  SELECT avg(amount)::text AS avg20 FROM (SELECT amount FROM payments
+                  WHERE card_id = ${payload:card_id} ORDER BY ts DESC LIMIT 20) t
+```
+
+Each entry sets `lookup.<into>.found`; `lookup.found` is `true` only when all of them found
+something. On an input a failed lookup nacks the whole batch, so the source redelivers it: a
+temporary error reconnects the route, a permanent one stops it.
+
+## Postgres gotchas
+
+- Cast placeholders to the column type: `WHERE id = ${payload:author_id}::int`. A field
+  missing from the payload, e.g. on a CDC delete, is otherwise bound as text and fails.
+- Cast `NUMERIC`, `TIMESTAMPTZ` and similar result columns to `::text`. They arrive as JSON
+  strings.
+- `select_one_query` returns the first row only; use `ORDER BY … LIMIT 1` for "the latest".
