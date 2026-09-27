@@ -4751,6 +4751,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "mimalloc",
  "mq-bridge-app-core",
+ "percent-encoding",
  "pidlock",
  "rmcp",
  "rustls",

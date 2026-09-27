@@ -167,6 +167,56 @@ pub fn discover_endpoint_plugin_in(
     dirs: &[PathBuf],
     name: &str,
 ) -> anyhow::Result<Option<PluginInfo>> {
+    discover_plugin_in(dirs, name, PluginKind::Endpoint)
+}
+
+/// Loads the plugin providing the middleware `name` from the search path.
+///
+/// The middleware counterpart of [`discover_endpoint_plugin`], with the same
+/// `Ok(None)` contract.
+pub fn discover_middleware_plugin(name: &str) -> anyhow::Result<Option<PluginInfo>> {
+    if !discovery_enabled() {
+        return Ok(None);
+    }
+    discover_middleware_plugin_in(&plugin_search_path(), name)
+}
+
+/// [`discover_middleware_plugin`] against an explicit list of directories.
+pub fn discover_middleware_plugin_in(
+    dirs: &[PathBuf],
+    name: &str,
+) -> anyhow::Result<Option<PluginInfo>> {
+    discover_plugin_in(dirs, name, PluginKind::Middleware)
+}
+
+#[derive(Clone, Copy)]
+enum PluginKind {
+    Endpoint,
+    Middleware,
+}
+
+impl PluginKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            PluginKind::Endpoint => "endpoint",
+            PluginKind::Middleware => "middleware",
+        }
+    }
+
+    fn provided_by(self, info: &PluginInfo) -> bool {
+        match self {
+            PluginKind::Endpoint => info.supports_consumer || info.supports_publisher,
+            PluginKind::Middleware => info.supports_middleware,
+        }
+    }
+}
+
+fn discover_plugin_in(
+    dirs: &[PathBuf],
+    name: &str,
+    kind: PluginKind,
+) -> anyhow::Result<Option<PluginInfo>> {
+    let kind_name = kind.as_str();
     let file_name = library_file_name(name);
     for dir in dirs {
         let candidate = dir.join(&file_name);
@@ -174,22 +224,28 @@ pub fn discover_endpoint_plugin_in(
             continue;
         }
         let infos = load_discovered(&candidate)
-            .with_context(|| format!("endpoint `{name}` resolved to {}", candidate.display()))?;
+            .with_context(|| format!("{kind_name} `{name}` resolved to {}", candidate.display()))?;
         // The file name is a convention the library itself never sees, so a
         // mismatch is possible. It stays loaded, because unloading is not safe.
         let Some(info) = infos.iter().find(|info| info.name == name).cloned() else {
             let first = &infos[0].name;
             return Err(anyhow!(
-                "{} is named for endpoint `{name}` but provides `{first}`; it stays loaded for \
+                "{} is named for {kind_name} `{name}` but provides `{first}`; it stays loaded for \
                  the life of the process. Rename the file to {} or ask for `{first}`.",
                 candidate.display(),
                 library_file_name(first),
             ));
         };
-        if !(info.supports_consumer || info.supports_publisher) {
+        // The loader refuses a library that provides neither, so it has the other.
+        if !kind.provided_by(&info) {
+            let other = match kind {
+                PluginKind::Endpoint => PluginKind::Middleware,
+                PluginKind::Middleware => PluginKind::Endpoint,
+            };
             return Err(anyhow!(
-                "{} provides the `{name}` middleware but no endpoint",
+                "{} provides the `{name}` {} but no `{name}` {kind_name}",
                 candidate.display(),
+                other.as_str(),
             ));
         }
         return Ok(Some(info));
@@ -329,8 +385,10 @@ fn check_trusted(_path: &Path) -> anyhow::Result<()> {
 
 /// A file stem may spell a hyphenated endpoint name with an underscore.
 fn is_registered(stem: &str) -> bool {
-    use crate::extensions::get_endpoint_factory;
-    get_endpoint_factory(stem).is_some() || get_endpoint_factory(&stem.replace('_', "-")).is_some()
+    use crate::extensions::{get_endpoint_factory, get_middleware_factory};
+    let registered =
+        |name: &str| get_endpoint_factory(name).is_some() || get_middleware_factory(name).is_some();
+    registered(stem) || registered(&stem.replace('_', "-"))
 }
 
 /// Reads the export table only, so a library that is not a plugin runs no code.

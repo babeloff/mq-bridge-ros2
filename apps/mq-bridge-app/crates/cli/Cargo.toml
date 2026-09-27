@@ -57,6 +57,7 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 rustls = { version = "0.23.43", optional = true }
 # Reads the `CONSUMER` pid lock so `server_info` can tell a live agent listener
 # from one that crashed and left its lock behind. Same version dir_spool uses.
+percent-encoding = "2.3.2"
 pidlock = "0.2.2"
 schemars = "1.2.2"
 serde = { workspace = true, features = ["derive"] }

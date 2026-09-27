@@ -139,6 +139,24 @@ export interface DeduplicationMiddleware {
 
 export type MetricsMiddleware = Record<string, never>;
 
+export type OtelMiddleware = Record<string, never>;
+
+export interface LookupMiddleware {
+  from?: Endpoint | null;
+  metadata?: Record<string, string>;
+  payload?: string | null;
+  into?: string | null;
+  entries?: LookupEntry[];
+  concurrency?: number;
+}
+
+export interface LookupEntry {
+  from: Endpoint;
+  metadata?: Record<string, string>;
+  payload?: string | null;
+  into: string;
+}
+
 export interface DeadLetterQueueMiddleware {
   endpoint: Endpoint;
 }
@@ -173,9 +191,12 @@ export interface WeakJoinMiddleware {
   branch_by?: string | null;
   required?: string[];
   on_timeout?: WeakJoinTimeout;
+  ack?: WeakJoinAck;
 }
 
 export type WeakJoinTimeout = "fire" | "discard";
+
+export type WeakJoinAck = "on_join" | "on_receive";
 
 export interface LimiterMiddleware {
   messages_per_second: number;
@@ -425,6 +446,7 @@ export interface MongoDbConfig {
   format?: MongoDbFormat;
   id_field?: string | null;
   report_outcome?: boolean;
+  find?: string | null;
   cursor_id?: string | null;
   meta_collection?: string | null;
   shared?: boolean | null;
@@ -591,6 +613,7 @@ export interface SqlxConfig {
   password?: string | null;
   table: string;
   insert_query?: string | null;
+  select_one_query?: string | null;
   select_query?: string | null;
   delete_after_read?: boolean;
   cursor_column?: string | null;

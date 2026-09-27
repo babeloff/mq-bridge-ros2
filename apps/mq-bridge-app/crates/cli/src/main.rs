@@ -1527,20 +1527,15 @@ fn make_listen_address(endpoint: &mut mq_bridge::models::Endpoint) -> anyhow::Re
     Ok(())
 }
 
-/// Builds a middleware from a `name` / `name?param=value&...` spec. Params are
-/// the middleware config struct's own fields, coerced to the type the field
-/// expects; `dlq`'s `endpoint` is itself an endpoint URI, and object/array
-/// fields (e.g. `weak_join`'s `required`) take a JSON literal.
+/// Builds a middleware from a `name` / `name?param=value&...` spec.
+///
+/// Built-ins are read off the `Middleware` enum's own schema, so a new variant
+/// needs no change here. Params are the variant's config fields, coerced to
+/// their type; an endpoint-typed field (`dlq`'s `endpoint`, `lookup`'s `from`)
+/// takes an endpoint URI, and an object/array field a JSON literal. A string
+/// variant (`id`, `filter`) takes the whole percent-decoded query as its value.
+/// Any other name is a registered or installed custom middleware.
 fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middleware> {
-    use anyhow::bail;
-    use mq_bridge::models::{
-        BufferMiddleware, CompressionMiddleware, CookieJarMiddleware, DeadLetterQueueMiddleware,
-        DeduplicationMiddleware, DelayMiddleware, EncryptionConfig, LimiterMiddleware,
-        MetricsMiddleware, PackMiddleware, RandomPanicMiddleware, RetryMiddleware,
-        TimeoutMiddleware, TransformMiddleware, UnpackMiddleware, WeakJoinMiddleware,
-    };
-    use std::collections::HashMap;
-
     let (name, query) = match spec.split_once('?') {
         Some((name, query)) => (name.trim(), query),
         None => (spec.trim(), ""),
@@ -1548,41 +1543,110 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
     // An underscore is awkward to type in a shell-quoted URI, so `-` is accepted
     // as well (`weak-join` == `weak_join`).
     let tag = name.replace('-', "_");
+    let root = serde_json::to_value(schemars::schema_for!(mq_bridge::models::Middleware))?;
 
-    let fields: HashMap<String, FieldType> = match tag.as_str() {
-        "deduplication" => schema_fields(schemars::schema_for!(DeduplicationMiddleware)),
-        "metrics" => schema_fields(schemars::schema_for!(MetricsMiddleware)),
-        "dlq" => schema_fields(schemars::schema_for!(DeadLetterQueueMiddleware)),
-        "retry" => schema_fields(schemars::schema_for!(RetryMiddleware)),
-        "random_panic" => schema_fields(schemars::schema_for!(RandomPanicMiddleware)),
-        "delay" => schema_fields(schemars::schema_for!(DelayMiddleware)),
-        "timeout" => schema_fields(schemars::schema_for!(TimeoutMiddleware)),
-        "weak_join" => schema_fields(schemars::schema_for!(WeakJoinMiddleware)),
-        "limiter" => schema_fields(schemars::schema_for!(LimiterMiddleware)),
-        "buffer" => schema_fields(schemars::schema_for!(BufferMiddleware)),
-        "cookie_jar" => schema_fields(schemars::schema_for!(CookieJarMiddleware)),
-        "transform" => schema_fields(schemars::schema_for!(TransformMiddleware)),
-        "encryption" => schema_fields(schemars::schema_for!(EncryptionConfig)),
-        "compression" => schema_fields(schemars::schema_for!(CompressionMiddleware)),
-        "pack" => schema_fields(schemars::schema_for!(PackMiddleware)),
-        "unpack" => schema_fields(schemars::schema_for!(UnpackMiddleware)),
-        // The escape hatch for a handler-provided middleware: `name` selects it,
-        // `config` carries its free-form JSON.
-        "custom" => HashMap::from([
-            ("name".to_string(), FieldType::StringLike),
-            ("config".to_string(), FieldType::Object),
-        ]),
-        other => bail!(
-            "unsupported middleware '{other}'. Supported middlewares: deduplication, metrics, dlq, retry, random_panic, delay, timeout, weak_join, limiter, buffer, cookie_jar, transform, encryption, compression, pack, unpack, custom"
-        ),
+    if let Some(variant) = middleware_variant(&root, &tag) {
+        let value = if matches!(field_type(&root, variant), FieldType::StringLike) {
+            let raw = percent_encoding::percent_decode_str(query)
+                .decode_utf8()
+                .with_context(|| format!("middleware spec '{spec}' is not valid UTF-8"))?;
+            serde_json::Value::String(raw.into_owned())
+        } else {
+            serde_json::Value::Object(middleware_params(spec, query, Some((&root, variant)))?)
+        };
+        return serde_json::from_value(serde_json::json!({ tag.as_str(): value }))
+            .with_context(|| format!("could not build a '{tag}' middleware from '{spec}'"));
+    }
+
+    let Some((name, declared)) = custom_middleware(name, &tag)? else {
+        let mut known = middleware_tags(&root);
+        known.extend(mq_bridge::extensions::middleware_config_schemas().into_keys());
+        anyhow::bail!(
+            "unsupported middleware '{tag}'. Supported middlewares: {}. A name may also be a \
+             middleware loaded with --plugin or installed on the plugin search path ({})",
+            known.join(", "),
+            mq_bridge::plugin::search_path_hint(name),
+        );
     };
+    let config = match declared {
+        Some(schema) => middleware_params(spec, query, Some((&schema, &schema)))?,
+        None => middleware_params(spec, query, None)?,
+    };
+    Ok(mq_bridge::models::Middleware::Custom {
+        name,
+        config: serde_json::Value::Object(config),
+    })
+}
+
+/// The schema of the `Middleware` variant tagged `tag`, if the enum has one.
+fn middleware_variant<'a>(root: &'a serde_json::Value, tag: &str) -> Option<&'a serde_json::Value> {
+    root["oneOf"]
+        .as_array()?
+        .iter()
+        .find_map(|variant| variant.get("properties")?.get(tag))
+}
+
+/// Every tag the `Middleware` enum accepts, for the unsupported-middleware error.
+fn middleware_tags(root: &serde_json::Value) -> Vec<String> {
+    root["oneOf"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|variant| variant.get("properties")?.as_object())
+        .flat_map(|properties| properties.keys().cloned())
+        .collect()
+}
+
+/// A middleware registered under `name` or its `_` spelling, loading an
+/// installed plugin when none is. Yields the name it answers to and its schema.
+fn custom_middleware(
+    name: &str,
+    tag: &str,
+) -> anyhow::Result<Option<(String, Option<serde_json::Value>)>> {
+    let registered = |candidate: &str| {
+        mq_bridge::extensions::get_middleware_factory(candidate)
+            .map(|factory| (candidate.to_string(), factory.config_schema()))
+    };
+    if let Some(found) = registered(name).or_else(|| registered(tag)) {
+        return Ok(Some(found));
+    }
+    for candidate in [name, tag] {
+        if mq_bridge::plugin::discover_middleware_plugin(candidate)
+            .with_context(|| format!("middleware '{candidate}'"))?
+            .is_some()
+        {
+            return Ok(registered(candidate));
+        }
+    }
+    Ok(None)
+}
+
+/// Reads a middleware spec's query params into its config object, typed by
+/// `schema` (`(root, node)`). Without one, nothing says a param is a number,
+/// so each stays a string rather than turning an id like `0123` into one.
+fn middleware_params(
+    spec: &str,
+    query: &str,
+    schema: Option<(&serde_json::Value, &serde_json::Value)>,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let mut fields = std::collections::HashMap::new();
+    let mut endpoints = std::collections::HashSet::new();
+    if let Some((root, node)) = schema {
+        collect_props(
+            root,
+            node,
+            &mut fields,
+            &mut std::collections::HashSet::new(),
+        );
+        endpoints = endpoint_fields(root, node);
+    }
 
     let mut config = serde_json::Map::new();
     for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
         let (k, v) = (k.into_owned(), v.into_owned());
-        let value = if tag == "dlq" && k == "endpoint" {
-            let endpoint =
-                endpoint_from_uri(&v).with_context(|| format!("invalid dlq endpoint '{v}'"))?;
+        let value = if endpoints.contains(&k) {
+            let endpoint = endpoint_from_uri(&v)
+                .with_context(|| format!("invalid '{k}' endpoint '{v}' in '{spec}'"))?;
             serde_json::to_value(endpoint)?
         } else {
             match fields.get(&k).copied() {
@@ -1595,6 +1659,7 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
                         "query param '{k}' in middleware spec '{spec}' expects a JSON literal, got '{v}'"
                     )
                 })?,
+                None if schema.is_none() => serde_json::Value::String(v),
                 // An unknown field (`None`) is passed through for serde to reject
                 // by name.
                 None => serde_json::from_str(&v).unwrap_or(serde_json::Value::String(v)),
@@ -1603,11 +1668,39 @@ fn middleware_from_spec(spec: &str) -> anyhow::Result<mq_bridge::models::Middlew
         };
         config.insert(k, value);
     }
+    Ok(config)
+}
 
-    let mut tagged = serde_json::Map::new();
-    tagged.insert(tag.clone(), serde_json::Value::Object(config));
-    serde_json::from_value(serde_json::Value::Object(tagged))
-        .with_context(|| format!("could not build a '{tag}' middleware from '{spec}'"))
+/// The fields of `node` that hold an `Endpoint` (possibly optional or boxed),
+/// which a spec writes as an endpoint URI.
+fn endpoint_fields(
+    root: &serde_json::Value,
+    node: &serde_json::Value,
+) -> std::collections::HashSet<String> {
+    let is_endpoint = |schema: &serde_json::Value| {
+        let names = |s: &serde_json::Value| {
+            s.get("$ref").and_then(serde_json::Value::as_str) == Some("#/$defs/Endpoint")
+        };
+        names(schema)
+            || ["anyOf", "oneOf"].iter().any(|key| {
+                schema
+                    .get(key)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|members| members.iter().any(names))
+            })
+    };
+    let node = node
+        .get("$ref")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|reference| resolve_ref(root, reference))
+        .unwrap_or(node);
+    node.get("properties")
+        .and_then(serde_json::Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(_, schema)| is_endpoint(schema))
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 /// The extension endpoints this build compiled in, for the unsupported-scheme
@@ -3225,6 +3318,114 @@ mod uri_tests {
         let err = endpoint_from_uri("null:|bogus").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("unsupported middleware 'bogus'"), "got: {msg}");
+    }
+
+    // A registered middleware builds `custom`, its params typed by its declared
+    // schema, and is named in the unknown-middleware error.
+    #[test]
+    fn registered_middleware_builds_a_custom_middleware() {
+        #[derive(Debug)]
+        struct Declaring;
+
+        impl super::mq_bridge::traits::CustomMiddlewareFactory for Declaring {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer" },
+                        "id": { "type": "string" }
+                    }
+                }))
+            }
+        }
+
+        let name = "cli-test-declaring-mw";
+        super::mq_bridge::extensions::register_middleware_factory(
+            name,
+            std::sync::Arc::new(Declaring),
+        )
+        .unwrap();
+        let built = super::middleware_from_spec(&format!("{name}?limit=5&id=0123"));
+        let err = format!("{:#}", super::middleware_from_spec("bogus").unwrap_err());
+        super::mq_bridge::extensions::unregister_middleware_factory(name);
+
+        let super::mq_bridge::models::Middleware::Custom {
+            name: built_name,
+            config,
+        } = built.unwrap()
+        else {
+            panic!("expected a custom middleware");
+        };
+        assert_eq!(built_name, name);
+        assert_eq!(config, serde_json::json!({ "limit": 5, "id": "0123" }));
+        assert!(err.contains(name), "got: {err}");
+    }
+
+    // Every `Middleware` variant is reachable from a spec, so a new one can't
+    // go missing here. Some reject an empty config, but never as unsupported.
+    #[test]
+    fn every_middleware_variant_is_accepted_by_name() {
+        let root =
+            serde_json::to_value(schemars::schema_for!(super::mq_bridge::models::Middleware))
+                .unwrap();
+        let tags = super::middleware_tags(&root);
+        assert!(tags.contains(&"otel".to_string()), "got: {tags:?}");
+        for tag in tags {
+            if let Err(err) = super::middleware_from_spec(&tag) {
+                let msg = format!("{err:#}");
+                assert!(!msg.contains("unsupported middleware"), "{tag}: {msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn string_middlewares_take_the_raw_query() {
+        let ep = endpoint_from_uri("null:|id?${payload:order_id}|filter?amount%20%3E%20100|otel")
+            .expect("uri should parse");
+        let v = serde_json::to_value(&ep).unwrap();
+        assert_eq!(v["middlewares"][0]["id"], "${payload:order_id}");
+        assert_eq!(v["middlewares"][1]["filter"], "amount > 100");
+        assert!(v["middlewares"][2].get("otel").is_some(), "got: {v}");
+    }
+
+    // An endpoint-typed field anywhere takes a URI, not only `dlq`'s.
+    #[test]
+    fn lookup_from_takes_an_endpoint_uri() {
+        let ep =
+            endpoint_from_uri("null:|lookup?from=null%3A&into=extra").expect("uri should parse");
+        let v = serde_json::to_value(&ep).unwrap();
+        let lookup = &v["middlewares"][0]["lookup"];
+        assert_eq!(lookup["into"], "extra");
+        assert!(lookup["from"].get("null").is_some(), "got: {lookup}");
+    }
+
+    // Without a declared schema every param stays a string, and a registered
+    // `_` name resolves from its `-` spelling.
+    #[test]
+    fn undeclared_registered_middleware_keeps_params_as_strings() {
+        #[derive(Debug)]
+        struct Silent;
+
+        impl super::mq_bridge::traits::CustomMiddlewareFactory for Silent {}
+
+        let name = "cli_test_silent_mw";
+        super::mq_bridge::extensions::register_middleware_factory(
+            name,
+            std::sync::Arc::new(Silent),
+        )
+        .unwrap();
+        let built = super::middleware_from_spec("cli-test-silent-mw?id=0123");
+        super::mq_bridge::extensions::unregister_middleware_factory(name);
+
+        let super::mq_bridge::models::Middleware::Custom {
+            name: built_name,
+            config,
+        } = built.unwrap()
+        else {
+            panic!("expected a custom middleware");
+        };
+        assert_eq!(built_name, name);
+        assert_eq!(config, serde_json::json!({ "id": "0123" }));
     }
 
     // A scheme naming a registered endpoint builds `custom`, so `copy` can

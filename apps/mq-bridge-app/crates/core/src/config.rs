@@ -130,7 +130,15 @@ pub fn app_config_schema() -> serde_json::Value {
     }
 
     for (name, declared) in registered_endpoint_schemas() {
-        add_endpoint_definition(&mut schema, &name, declared);
+        let prefix = pascal_case(&name);
+        let definition = format!("{prefix}Config");
+        add_variant_definition(&mut schema, "Endpoint", &name, &prefix, &definition, declared);
+    }
+    // A middleware that declares nothing is still offered, with a free-form config.
+    for (name, declared) in mq_bridge::extensions::middleware_config_schemas() {
+        let declared = declared.unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+        let prefix = format!("{}Middleware", pascal_case(&name));
+        add_variant_definition(&mut schema, "Middleware", &name, &prefix, &prefix, declared);
     }
     schema
 }
@@ -159,20 +167,22 @@ fn registered_endpoint_schemas() -> std::collections::BTreeMap<String, serde_jso
     schemas
 }
 
-/// Puts one endpoint's declared schema into the document and lists it as an
-/// `Endpoint` variant, which is what makes the UI offer it.
-fn add_endpoint_definition(
+/// Puts one endpoint's or middleware's declared schema into the document and
+/// lists it as a variant of `union`, which is what makes the UI offer it.
+fn add_variant_definition(
     schema: &mut serde_json::Value,
+    union: &str,
     name: &str,
+    prefix: &str,
+    definition: &str,
     declared: serde_json::Value,
 ) {
-    let prefix = pascal_case(name);
     // Claimed before lifting, so a nested definition cannot take the same key.
-    let definition = reserve_definition(schema, &format!("{prefix}Config"));
-    schema["$defs"][&definition] = lift_definitions(schema, &prefix, declared);
-    schema["$defs"]["Endpoint"]["oneOf"]
+    let definition = reserve_definition(schema, definition);
+    schema["$defs"][&definition] = lift_definitions(schema, prefix, declared);
+    schema["$defs"][union]["oneOf"]
         .as_array_mut()
-        .expect("AppConfig schema should contain Endpoint variants")
+        .unwrap_or_else(|| panic!("AppConfig schema should contain {union} variants"))
         .push(serde_json::json!({
             "type": "object",
             "properties": { name: { "$ref": format!("#/$defs/{definition}") } },
@@ -1797,6 +1807,60 @@ publishers:
         assert_eq!(
             schema.pointer(&format!("/$defs/{definition}/properties/tls/$ref")),
             Some(&serde_json::json!("#/$defs/ConfigSchemaTestEndpointTls"))
+        );
+    }
+
+    /// A registered middleware is offered in "Add Middleware", declared schema
+    /// or not.
+    #[test]
+    fn app_schema_lists_registered_middlewares() {
+        #[derive(Debug)]
+        struct Declaring;
+
+        impl mq_bridge::traits::CustomMiddlewareFactory for Declaring {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "header": { "type": "string" } },
+                    "required": ["header"]
+                }))
+            }
+        }
+
+        #[derive(Debug)]
+        struct Silent;
+
+        impl mq_bridge::traits::CustomMiddlewareFactory for Silent {}
+
+        let declaring = "config-schema-test-middleware";
+        let silent = "config-schema-test-silent-middleware";
+        mq_bridge::extensions::register_middleware_factory(
+            declaring,
+            std::sync::Arc::new(Declaring),
+        )
+        .unwrap();
+        mq_bridge::extensions::register_middleware_factory(silent, std::sync::Arc::new(Silent))
+            .unwrap();
+        let schema = app_config_schema();
+        mq_bridge::extensions::unregister_middleware_factory(declaring);
+        mq_bridge::extensions::unregister_middleware_factory(silent);
+
+        let variants = schema["$defs"]["Middleware"]["oneOf"].as_array().unwrap();
+        for name in [declaring, silent] {
+            assert!(
+                variants
+                    .iter()
+                    .any(|variant| variant["required"] == serde_json::json!([name])),
+                "middleware '{name}' must be offered as a variant"
+            );
+        }
+        assert_eq!(
+            schema.pointer("/$defs/ConfigSchemaTestMiddlewareMiddleware/required/0"),
+            Some(&serde_json::json!("header"))
+        );
+        assert_eq!(
+            schema.pointer("/$defs/ConfigSchemaTestSilentMiddlewareMiddleware/type"),
+            Some(&serde_json::json!("object"))
         );
     }
 

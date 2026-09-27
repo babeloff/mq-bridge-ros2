@@ -5,6 +5,7 @@
 
 use crate::extensions::get_middleware_factory;
 use crate::models::{Endpoint, Middleware};
+use crate::traits::CustomMiddlewareFactory;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
 use std::sync::Arc;
@@ -158,9 +159,7 @@ pub async fn apply_middlewares_to_consumer(
             #[cfg(feature = "filter")]
             Middleware::Filter(expression) => Box::new(FilterConsumer::new(consumer, expression)?),
             Middleware::Custom { name, config } => {
-                let factory = get_middleware_factory(name).ok_or_else(|| {
-                    anyhow::anyhow!("Custom middleware factory '{}' not found", name)
-                })?;
+                let factory = custom_middleware_factory(name)?;
                 factory.apply_consumer(consumer, route_name, config).await?
             }
             #[allow(unreachable_patterns)]
@@ -249,9 +248,7 @@ pub async fn apply_middlewares_to_publisher(
             #[cfg(feature = "filter")]
             Middleware::Filter(expression) => Box::new(FilterPublisher::new(publisher, expression)?),
             Middleware::Custom { name, config } => {
-                let factory = get_middleware_factory(name).ok_or_else(|| {
-                    anyhow::anyhow!("Custom middleware factory '{}' not found", name)
-                })?;
+                let factory = custom_middleware_factory(name)?;
                 factory
                     .apply_publisher(publisher, route_name, config)
                     .await?
@@ -266,6 +263,27 @@ pub async fn apply_middlewares_to_publisher(
         };
     }
     Ok(publisher.into())
+}
+
+/// Resolves a `custom` middleware name, loading an installed plugin that
+/// provides it when no factory is registered under the name yet.
+fn custom_middleware_factory(name: &str) -> Result<Arc<dyn CustomMiddlewareFactory>> {
+    if let Some(factory) = get_middleware_factory(name) {
+        return Ok(factory);
+    }
+    #[cfg(feature = "plugin")]
+    if crate::plugin::discover_middleware_plugin(name)?.is_some() {
+        if let Some(factory) = get_middleware_factory(name) {
+            return Ok(factory);
+        }
+    }
+    #[cfg(feature = "plugin")]
+    let hint = format!(": {}", crate::plugin::search_path_hint(name));
+    #[cfg(not(feature = "plugin"))]
+    let hint = String::new();
+    Err(anyhow::anyhow!(
+        "Custom middleware factory '{name}' not found{hint}"
+    ))
 }
 
 #[cfg(all(test, feature = "dedup"))]
