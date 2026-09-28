@@ -4,13 +4,13 @@ build-backend = "maturin"
 
 [project]
 # Same project NAME as the full wheel on purpose: this variant supplies the
-# `mq-bridge-py` wheels for platforms where the `full` C toolchain doesn't build
+# `mq-bridge` wheels for platforms where the `full` C toolchain doesn't build
 # (musl/Alpine, Windows arm64). pip selects wheels by platform tag within a
-# single project, so `pip install mq-bridge-py` gets the `full` wheel on
+# single project, so `pip install mq-bridge` gets the `full` wheel on
 # glibc-Linux/macOS/Windows-x64 and this `basic` wheel on those targets,
 # automatically. Kafka/sqlx/grpc/IBM-MQ-static are unavailable here (they fail
 # to build on these targets); calling them raises a clear runtime error.
-name = "mq-bridge-py"
+name = "mq-bridge"
 # Version is read from Cargo.toml by maturin
 dynamic = ["version"]
 description = "Python bindings for mq-bridge (reduced-platform build — HTTP, NATS, MQTT, WebSocket, ZeroMQ, MongoDB, AMQP, AWS SQS/SNS; no Kafka)"

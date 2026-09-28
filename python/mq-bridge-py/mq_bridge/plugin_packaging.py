@@ -27,7 +27,7 @@ def main() -> int:
     missing = [module for module in ("build", "wheel") if importlib.util.find_spec(module) is None]
     if missing:
         parser.error(
-            "plugin packaging requires mq-bridge-py[plugin-packaging] "
+            "plugin packaging requires mq-bridge[plugin-packaging] "
             f"(missing: {', '.join(missing)})"
         )
 

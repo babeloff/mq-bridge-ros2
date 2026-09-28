@@ -58,7 +58,7 @@ full-dynamic = ["mq-bridge/full-dynamic", "plugin", "rustls-aws-lc", "mimalloc"]
 # because no raw Rust-allocated buffer crosses the extension boundary.
 # Excluded from `basic`, which also builds for musl.
 mimalloc = ["dep:mimalloc"]
-# All-platform set for the `mq-bridge-py-basic` wheel: the endpoints from
+# All-platform set for the `mq-bridge-basic` wheel: the endpoints from
 # `mq-bridge/portable` that build across native OS targets without a special
 # toolchain, incl. musl/Alpine. amqp + aws pull aws-lc-sys (BoringSSL C), so
 # the whole wheel uses the aws-lc crypto provider (same as `full`); aws-lc-sys

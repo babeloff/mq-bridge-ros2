@@ -6,7 +6,7 @@ mq-bridge ships in three forms that share one engine and one config format: the
 install path for the form you need. To compile any of them yourself, see
 [Building from source](BUILD.md).
 
-**Library in one line:** `cargo add mq-bridge` · `pip install mq-bridge-py` ·
+**Library in one line:** `cargo add mq-bridge` · `pip install mq-bridge` ·
 `npm install mq-bridge` — details in [Library](#library).
 
 - [CLI / server](#cli--server) — Homebrew, Conda, `cargo binstall`, `cargo install`, Docker
@@ -151,7 +151,7 @@ Embed the core engine in your own code — produce or consume messages with a un
 API, one config format across all three bindings:
 
 - **Rust** — [`mq-bridge`](https://github.com/marcomq/mq-bridge) (`cargo add mq-bridge`)
-- **Python** — [`pip install mq-bridge-py`](https://pypi.org/project/mq-bridge-py/)
+- **Python** — [`pip install mq-bridge`](https://pypi.org/project/mq-bridge/)
 - **Node.js** — [`npm install mq-bridge`](https://www.npmjs.com/package/mq-bridge)
 
 The core of the library are the `MessageConsumer` and `MessagePublisher` traits,

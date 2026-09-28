@@ -104,7 +104,7 @@ consume messages with a unified API — no broker-specific SDK, one config forma
 three bindings:
 
 - **Rust** — [`mq-bridge`](https://crates.io/crates/mq-bridge) (`cargo add mq-bridge`)
-- **Python** — [`pip install mq-bridge-py`](https://pypi.org/project/mq-bridge-py/)
+- **Python** — [`pip install mq-bridge`](https://pypi.org/project/mq-bridge/)
 - **Node.js** — [`npm install mq-bridge`](https://www.npmjs.com/package/mq-bridge)
 
 The core of the library are the `MessageConsumer` and `MessagePublisher` traits in

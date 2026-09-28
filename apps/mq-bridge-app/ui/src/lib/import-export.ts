@@ -148,13 +148,13 @@ function resolveConsumerOutputEndpoint(
 }
 
 // A bare mq-bridge `Endpoint` dict, usable directly with
-// `Publisher.from_config(endpoint, name)` in mq-bridge-py.
+// `Publisher.from_config(endpoint, name)` in the Python binding.
 export function buildPublisherEndpointDoc(publisher: Record<string, unknown>) {
   return structuredClone(asObject(publisher.endpoint));
 }
 
 // A single mq-bridge `Route` dict (`input`/`output` + options), usable directly
-// with `Route.from_config(route, name)` in mq-bridge-py.
+// with `Route.from_config(route, name)` in the Python binding.
 export function buildConsumerRouteDoc(
   consumer: Record<string, unknown>,
   publishers: Array<Record<string, unknown>> = [],
@@ -177,9 +177,9 @@ export function buildConsumerRouteDoc(
 
 // `from_config` mappings. `from_config(mapping, name)` selects a named entry
 // from a config document, so the mappings are wrapped under `publishers`/`routes`
-// keyed by the entry name — matching mq-bridge-py's ConfigDocument.
+// keyed by the entry name — matching the Python binding's ConfigDocument.
 
-// Usable with `Publisher.from_config(doc, name)` in mq-bridge-py.
+// Usable with `Publisher.from_config(doc, name)` in the Python binding.
 export function buildPublisherConfigDocument(publisher: Record<string, unknown>) {
   const name = String(publisher.name || "publisher");
   return { publishers: { [name]: buildPublisherEndpointDoc(publisher) } };
@@ -207,7 +207,7 @@ export function buildPublisherConfigRouteDocument(publisher: Record<string, unkn
   };
 }
 
-// Usable with `Route.from_config(doc, name)` in mq-bridge-py.
+// Usable with `Route.from_config(doc, name)` in the Python binding.
 export function buildConsumerConfigDocument(
   consumer: Record<string, unknown>,
   publishers: Array<Record<string, unknown>> = [],

@@ -41,6 +41,10 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- **The Python package is now `mq-bridge` on PyPI** (`pip install mq-bridge`), matching the
+  crate and the npm package; `mq-bridge-py-basic` is now `mq-bridge-basic`. The import is
+  still `mq_bridge`. A final `mq-bridge-py` release depends on `mq-bridge`, so existing pins
+  keep working.
 - **A CSV record `delimiter` may not contain `,` or `"`.** It separates rows, and those
   characters are CSV field syntax, so such a file could not be read back. It is now
   rejected when the endpoint is created. The field separator is always `,`.

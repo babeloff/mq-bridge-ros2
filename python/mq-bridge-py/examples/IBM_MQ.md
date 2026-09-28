@@ -23,7 +23,7 @@ both include the engine's `ibm-mq` feature, which covers:
 - the conda-forge `mq-bridge-py` package,
 - upstream's `full` PyPI wheel.
 
-The `mq-bridge-py-basic` and reduced wheels do **not** include it — they exist
+The `mq-bridge-basic` and reduced wheels do **not** include it — they exist
 for targets without a full C toolchain, and IBM MQ is on their excluded list.
 
 That is because `ibm-mq` costs nothing to compile in: with no client installed
@@ -119,7 +119,7 @@ route_config = {
 
 Four things that catch people out:
 
-- The import is **`mq_bridge`**. `mq-bridge-py` is the distribution name, not
+- The import is **`mq_bridge`**. `mq-bridge` is the distribution name, not
   the module name.
 - The endpoint key is **`ibmmq`** — one word, no underscore.
 - `url` is IBM's `host(port)` form, not a URI scheme. A comma-separated list
@@ -229,5 +229,5 @@ software at all.
 IBM's client is redistributable under IBM's own terms, not under this project's
 MIT licence. If you ship an application together with the client, include IBM's
 licence files from `$MQ_INSTALLATION_PATH/licenses` and follow IBM's
-redistribution conditions. Shipping `mq-bridge-py` alone carries no such
+redistribution conditions. Shipping `mq-bridge` alone carries no such
 obligation: the wheel contains no IBM code.

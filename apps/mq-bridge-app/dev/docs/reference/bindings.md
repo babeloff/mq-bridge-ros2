@@ -7,7 +7,7 @@ Rust; the binding is a thin layer for handlers and configuration.
 | Language | Package | Install |
 | :--- | :--- | :--- |
 | Rust | [`mq-bridge`](https://crates.io/crates/mq-bridge) | `cargo add mq-bridge` |
-| Python | [`mq-bridge-py`](https://pypi.org/project/mq-bridge-py/) | `pip install mq-bridge-py` |
+| Python | [`mq-bridge`](https://pypi.org/project/mq-bridge/) | `pip install mq-bridge` |
 | Node.js | [`mq-bridge`](https://www.npmjs.com/package/mq-bridge) | `npm install mq-bridge` |
 
 The core of the library are the `MessageConsumer` and `MessagePublisher` traits, found in

@@ -788,7 +788,7 @@ Python distribution name and one npm package containing all supported prebuilds.
 The builders live in mq-bridge itself, so plugins do not copy packaging scripts:
 
 ```console
-pip install "mq-bridge-py[plugin-packaging]"
+pip install "mq-bridge[plugin-packaging]"
 python -m mq_bridge.plugin_packaging --package python/my_plugin --out dist
 mq-bridge-package-plugin --package node --pack --out npm
 ```

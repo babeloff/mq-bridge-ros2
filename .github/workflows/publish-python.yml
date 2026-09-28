@@ -40,13 +40,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - package: mq-bridge-py-basic
+          - package: mq-bridge-basic
             pyproject: pyproject-basic.toml
             runner: ubuntu-latest
             os: linux
             target: x86_64
             args: --release --out dist --find-interpreter --no-default-features
-          - package: mq-bridge-py-basic
+          - package: mq-bridge-basic
             # Build the aarch64 basic wheel on a native arm64 runner to avoid
             # ring/aws-lc-sys cross-toolchain issues in manylinux containers.
             # If maturin's manylinux:auto still selects a container that
@@ -61,45 +61,45 @@ jobs:
           # compiles its C natively under musl given cmake + gcc, which
           # before-script-linux installs in the musllinux container. The full
           # wheel has no musl build (rdkafka makes it a separate effort).
-          - package: mq-bridge-py-basic
+          - package: mq-bridge-basic
             pyproject: pyproject-basic.toml
             runner: ubuntu-latest
             os: linux
             target: x86_64
             manylinux: musllinux_1_2
             args: --release --out dist --find-interpreter --no-default-features
-          - package: mq-bridge-py-basic
+          - package: mq-bridge-basic
             pyproject: pyproject-basic.toml
             runner: ubuntu-24.04-arm
             os: linux
             target: aarch64
             manylinux: musllinux_1_2
             args: --release --out dist --find-interpreter --no-default-features
-          - package: mq-bridge-py-basic
+          - package: mq-bridge-basic
             pyproject: pyproject-basic.toml
             runner: macos-15-intel
             os: macos
             target: x86_64
             args: --release --out dist --find-interpreter --no-default-features
-          - package: mq-bridge-py-basic
+          - package: mq-bridge-basic
             pyproject: pyproject-basic.toml
             runner: macos-latest
             os: macos
             target: aarch64
             args: --release --out dist --find-interpreter --no-default-features
-          - package: mq-bridge-py-basic
+          - package: mq-bridge-basic
             pyproject: pyproject-basic.toml
             runner: windows-latest
             os: windows
             target: x86_64
             args: --release --out dist --find-interpreter --no-default-features
-          - package: mq-bridge-py
+          - package: mq-bridge
             pyproject: pyproject.toml
             runner: ubuntu-latest
             os: linux
             target: x86_64
             args: --release --out dist --find-interpreter
-          - package: mq-bridge-py
+          - package: mq-bridge
             # Build the full wheel for aarch64 on a NATIVE arm64 runner rather
             # than cross-compiling from x86_64. The `full` feature pulls in
             # aws-lc-sys (BoringSSL C), which has no pre-built artifact and
@@ -111,22 +111,22 @@ jobs:
             os: linux
             target: aarch64
             args: --release --out dist --find-interpreter
-          # Reduced-feature wheels published UNDER THE `mq-bridge-py` NAME so that
-          # a single `pip install mq-bridge-py` resolves to the `full` wheel on
+          # Reduced-feature wheels published UNDER THE `mq-bridge` NAME so that
+          # a single `pip install mq-bridge` resolves to the `full` wheel on
           # glibc-Linux/macOS/Windows-x64 and to this `basic`-featured wheel on
           # targets where the full C toolchain doesn't build (musl/Alpine,
           # Windows arm64), picked automatically by platform tag.
-          # pyproject-reduced.toml keeps the `mq-bridge-py` project name but
+          # pyproject-reduced.toml keeps the `mq-bridge` project name but
           # compiles the `basic` feature set (no Kafka/sqlx/grpc/IBM-MQ-static).
-          # Same aws-lc-sys-native setup as the mq-bridge-py-basic rows.
-          - package: mq-bridge-py
+          # Same aws-lc-sys-native setup as the mq-bridge-basic rows.
+          - package: mq-bridge
             pyproject: pyproject-reduced.toml
             runner: ubuntu-latest
             os: linux
             target: x86_64
             manylinux: musllinux_1_2
             args: --release --out dist --find-interpreter --no-default-features
-          - package: mq-bridge-py
+          - package: mq-bridge
             pyproject: pyproject-reduced.toml
             runner: ubuntu-24.04-arm
             os: linux
@@ -138,25 +138,25 @@ jobs:
           # windows-11-arm runner. If aws-lc-sys ever fails to build here, drop
           # amqp+aws from a Windows-arm-only feature set rather than reintroducing
           # a cross-compile.
-          - package: mq-bridge-py
+          - package: mq-bridge
             pyproject: pyproject-reduced.toml
             runner: windows-11-arm
             os: windows
             target: aarch64
             args: --release --out dist --find-interpreter --no-default-features
-          - package: mq-bridge-py
+          - package: mq-bridge
             pyproject: pyproject.toml
             runner: macos-15-intel
             os: macos
             target: x86_64
             args: --release --out dist --find-interpreter
-          - package: mq-bridge-py
+          - package: mq-bridge
             pyproject: pyproject.toml
             runner: macos-latest
             os: macos
             target: aarch64
             args: --release --out dist --find-interpreter
-          - package: mq-bridge-py
+          - package: mq-bridge
             pyproject: pyproject.toml
             runner: windows-latest
             os: windows
@@ -216,9 +216,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - package: mq-bridge-py-basic
+          - package: mq-bridge-basic
             pyproject: pyproject-basic.toml
-          - package: mq-bridge-py
+          - package: mq-bridge
             pyproject: pyproject.toml
 
     steps:
