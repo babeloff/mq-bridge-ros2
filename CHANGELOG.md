@@ -51,7 +51,7 @@ All notable changes to `mq-bridge`. Newest first.
   that resolves them (and the RDS equivalent).
 - **`postgres_cdc` warns about published tables without a replica identity.** Postgres
   rejects `UPDATE`/`DELETE` on a published table with no primary key (or `REPLICA IDENTITY
-  NOTHING`), which breaks the application's writes; the warning names those tables at startup.
+  NOTHING`, or `USING INDEX` on a dropped index), which breaks the application's writes; the warning names those tables at startup.
 - **The Python package is now `mq-bridge` on PyPI** (`pip install mq-bridge`), matching the
   crate and the npm package; `mq-bridge-py-basic` is now `mq-bridge-basic`. The import is
   still `mq_bridge`. A final `mq-bridge-py` release depends on `mq-bridge`, so existing pins
@@ -62,6 +62,13 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Opt-in SHA-256 for derived message ids.** A string `message_id` that is not a UUID or
+  number, and the `postgres_cdc` change id, are hashed into a `u128`. That hash is still
+  FNV-1a by default, so ids match earlier releases and existing dedup state keeps working
+  after an update. Set `id_hash: sha256` on `postgres_cdc`, and `set_string_id_hash(IdHash::Sha256)`
+  or `MQB_ID_HASH=sha256` for string ids, to get collision-resistant ids. Switching changes
+  every such id: a dedup store or unique-keyed sink filled under `fnv1a` then treats replays
+  as new, so switch only with fresh dedup state.
 - **`otel` middleware: OpenTelemetry spans per message.** Continues the W3C `traceparent` in
   metadata, on input and output. It activates itself when the host has installed a tracer
   provider and otherwise stays out of the chain. `mq-bridge-app` exports to OTLP when

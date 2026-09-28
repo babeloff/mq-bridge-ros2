@@ -9,9 +9,11 @@ Query parameters recognised as config fields for this connector. The object-type
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `checkpoint_store` | string | no | — | Local file (path or `file://`) for resume state; unset, the slot alone tracks the stream. |
+| `consume` | `capture_new` \| `capture_all` \| `snapshot` | no | — | (Consumer only) What to read: `capture_new` (default, changes only), `capture_all` (backfill the tables first, then changes) or `snapshot` (backfill only). |
 | `create_publication` | boolean | no | `false` | Create the `publication` if missing (default false; leave off if it pre-exists). Needs table ownership for `publication_tables`, or superuser when none are set (`FOR ALL TABLES`). |
 | `create_slot` | boolean | no | `true` | Create the replication slot if it does not exist. |
 | `cursor_id` | string | no | — | Checkpoint key for the confirmed LSN and backfill progress; defaults to `slot_name`. |
+| `id_hash` | `fnv1a` \| `sha256` | no | `fnv1a` | Hash for change `message_id`s: `fnv1a` (default, keeps existing dedup state) or `sha256`. |
 | `publication` | string | yes | — | Publication name (must already exist; defines which tables are captured). |
 | `publication_tables` | array of string | no | [see below](#publication_tables) | Tables to include when managing the publication (`create_publication`); may be `schema.table`. Missing ones are added to an existing publication (never removed). Empty = `FOR ALL TABLES` (needs superuser). |
 | `slot_name` | string | no | `mq_bridge_slot` | Replication slot name; created if missing when `create_slot` is true. |
