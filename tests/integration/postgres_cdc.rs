@@ -37,6 +37,7 @@ fn cfg(slot: &str) -> PostgresCdcConfig {
         checkpoint_store: None,
         status_interval_ms: 500,
         tls: Default::default(),
+        id_hash: Default::default(),
     }
 }
 
