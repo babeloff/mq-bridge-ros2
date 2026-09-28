@@ -532,6 +532,7 @@ pub(crate) struct CsvQuoteState {
     in_quotes: bool,
     field_is_empty: bool,
     pending_quote: bool,
+    started: bool,
 }
 
 impl Default for CsvQuoteState {
@@ -540,12 +541,20 @@ impl Default for CsvQuoteState {
             in_quotes: false,
             field_is_empty: true,
             pending_quote: false,
+            started: false,
         }
     }
 }
 
 impl CsvQuoteState {
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        // A leading BOM is framing, so it must not make the first field non-empty.
+        let bytes = if self.started {
+            bytes
+        } else {
+            self.started = true;
+            bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes)
+        };
         for &b in bytes {
             if self.pending_quote {
                 self.pending_quote = false;

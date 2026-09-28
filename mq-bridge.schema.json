@@ -509,7 +509,7 @@
       ]
     },
     "DeduplicationMiddleware": {
-      "description": "Deduplication middleware configuration.\n\nPrevents duplicate messages from being processed using a sled, MongoDB, or SQL backend.\nMessages are identified by their deduplication key and removed after the TTL expires.",
+      "description": "Deduplication middleware configuration.\n\nPrevents duplicate messages from being processed using a sled, in-memory, MongoDB, or SQL backend.\nMessages are identified by their deduplication key and removed after the TTL expires.",
       "type": "object",
       "properties": {
         "key": {
@@ -533,7 +533,7 @@
           "default": null
         },
         "store": {
-          "description": "Store URL: `sled:///path` (local), `mongodb://host/db[/collection]`, or `postgres|mysql|mariadb|sqlite://…[/table]` (shared).",
+          "description": "Store URL: `sled:///path` or `memory://[name]` (local), `mongodb://host/db[/collection]`, or `postgres|mysql|mariadb|sqlite://…[/table]` (shared).",
           "type": [
             "string",
             "null"
@@ -1960,6 +1960,21 @@
       },
       "additionalProperties": false
     },
+    "IdHash": {
+      "description": "Hash that folds a key into a deterministic 128-bit `message_id`.",
+      "oneOf": [
+        {
+          "description": "FNV-1a, 128-bit. Default: the ids earlier releases produced, so existing dedup state keeps matching.",
+          "type": "string",
+          "const": "fnv1a"
+        },
+        {
+          "description": "First 128 bits of SHA-256. Collision-resistant, but every id changes, so dedup state from `fnv1a` no longer matches.",
+          "type": "string",
+          "const": "sha256"
+        }
+      ]
+    },
     "KafkaConfig": {
       "description": "General Kafka connection configuration.",
       "type": "object",
@@ -3268,6 +3283,11 @@
             "string",
             "null"
           ]
+        },
+        "id_hash": {
+          "description": "Hash for change `message_id`s: `fnv1a` (default, keeps existing dedup state) or `sha256`.",
+          "$ref": "#/$defs/IdHash",
+          "default": "fnv1a"
         },
         "publication": {
           "description": "Publication name (must already exist; defines which tables are captured).",

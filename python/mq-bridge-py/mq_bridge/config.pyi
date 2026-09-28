@@ -470,6 +470,7 @@ class PostgresCdcConfig(TypedDict, total=False):
     create_publication: bool
     create_slot: bool
     cursor_id: Optional[str]
+    id_hash: IdHash
     publication: Required[str]
     publication_tables: List[str]
     slot_name: str
@@ -683,6 +684,7 @@ DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
+IdHash = Literal["fnv1a", "sha256"]
 MappingRule = Union[str, DetailedMappingRule]
 MongoConsume = Literal["consumer", "snapshot", "capture_new", "capture_all"]
 MongoDbFormat = Literal["normal", "json", "text", "raw"]

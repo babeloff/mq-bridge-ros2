@@ -1820,6 +1820,8 @@ fn test_csv_ends_inside_quotes_tracks_field_starts() {
     assert!(!csv_ends_inside_quotes(b"1,\"a \"\"b\"\n"));
     // A quote that does not start a field is literal data, matching `parse_csv_row`.
     assert!(!csv_ends_inside_quotes(b"1,in\"ch\n"));
+    // A leading BOM does not stop the quote after it from opening the field.
+    assert!(csv_ends_inside_quotes(b"\xef\xbb\xbf\"i\n"));
 }
 
 /// The row decoder that shipped before the fused span parser: one `String` per field,
@@ -2590,6 +2592,19 @@ async fn test_file_csv_strips_a_leading_bom() {
     assert_eq!(
         read_csv_rows(&csv_config(&path), 1).await,
         vec![json!({"id": "1", "name": "Ada"})]
+    );
+}
+
+#[tokio::test]
+async fn test_file_csv_bom_before_a_multiline_quoted_header() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("data.csv");
+    tokio::fs::write(&path, "\u{feff}\"i\nd\",name\r\n1,Ada\r\n")
+        .await
+        .unwrap();
+    assert_eq!(
+        read_csv_rows(&csv_config(&path), 1).await,
+        vec![json!({"i\nd": "1", "name": "Ada"})]
     );
 }
 

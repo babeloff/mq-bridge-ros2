@@ -38,8 +38,10 @@ baselines — Sling (a compiled Go EL tool) and Meltano (`tap-*` → `target-jso
 reporting throughput **and** peak RSS (detailed writeups in §5 and §6 below). All
 columns are measured on the same machine (this repo's Apple M1 host).
 
-> **These A/B tables are a 0.4.10-era, single-session comparison, kept intact so the
-> ratios against Sling and Meltano stay internally consistent.** mq-bridge's own
+> **These A/B tables are a 0.4.10-era comparison, kept intact so the ratios against
+> Sling and Meltano stay internally consistent.** The mq-bridge-app, Sling and Meltano
+> columns were measured in separate sessions on the same machine and dataset, not in
+> one run (dates in §5 and §6). mq-bridge's own
 > throughput was re-measured on 0.4.12 — CSV untyped 2,824,858 rows/s, CSV typed
 > 1,636,661 rows/s, Postgres 421,220 rows/s — and those figures are in
 > [Reference numbers](#reference-numbers-all-scenarios-at-a-glance). The baselines were

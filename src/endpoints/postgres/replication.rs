@@ -198,7 +198,8 @@ fn sqlstate_hint(code: Option<&str>) -> &'static str {
 }
 
 /// Published tables Postgres cannot replicate updates or deletes of: no primary key under
-/// the default replica identity, or `REPLICA IDENTITY NOTHING`. Postgres then rejects the
+/// the default replica identity, `REPLICA IDENTITY NOTHING`, or `USING INDEX` on an index
+/// that no longer exists. Postgres then rejects the
 /// application's own `UPDATE`/`DELETE` on them, so a publication covering one breaks writes.
 pub async fn tables_without_replica_identity(
     url: &str,
@@ -214,7 +215,9 @@ pub async fn tables_without_replica_identity(
          JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = pt.tablename \
          WHERE pt.pubname = $1 AND (p.pubupdate OR p.pubdelete) \
            AND (c.relreplident = 'n' OR (c.relreplident = 'd' AND NOT EXISTS \
-             (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary))) \
+             (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary)) \
+             OR (c.relreplident = 'i' AND NOT EXISTS \
+             (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisreplident))) \
          ORDER BY 1",
     )
     .bind(publication)

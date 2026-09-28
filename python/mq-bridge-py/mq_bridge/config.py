@@ -61,6 +61,7 @@ DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
 HttpServerProtocol = str
+IdHash = str
 MappingRule = str
 MongoConsume = str
 MongoDbFormat = str
@@ -113,6 +114,7 @@ __all__ = [
     "HttpServerProtocol",
     "IbmMqConfig",
     "IbmTlsConfig",
+    "IdHash",
     "KafkaConfig",
     "LimiterMiddleware",
     "LookupEntry",

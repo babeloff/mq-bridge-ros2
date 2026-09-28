@@ -910,6 +910,7 @@ fn sqlx_cfg_to_cdc(
         checkpoint_store: cfg.checkpoint_store.clone(),
         status_interval_ms: 10_000,
         tls: cfg.tls.clone(),
+        id_hash: Default::default(),
     })
 }
 

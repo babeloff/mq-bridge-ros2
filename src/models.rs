@@ -2481,6 +2481,18 @@ pub enum PostgresConsume {
     Snapshot,
 }
 
+/// Hash that folds a key into a deterministic 128-bit `message_id`.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum IdHash {
+    /// FNV-1a, 128-bit. Default: the ids earlier releases produced, so existing dedup state keeps matching.
+    #[default]
+    Fnv1a,
+    /// First 128 bits of SHA-256. Collision-resistant, but every id changes, so dedup state from `fnv1a` no longer matches.
+    Sha256,
+}
+
 /// Postgres logical-replication CDC source (pgoutput). Source-only.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -2525,6 +2537,9 @@ pub struct PostgresCdcConfig {
     /// TLS configuration for the replication connection.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Hash for change `message_id`s: `fnv1a` (default, keeps existing dedup state) or `sha256`.
+    #[serde(default)]
+    pub id_hash: IdHash,
 }
 
 // --- SQLx Specific Configuration ---

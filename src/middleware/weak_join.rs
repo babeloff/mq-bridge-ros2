@@ -318,14 +318,12 @@ impl WeakJoinConsumer {
             Some(tracker) => Box::new(move |dispositions: Vec<MessageDisposition>| {
                 Box::pin(async move {
                     // A joined message with no disposition leaves its members unsettled, so
-                    // the source redelivers them rather than acking unprocessed input.
-                    let settled = slots.into_iter().zip(dispositions).flat_map(|(slots, d)| {
-                        let member = match d {
-                            MessageDisposition::Nack => MessageDisposition::Nack,
-                            _ => MessageDisposition::Ack,
-                        };
-                        slots.into_iter().map(move |s| (s, member.clone()))
-                    });
+                    // the source redelivers them rather than acking unprocessed input. A
+                    // reply goes to every member, since each one is waiting on the join.
+                    let settled = slots
+                        .into_iter()
+                        .zip(dispositions)
+                        .flat_map(|(slots, d)| slots.into_iter().map(move |s| (s, d.clone())));
                     settle_and_commit(&tracker, settled).await
                 })
             }),
@@ -709,7 +707,8 @@ mod tests {
                             .iter()
                             .map(|d| match d {
                                 MessageDisposition::Nack => "nack",
-                                _ => "ack",
+                                MessageDisposition::Reply(_) => "reply",
+                                MessageDisposition::Ack => "ack",
                             })
                             .collect();
                         log.lock().unwrap().push((id, named));
@@ -778,6 +777,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(logged(&log), vec![(0, vec!["nack", "nack"])]);
+    }
+
+    #[tokio::test]
+    async fn a_joined_reply_reaches_every_member() {
+        let (source, log) = ScriptedSource::new(vec![vec![member("A"), member("A")]], false);
+        let config = pair_config(WeakJoinAck::OnJoin, WeakJoinTimeout::Fire, 1000);
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+        let batch = join.receive_batch(10).await.unwrap();
+        (batch.commit)(vec![MessageDisposition::Reply(CanonicalMessage::from(
+            "ok",
+        ))])
+        .await
+        .unwrap();
+        assert_eq!(logged(&log), vec![(0, vec!["reply", "reply"])]);
     }
 
     /// Group B completes before the older group A. An ordered source must still commit its

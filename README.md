@@ -146,7 +146,7 @@ tuning use the same settings in both.
 
 ## Status
 
-`mq-bridge` is young (created in 2025), but its reliability behavior is exercised by an automated integration and performance suite across **every** supported endpoint, in both queue and subscriber modes:
+`mq-bridge` is young (created in 2025), but its reliability behavior is exercised by an automated integration and performance suite across **every** supported endpoint, in each of the queue and subscriber modes that endpoint supports:
 
 *   All endpoints showed **no data loss during in-flight broker restarts**; MQTT publish confirmation was hardened until a chaos test drove in-flight loss to **zero**.
 *   Postgres CDC has a **restart-safety test**: an un-acked, in-flight batch is redelivered after a database restart with no loss and no gap.
