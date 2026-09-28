@@ -171,7 +171,8 @@ Checkpoints are **at-least-once**, never at-most-once:
   rows are re-read on the next poll rather than skipped until a restart.
 - A crash between "rows written" and "checkpoint flushed" replays that batch. **Make the sink
   idempotent** — see [Upserts & insert-if-absent](upserts.md) and
-  [Deduplication](deduplication.md).
+  [Deduplication](deduplication.md); a file or object-store sink does this with
+  `name_by: source_position`.
 - If persisting the cursor fails, the route logs a warning and keeps running; rows may be
   reprocessed on restart.
 

@@ -42,6 +42,8 @@
   - [Secrets & interpolation](cookbook/secrets.md)
   - [Encryption at rest](cookbook/encryption.md)
   - [Compression](cookbook/compression.md)
+- [Analytics]()
+  - [Query a stream in DuckDB](cookbook/duckdb.md)
 
 # Connectors
 - [Overview & capabilities](reference/endpoints.md)

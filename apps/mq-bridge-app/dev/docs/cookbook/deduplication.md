@@ -51,8 +51,20 @@ every writer:
   skip.
 - **SQL** — `ON CONFLICT (key) DO NOTHING` / `ON DUPLICATE KEY UPDATE`.
 - **ClickHouse** — `ReplacingMergeTree(version)` collapses duplicates by sort key at merge time.
+- **File / object storage** — no constraint, so the file name does the job:
+  `name_by: source_position` names each part after the source range it holds, and a restart
+  skips ranges already written. Needs a replayable input (Kafka, Postgres CDC, SQL cursor,
+  MongoDB change stream, `file` in `consume` mode); `object_store` picks it by default for one.
 
-Full examples in [Upserts & insert-if-absent](upserts.md).
+```yaml
+output:
+  object_store:
+    url: "s3://my-bucket/orders"
+    name_by: source_position   # part-orders-<partition>-<start>-<end>.jsonl
+```
+
+Full examples in [Upserts & insert-if-absent](upserts.md) and, for files,
+[Files & object storage](../engine/delivery.md#files--object-storage--name_by).
 
 ## Deduplicating CDC replays
 
