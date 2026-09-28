@@ -112,6 +112,23 @@ impl PostgresCdcConsumer {
             )
             .await?;
         }
+        match replication::tables_without_replica_identity(
+            &config.url,
+            &config.publication,
+            &config.tls,
+        )
+        .await
+        {
+            Ok(tables) if !tables.is_empty() => warn!(
+                publication = %config.publication,
+                tables = %tables.join(", "),
+                "postgres_cdc: published tables have no primary key or replica identity, so \
+                 Postgres rejects UPDATE/DELETE on them; add a primary key or run \
+                 `ALTER TABLE <table> REPLICA IDENTITY FULL`"
+            ),
+            Ok(_) => {}
+            Err(e) => debug!(error = %e, "postgres_cdc: skipped the replica identity check"),
+        }
 
         replication::ensure_slot(
             &config.url,

@@ -8,10 +8,10 @@ Query parameters recognised as config fields for this connector. The object-type
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `checkpoint_store` | string | no | — | Checkpoint store spec (e.g. `file:///path`, `s3://bucket/prefix`); defaults to the source database. |
+| `checkpoint_store` | string | no | — | Local file (path or `file://`) for resume state; unset, the slot alone tracks the stream. |
 | `create_publication` | boolean | no | `false` | Create the `publication` if missing (default false; leave off if it pre-exists). Needs table ownership for `publication_tables`, or superuser when none are set (`FOR ALL TABLES`). |
 | `create_slot` | boolean | no | `true` | Create the replication slot if it does not exist. |
-| `cursor_id` | string | no | — | Checkpoint key for persisting the confirmed LSN across restarts (optional; the slot is authoritative). |
+| `cursor_id` | string | no | — | Checkpoint key for the confirmed LSN and backfill progress; defaults to `slot_name`. |
 | `publication` | string | yes | — | Publication name (must already exist; defines which tables are captured). |
 | `publication_tables` | array of string | no | [see below](#publication_tables) | Tables to include when managing the publication (`create_publication`); may be `schema.table`. Missing ones are added to an existing publication (never removed). Empty = `FOR ALL TABLES` (needs superuser). |
 | `slot_name` | string | no | `mq_bridge_slot` | Replication slot name; created if missing when `create_slot` is true. |

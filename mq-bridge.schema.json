@@ -3234,7 +3234,7 @@
       "type": "object",
       "properties": {
         "checkpoint_store": {
-          "description": "Checkpoint store spec (e.g. `file:///path`, `s3://bucket/prefix`); defaults to the source database.",
+          "description": "Local file (path or `file://`) for resume state; unset, the slot alone tracks the stream.",
           "type": [
             "string",
             "null"
@@ -3263,7 +3263,7 @@
           "default": true
         },
         "cursor_id": {
-          "description": "Checkpoint key for persisting the confirmed LSN across restarts (optional; the slot is authoritative).",
+          "description": "Checkpoint key for the confirmed LSN and backfill progress; defaults to `slot_name`.",
           "type": [
             "string",
             "null"

@@ -2509,9 +2509,9 @@ pub struct PostgresCdcConfig {
     /// Ephemeral run: drop the slot when the route stops. Not restart-safe; a hard crash leaks it.
     #[serde(default)]
     pub temporary_slot: bool,
-    /// Checkpoint key for persisting the confirmed LSN across restarts (optional; the slot is authoritative).
+    /// Checkpoint key for the confirmed LSN and backfill progress; defaults to `slot_name`.
     pub cursor_id: Option<String>,
-    /// Checkpoint store spec (e.g. `file:///path`, `s3://bucket/prefix`); defaults to the source database.
+    /// Local file (path or `file://`) for resume state; unset, the slot alone tracks the stream.
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     pub checkpoint_store: Option<String>,
     /// Standby-status-update interval in ms; must be shorter than the server's `wal_sender_timeout`.

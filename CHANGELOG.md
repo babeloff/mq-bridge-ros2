@@ -6,6 +6,11 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **`postgres_cdc` `capture_all`/`snapshot`: a `checkpoint_store` without a `cursor_id` now
+  resumes.** It used to persist nothing, so every restart re-ran the whole backfill. The
+  cursor id now defaults to `slot_name`, as it already did for the change stream. A recurring
+  `snapshot` job that sets only `checkpoint_store` therefore no longer re-exports every run;
+  drop `checkpoint_store` to keep that.
 - **`weak_join` no longer loses buffered messages.** Source messages used to be acked on
   receipt, so a crash with open groups dropped them. They are now acked once the joined
   message is committed, and nacked with it (`ack: on_join`, the default); ordered sources
@@ -41,6 +46,12 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
+- **`postgres_cdc`: slot creation errors name the fix.** A missing `wal_level = logical`,
+  missing replication rights or exhausted `max_replication_slots` now come with the command
+  that resolves them (and the RDS equivalent).
+- **`postgres_cdc` warns about published tables without a replica identity.** Postgres
+  rejects `UPDATE`/`DELETE` on a published table with no primary key (or `REPLICA IDENTITY
+  NOTHING`), which breaks the application's writes; the warning names those tables at startup.
 - **The Python package is now `mq-bridge` on PyPI** (`pip install mq-bridge`), matching the
   crate and the npm package; `mq-bridge-py-basic` is now `mq-bridge-basic`. The import is
   still `mq_bridge`. A final `mq-bridge-py` release depends on `mq-bridge`, so existing pins
