@@ -387,6 +387,73 @@ async fn mongo_dedup_store_states_release_and_replies() {
 }
 
 /// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[cfg(feature = "dedup")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_dedup_store_batches_match_the_per_key_states() {
+    use crate::middleware::deduplication::Reservation::{Claimed, InFlight, Processed};
+    let store = build_mongo_dedup_store(
+        "mongodb://localhost:27017",
+        "mq_bridge_test",
+        Some(format!("dedup_batch_{}", fast_uuid_v7::gen_id())),
+        60,
+        "batch",
+    )
+    .await
+    .unwrap();
+    let now = 1_000u64;
+    let keys = |names: &[&str]| {
+        names
+            .iter()
+            .map(|n| n.as_bytes().to_vec())
+            .collect::<Vec<_>>()
+    };
+
+    store.reserve(b"held", now).await.unwrap();
+    store.reserve(b"done", now).await.unwrap();
+    store.mark_processed(b"done", now).await;
+    store.reserve(b"old", now - 100).await.unwrap();
+    store.mark_processed(b"old", now - 100).await;
+
+    let batch = keys(&["new1", "held", "done", "old", "new2"]);
+    assert_eq!(
+        store.reserve_many(&batch, now).await.unwrap(),
+        vec![Claimed, InFlight, Processed, Claimed, Claimed]
+    );
+
+    store.release_many(&keys(&["new1", "done", "new2"])).await;
+    assert_eq!(
+        store
+            .reserve_many(&keys(&["new1", "done"]), now)
+            .await
+            .unwrap(),
+        vec![Claimed, Processed]
+    );
+    store
+        .mark_processed_many(&keys(&["new1", "new2"]), now)
+        .await;
+    assert_eq!(
+        store
+            .reserve_many(&keys(&["new1", "new2"]), now)
+            .await
+            .unwrap(),
+        vec![Processed, Processed]
+    );
+
+    let contested: Vec<Vec<u8>> = (0..200).map(|i| format!("race{i}").into_bytes()).collect();
+    let (a, b) = tokio::join!(
+        store.reserve_many(&contested, now),
+        store.reserve_many(&contested, now)
+    );
+    for (a, b) in a.unwrap().into_iter().zip(b.unwrap()) {
+        assert!(
+            matches!((a, b), (Claimed, InFlight) | (InFlight, Claimed)),
+            "{a:?} / {b:?}"
+        );
+    }
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
 #[tokio::test]
 #[ignore = "requires a MongoDB on localhost:27017"]
 async fn mongo_find_answers_with_the_first_match() {
@@ -456,4 +523,164 @@ async fn mongo_find_answers_with_the_first_match() {
     assert_eq!(answers[0].as_ref().unwrap()["name"], "Ada");
     assert_eq!(answers[1], None);
     assert_eq!(answers[0], answers[2]);
+}
+
+#[test]
+fn update_accepts_a_document_or_a_pipeline() {
+    use mongodb::options::UpdateModifications;
+    assert!(matches!(
+        publisher::update_modifications(br#"{"$inc": {"c": 1}}"#),
+        Ok(UpdateModifications::Document(_))
+    ));
+    assert!(matches!(
+        publisher::update_modifications(br#"[{"$set": {"c": 1}}]"#),
+        Ok(UpdateModifications::Pipeline(p)) if p.len() == 1
+    ));
+    assert!(publisher::update_modifications(b"42").is_err());
+    assert!(publisher::update_modifications(b"[1]").is_err());
+}
+
+fn counter_config(collection: &str, find: &str, update: Option<&str>) -> MongoDbConfig {
+    MongoDbConfig {
+        url: "mongodb://localhost:27017".to_string(),
+        database: "mq_bridge_test".to_string(),
+        collection: Some(collection.to_string()),
+        find: Some(find.to_string()),
+        update: update.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn counter(answer: Option<serde_json::Value>) -> f64 {
+    answer.expect("update always answers")["c"]
+        .as_f64()
+        .unwrap()
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_update_rejects_a_config_without_one_key_per_message() {
+    let mut config = counter_config("unused", r#"{"_id": "${payload:k}"}"#, Some("{}"));
+    config.find = None;
+    assert!(MongoDbPublisher::new(&config).await.is_err());
+    let config = counter_config(
+        "unused",
+        r#"{"_id": {"$in": ["${payload:k}"]}}"#,
+        Some(r#"{"$inc": {"c": 1}}"#),
+    );
+    assert!(MongoDbPublisher::new(&config).await.is_err());
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_update_upserts_and_answers_with_the_new_document() {
+    let collection = format!("update_{}", fast_uuid_v7::gen_id());
+    let publisher = MongoDbPublisher::new(&counter_config(
+        &collection,
+        r#"{"_id": "${payload:k}"}"#,
+        Some(r#"{"$inc": {"c": 1}}"#),
+    ))
+    .await
+    .unwrap();
+    for expected in [1.0, 2.0] {
+        let Sent::Response(r) = publisher
+            .send(CanonicalMessage::new(br#"{"k":"a"}"#.to_vec(), None))
+            .await
+            .unwrap()
+        else {
+            panic!("update must answer with a response");
+        };
+        let doc: serde_json::Value = serde_json::from_slice(&r.payload).unwrap();
+        assert_eq!(counter(Some(doc)), expected);
+        assert_eq!(
+            r.metadata.get("mongodb.found").map(String::as_str),
+            Some("true")
+        );
+    }
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_update_batch_keeps_per_key_order_and_skips_seen_ids() {
+    let collection = format!("update_{}", fast_uuid_v7::gen_id());
+    // Counts each txn id once; `recent` remembers the last 64 ids per key.
+    let update = r#"[
+        {"$set": {"_seen": {"$in": ["${payload:txn}", {"$ifNull": ["$recent", []]}]}}},
+        {"$set": {
+            "c": {"$cond": ["$_seen", "$c", {"$add": [{"$ifNull": ["$c", 0]}, 1]}]},
+            "recent": {"$cond": ["$_seen", "$recent",
+                {"$slice": [{"$concatArrays": [{"$ifNull": ["$recent", []]}, ["${payload:txn}"]]}, -64]}]}
+        }},
+        {"$unset": "_seen"}
+    ]"#;
+    let publisher = MongoDbPublisher::new(&counter_config(
+        &collection,
+        r#"{"_id": "${payload:k}"}"#,
+        Some(update),
+    ))
+    .await
+    .unwrap();
+    let msg = |k: &str, txn: &str| {
+        CanonicalMessage::new(format!(r#"{{"k":"{k}","txn":"{txn}"}}"#).into_bytes(), None)
+    };
+    let batch = vec![
+        msg("a", "t1"),
+        msg("a", "t2"),
+        msg("b", "t3"),
+        msg("a", "t4"),
+        msg("a", "t2"),
+        CanonicalMessage::new(br#"{"txn":"t5"}"#.to_vec(), None),
+    ];
+    let mut answers = publisher
+        .lookup_batch(&batch)
+        .await
+        .expect("update answers batches")
+        .unwrap();
+    assert_eq!(
+        answers.pop(),
+        Some(None),
+        "a keyless message writes nothing"
+    );
+    let counts: Vec<f64> = answers.into_iter().map(counter).collect();
+    assert_eq!(counts, vec![1.0, 2.0, 1.0, 3.0, 3.0]);
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_update_rejected_message_fails_alone() {
+    let collection = format!("update_{}", fast_uuid_v7::gen_id());
+    let update =
+        r#"[{"$set": {"c": {"$add": [{"$ifNull": ["$c", 0]}, {"$toDouble": "${payload:n}"}]}}}]"#;
+    let publisher = MongoDbPublisher::new(&counter_config(
+        &collection,
+        r#"{"_id": "${payload:k}"}"#,
+        Some(update),
+    ))
+    .await
+    .unwrap();
+    let msg = |k: &str, n: &str| {
+        CanonicalMessage::new(format!(r#"{{"k":"{k}","n":"{n}"}}"#).into_bytes(), None)
+    };
+
+    let err = publisher.send(msg("a", "abc")).await.unwrap_err();
+    assert!(
+        matches!(err, PublisherError::NonRetryable(_)),
+        "server rejection is not retryable: {err:?}"
+    );
+
+    let answers = publisher
+        .lookup_batch(&[msg("a", "1"), msg("a", "abc"), msg("a", "2"), msg("b", "5")])
+        .await
+        .expect("update answers batches")
+        .unwrap();
+    assert_eq!(
+        answers[1], None,
+        "the rejected message is answered as not found"
+    );
+    let counts: Vec<f64> = [0, 2, 3].map(|i| counter(answers[i].clone())).to_vec();
+    assert_eq!(counts, vec![1.0, 3.0, 5.0]);
 }

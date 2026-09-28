@@ -494,6 +494,24 @@ impl SqlLookup {
     }
 }
 
+/// Whether a `lookup_query` modifies data, e.g. an upsert with `RETURNING`.
+/// `REPLACE` counts only as a statement (first word, or `REPLACE INTO`), not the string function.
+fn lookup_writes(sql: &str) -> bool {
+    let words: Vec<&str> = sql
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let is = |word: &str, kw: &str| word.eq_ignore_ascii_case(kw);
+    words.iter().any(|word| {
+        ["insert", "update", "delete", "merge"]
+            .iter()
+            .any(|kw| is(word, kw))
+    }) || words.first().is_some_and(|w| is(w, "replace"))
+        || words
+            .windows(2)
+            .any(|pair| is(pair[0], "replace") && is(pair[1], "into"))
+}
+
 /// A bound key in the form [`lookup_batch::key_of`] gives the matching row's column.
 fn bind_key(value: &BindValue) -> Option<String> {
     match value {
@@ -709,6 +727,9 @@ impl SqlxPublisher {
         info!(table = %config.table, driver = %driver_name, "SQLx publisher connected");
 
         if let Some(lookup) = &config.lookup_query {
+            if lookup_writes(lookup) {
+                info!(table = %config.table, "SQLx lookup_query writes on every lookup");
+            }
             return Ok(Self {
                 pool,
                 _shared_pool: shared_pool,
@@ -928,7 +949,8 @@ impl SqlxPublisher {
             let sql = query.expand(chunk.len(), |i| {
                 positional_placeholder(&self.driver_name, i + 1)
             });
-            let mut select = sqlx::query(audited_sql(&sql));
+            // Not cached: a Postgres generic plan made on a small table stays a seq scan.
+            let mut select = sqlx::query(audited_sql(&sql)).persistent(false);
             for &i in chunk {
                 select = bind_value(select, values[i].clone());
             }
@@ -1585,7 +1607,8 @@ impl MessageConsumer for SqlxConsumer {
 
                     let mut attempts = 0;
                     loop {
-                        let mut query = sqlx::query(audited_sql(&sql));
+                        // Not cached: a Postgres generic plan made on a small table stays a seq scan.
+                        let mut query = sqlx::query(audited_sql(&sql)).persistent(false);
                         for id in &ids_to_ack {
                             query = query.bind(*id);
                         }

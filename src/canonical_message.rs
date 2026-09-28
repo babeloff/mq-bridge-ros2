@@ -394,23 +394,21 @@ pub(crate) fn u128_from_json(val: &serde_json::Value) -> Result<u128, String> {
         // folded into a stable u128 instead of failing. Rejecting it used to make a
         // whole JSON line unparseable, and a `file`/`json` source then silently kept
         // the line as an opaque raw payload, discarding its own `metadata`.
-        return Ok(fnv1a_128(s.as_bytes()));
+        return Ok(hashed_id(&[s.as_bytes()]));
     }
     Err("Invalid u128 format".to_string())
 }
 
-/// FNV-1a, 128-bit. Deterministic and stable forever (unlike `DefaultHasher`), so the
-/// same string id maps to the same message id in every process and every release —
-/// which is what deduplication and correlation rely on.
-fn fnv1a_128(bytes: &[u8]) -> u128 {
-    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013b;
-    let mut hash = OFFSET;
-    for b in bytes {
-        hash ^= *b as u128;
-        hash = hash.wrapping_mul(PRIME);
+/// A 128-bit id for `parts`: the first half of their SHA-256. Stable across processes and
+/// releases, and as collision-resistant as a random UUID, so it is safe as a dedup key.
+pub(crate) fn hashed_id(parts: &[&[u8]]) -> u128 {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
     }
-    hash
+    let digest = hasher.finalize();
+    u128::from_be_bytes(digest[..16].try_into().expect("SHA-256 is 32 bytes"))
 }
 
 /// Parse a message id from a string, accepting the same formats as the JSON
@@ -840,6 +838,11 @@ mod tests {
         assert_ne!(
             message_id_from_str("not-an-id").unwrap(),
             message_id_from_str("also-not-an-id").unwrap()
+        );
+        // Pinned: dedup stores hold these ids across releases.
+        assert_eq!(
+            message_id_from_str("not-an-id").unwrap(),
+            0x4e60bf522c63daf90c048a963f1114ab
         );
 
         // A UUID id round-trips through format_message_id unchanged.

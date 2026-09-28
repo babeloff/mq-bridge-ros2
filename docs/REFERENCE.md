@@ -422,6 +422,11 @@ dedup to survive a re-read.
 `store` selects the backend by URL scheme:
 
 - `sled:///path` (or a bare path) — a local sled database; per-process, not cluster-wide.
+- `memory://[name][?max_keys=N]` — process memory, the fastest store (~3x sled). Keys are
+  compared exactly and survive reconnects and redeploys, but not a restart. Routes that name
+  the same store share it; the name defaults to the route's. `max_keys` (default 1,000,000)
+  caps it: past the cap the oldest keys are evicted before their TTL, so later copies of them
+  pass through again (a warning is logged once).
 - `mongodb://host/db[/collection]` — a shared collection, so multiple instances of a route
   deduplicate against one another. Requires the `mongodb` feature. Expiry is judged on read,
   so a `ttl_seconds` boundary is honoured exactly; the TTL index only reclaims space
@@ -446,6 +451,10 @@ default.
 
 ```yaml middleware
 - deduplication: { store: "sled:///var/lib/mq-bridge/dedup", ttl_seconds: 3600 }
+```
+
+```yaml middleware
+- deduplication: { store: "memory://orders?max_keys=5000000", ttl_seconds: 600, key: "${payload:order_id}" }
 ```
 
 ```yaml middleware
@@ -938,7 +947,8 @@ whether they were found. On an input, the handler already sees the enriched mess
   message as non-retryable.
 - `mongodb.find` is an Extended-JSON filter template and answers with the first matching
   document; `sqlx.lookup_query` binds `${payload:…}` / `${metadata:…}` tokens like
-  `insert_query` and answers with the first row as a JSON object. Neither writes anything;
+  `insert_query` and answers with the first row as a JSON object. Neither adds a write of its own
+  (a `lookup_query` that writes, e.g. `INSERT … RETURNING`, runs as given and is logged at startup);
   they also set `mongodb.found` / `sqlx.found`.
 - `clickhouse.lookup_query` takes the same tokens and sends each as a typed query
   parameter (`Int64`, `UInt64`, `Float64`, `Bool`, `String`; a missing field is `NULL`), so

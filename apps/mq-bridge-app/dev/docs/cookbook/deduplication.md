@@ -25,12 +25,15 @@ process-local or **shared across every instance of the route**:
 | `store` | Scope | Extra feature |
 |---|---|---|
 | `sled:///path` (or a bare path) | per-process only | — |
+| `memory://[name][?max_keys=N]` | per-process, forgotten on restart | — |
 | `mongodb://host/db[/collection]` | shared between instances | `mongodb` |
 | `postgres` / `mysql` / `mariadb` / `sqlite` `://…[/table]` | shared between instances | `sqlx` |
 
 The collection/table defaults to `mqb_dedup_<route>`. Point a shared store at the deployment
 your sink already uses rather than standing up extra infrastructure. `sled_path` is the legacy
-spelling of a local sled store, equivalent to `store: "sled://<path>"`.
+spelling of a local sled store, equivalent to `store: "sled://<path>"`. `memory://` is the
+fastest store (~3x sled) but forgets every key on restart, so redeliveries after a restart go
+through again; it holds at most `max_keys` keys (default 1,000,000), evicting the oldest first.
 
 ```yaml
 # Shared across every instance of this route.

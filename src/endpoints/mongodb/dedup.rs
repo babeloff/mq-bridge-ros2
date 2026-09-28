@@ -21,6 +21,82 @@ const STATE_PENDING: &str = "pending";
 const STATE_PROCESSED: &str = "processed";
 const RESPONSE_FIELD: &str = "response";
 
+fn store_failed(context: &str, e: mongodb::error::Error) -> ConsumerError {
+    ConsumerError::Connection(anyhow!("Deduplication MongoDB {context} failed: {e}"))
+}
+
+impl MongoDedupStore {
+    /// Reserves one chunk: one `find` for the whole chunk, then one unordered `insert_many` of
+    /// the absent keys. Expired keys, and keys another instance inserted meanwhile (E11000),
+    /// take the per-key path.
+    async fn reserve_chunk(
+        &self,
+        keys: &[Vec<u8>],
+        now: u64,
+    ) -> Result<Vec<crate::middleware::deduplication::Reservation>, ConsumerError> {
+        use crate::middleware::deduplication::{
+            hex_key, DedupStore, Reservation, PENDING_TTL_SECS,
+        };
+        use futures::TryStreamExt;
+        let ids: Vec<String> = keys.iter().map(|k| hex_key(k)).collect();
+        let now_ms = now as i64 * 1000;
+        let stored: HashMap<String, Document> = self
+            .coll
+            .find(doc! { "_id": { "$in": &ids } })
+            .projection(doc! { "expireAt": 1, STATE_FIELD: 1 })
+            .await
+            .map_err(|e| store_failed("state lookup", e))?
+            .try_collect::<Vec<Document>>()
+            .await
+            .map_err(|e| store_failed("state lookup", e))?
+            .into_iter()
+            .filter_map(|doc| Some((doc.get_str("_id").ok()?.to_string(), doc)))
+            .collect();
+
+        let mut states = vec![Reservation::Claimed; ids.len()];
+        let mut absent = Vec::new();
+        let mut contested = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            let Some(doc) = stored.get(id) else {
+                absent.push(i);
+                continue;
+            };
+            match doc.get_datetime("expireAt") {
+                Ok(expire) if expire.timestamp_millis() > now_ms => {
+                    states[i] = if doc.get_str(STATE_FIELD).ok() == Some(STATE_PENDING) {
+                        Reservation::InFlight
+                    } else {
+                        Reservation::Processed
+                    };
+                }
+                _ => contested.push(i),
+            }
+        }
+
+        if !absent.is_empty() {
+            let pending_date =
+                mongodb::bson::DateTime::from_millis(now_ms + PENDING_TTL_SECS as i64 * 1000);
+            let claims = absent.iter().map(|&i| {
+                doc! { "_id": &ids[i], "expireAt": pending_date, STATE_FIELD: STATE_PENDING }
+            });
+            if let Err(e) = self.coll.insert_many(claims).ordered(false).await {
+                let ErrorKind::InsertMany(failure) = &*e.kind else {
+                    return Err(store_failed("reserve", e));
+                };
+                let errors = failure.write_errors.as_deref().unwrap_or_default();
+                if failure.write_concern_error.is_some() || errors.iter().any(|w| w.code != 11000) {
+                    return Err(store_failed("reserve", e));
+                }
+                contested.extend(errors.iter().map(|w| absent[w.index]));
+            }
+        }
+        for i in contested {
+            states[i] = self.reserve(&keys[i], now).await?;
+        }
+        Ok(states)
+    }
+}
+
 #[async_trait]
 impl crate::middleware::deduplication::DedupStore for MongoDedupStore {
     async fn reserve(
@@ -104,6 +180,48 @@ impl crate::middleware::deduplication::DedupStore for MongoDedupStore {
         }
     }
 
+    async fn reserve_many(
+        &self,
+        keys: &[Vec<u8>],
+        now: u64,
+    ) -> Result<Vec<crate::middleware::deduplication::Reservation>, ConsumerError> {
+        let mut states = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(crate::support::lookup_batch::MAX_KEYS_PER_QUERY) {
+            states.extend(self.reserve_chunk(chunk, now).await?);
+        }
+        Ok(states)
+    }
+
+    /// One `update_many` per chunk. A chunk with a doc missing (swept after its claim lapsed)
+    /// is redone key by key, which upserts the missing marker.
+    async fn mark_processed_many(&self, keys: &[Vec<u8>], now: u64) {
+        use crate::middleware::deduplication::hex_key;
+        let expire_date =
+            mongodb::bson::DateTime::from_millis((now as i64 + self.ttl_seconds as i64) * 1000);
+        for chunk in keys.chunks(crate::support::lookup_batch::MAX_KEYS_PER_QUERY) {
+            let ids: Vec<String> = chunk.iter().map(|k| hex_key(k)).collect();
+            let result = self
+                .coll
+                .update_many(
+                    doc! { "_id": { "$in": &ids } },
+                    doc! {
+                        "$set": { "expireAt": expire_date, STATE_FIELD: STATE_PROCESSED },
+                        "$unset": { RESPONSE_FIELD: "" },
+                    },
+                )
+                .await;
+            match result {
+                Ok(r) if r.matched_count as usize == ids.len() => {}
+                Ok(_) => {
+                    for key in chunk {
+                        self.mark_processed(key, now).await;
+                    }
+                }
+                Err(e) => warn!("Failed to mark dedup keys processed in MongoDB: {}", e),
+            }
+        }
+    }
+
     async fn mark_processed_with_response(&self, key: &[u8], now: u64, response: &[u8]) {
         use crate::middleware::deduplication::hex_key;
         let id = hex_key(key);
@@ -150,6 +268,20 @@ impl crate::middleware::deduplication::DedupStore for MongoDedupStore {
             .await
         {
             warn!("Failed to release dedup key in MongoDB: {}", e);
+        }
+    }
+
+    async fn release_many(&self, keys: &[Vec<u8>]) {
+        use crate::middleware::deduplication::hex_key;
+        for chunk in keys.chunks(crate::support::lookup_batch::MAX_KEYS_PER_QUERY) {
+            let ids: Vec<String> = chunk.iter().map(|k| hex_key(k)).collect();
+            if let Err(e) = self
+                .coll
+                .delete_many(doc! { "_id": { "$in": &ids }, STATE_FIELD: STATE_PENDING })
+                .await
+            {
+                warn!("Failed to release dedup keys in MongoDB: {}", e);
+            }
         }
     }
 }

@@ -1314,6 +1314,71 @@ async fn sql_dedup_store_reserve_mark_and_expire() {
 }
 
 #[cfg(feature = "dedup")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_dedup_store_batches_match_the_per_key_states() {
+    use crate::middleware::deduplication::Reservation::{Claimed, InFlight, Processed};
+    sqlx::any::install_default_drivers();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("dedup_batch.db");
+    drop(tokio::fs::File::create(&path).await.unwrap());
+    let store = build_sql_dedup_store(&sqlite_url(&path), None, 60, "batch_route", false)
+        .await
+        .unwrap();
+    let now = 1_000u64;
+    let keys = |names: &[&str]| {
+        names
+            .iter()
+            .map(|n| n.as_bytes().to_vec())
+            .collect::<Vec<_>>()
+    };
+
+    store.reserve(b"held", now).await.unwrap();
+    store.reserve(b"done", now).await.unwrap();
+    store.mark_processed(b"done", now).await;
+    store.reserve(b"old", now - 100).await.unwrap();
+    store.mark_processed(b"old", now - 100).await;
+
+    let batch = keys(&["new1", "held", "done", "old", "new2"]);
+    assert_eq!(
+        store.reserve_many(&batch, now).await.unwrap(),
+        vec![Claimed, InFlight, Processed, Claimed, Claimed]
+    );
+
+    // Release drops only claims; a missing row on commit is inserted instead.
+    store.release_many(&keys(&["new1", "done", "new2"])).await;
+    assert_eq!(
+        store
+            .reserve_many(&keys(&["new1", "done"]), now)
+            .await
+            .unwrap(),
+        vec![Claimed, Processed]
+    );
+    store
+        .mark_processed_many(&keys(&["new1", "new2"]), now)
+        .await;
+    assert_eq!(
+        store
+            .reserve_many(&keys(&["new1", "new2"]), now)
+            .await
+            .unwrap(),
+        vec![Processed, Processed]
+    );
+
+    // Two instances racing on one batch: every key is claimed exactly once.
+    let contested: Vec<Vec<u8>> = (0..200).map(|i| format!("race{i}").into_bytes()).collect();
+    let (a, b) = tokio::join!(
+        store.reserve_many(&contested, now),
+        store.reserve_many(&contested, now)
+    );
+    for (a, b) in a.unwrap().into_iter().zip(b.unwrap()) {
+        assert!(
+            matches!((a, b), (Claimed, InFlight) | (InFlight, Claimed)),
+            "{a:?} / {b:?}"
+        );
+    }
+}
+
+#[cfg(feature = "dedup")]
 #[tokio::test]
 async fn sql_dedup_store_keeps_replies_and_migrates_an_existing_table() {
     sqlx::any::install_default_drivers();
@@ -1661,4 +1726,24 @@ async fn an_in_lookup_query_answers_a_batch_in_one_query() {
         single.metadata.get("sqlx.found").map(String::as_str),
         Some("true")
     );
+}
+
+#[test]
+fn lookup_writes_detects_modifying_statements() {
+    assert!(lookup_writes(
+        "INSERT INTO v (k) VALUES (${payload:k}) ON CONFLICT (k) DO UPDATE SET c = v.c + 1 RETURNING c"
+    ));
+    assert!(lookup_writes(
+        "with d as (delete from t returning *) select * from d"
+    ));
+    assert!(!lookup_writes(
+        "SELECT name, updated_at FROM users WHERE id = ${payload:user_id}"
+    ));
+    assert!(lookup_writes(
+        "REPLACE INTO v (k, c) VALUES (${payload:k}, 1)"
+    ));
+    assert!(lookup_writes("replace v values (${payload:k}, 1)"));
+    assert!(!lookup_writes(
+        "SELECT replace(name, '-', '') AS name FROM users WHERE id = ${payload:user_id}"
+    ));
 }

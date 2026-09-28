@@ -137,6 +137,7 @@ apache-avro = { version = "0.22", optional = true }
 
 # Storage for Deduplication
 sled = { version = "0.34", optional = true }
+hashbrown = { version = "0.16", optional = true }
 
 # Gen IDs
 rand = { version = "0.10" }
@@ -325,7 +326,7 @@ vendored-protoc = ["dep:protoc-bin-vendored"]
 portable = ["metrics", "otel", "dedup", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "websocket", "object-store", "rustls-aws-lc"]
 
 # Functionality features
-dedup = ["sled"]
+dedup = ["sled", "dep:hashbrown"]
 # Batch compression (`compression: gzip|lz4|zstd`) on the file and object_store
 # endpoints. flate2 is already pulled in by the http/clickhouse features.
 compression = ["dep:flate2", "dep:lz4_flex", "dep:zstd"]

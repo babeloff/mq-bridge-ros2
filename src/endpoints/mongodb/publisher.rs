@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::support::lookup_batch::{self, ListQuery};
+use mongodb::options::UpdateModifications;
 
 pub struct MongoDbPublisher {
     collection: Collection<Document>,
@@ -23,6 +24,8 @@ pub struct MongoDbPublisher {
     find: Option<CompiledTemplate>,
     /// Set when `find` holds `"field": {"$in": [${…}]}`: one query answers a whole batch.
     find_list: Option<(ListQuery, CompiledTemplate)>,
+    /// Opt-in write: upsert this update on the `find` match and answer with the result.
+    update: Option<CompiledTemplate>,
 }
 
 /// Metadata key carrying the insert outcome when `report_outcome` is enabled.
@@ -31,6 +34,8 @@ pub(crate) const OUTCOME_INSERTED: &str = "inserted";
 pub(crate) const OUTCOME_EXISTED: &str = "existed";
 /// Metadata key telling whether a `find` matched a document.
 const FOUND_KEY: &str = "mongodb.found";
+/// Distinct `update` keys written in parallel per batch; one key's messages run in order.
+const UPDATE_CONCURRENCY: usize = 16;
 
 fn mongodb_uses_sequencer(request_reply: bool, format: &MongoDbFormat) -> bool {
     !request_reply && !matches!(format, MongoDbFormat::Raw)
@@ -88,11 +93,29 @@ impl MongoDbPublisher {
             None => None,
         }
         .transpose()?;
+        let update = config
+            .update
+            .as_deref()
+            .map(|t| {
+                CompiledTemplate::compile(t, Some("application/json"))
+                    .context("invalid MongoDB `update` template")
+            })
+            .transpose()?;
+        if update.is_some() && find.is_none() {
+            anyhow::bail!("MongoDB `update` requires `find`");
+        }
+        if update.is_some() && find_list.is_some() {
+            anyhow::bail!("MongoDB `update` needs one key per message; `find` must not use `$in`");
+        }
         let shared_client = create_shared_client(config).await?;
         let client = (*shared_client).clone();
         let db = client.database(&config.database);
         if find.is_some() {
-            info!(database = %config.database, collection = %collection_name, "MongoDB find publisher connected");
+            if update.is_some() {
+                info!(database = %config.database, collection = %collection_name, "MongoDB find publisher connected; `update` writes on every lookup");
+            } else {
+                info!(database = %config.database, collection = %collection_name, "MongoDB find publisher connected");
+            }
             return Ok(Self {
                 collection: db.collection(collection_name),
                 meta_collection: db.collection(collection_name),
@@ -108,6 +131,7 @@ impl MongoDbPublisher {
                 report_outcome: false,
                 find,
                 find_list,
+                update,
             });
         }
 
@@ -211,6 +235,7 @@ impl MongoDbPublisher {
             report_outcome: config.report_outcome,
             find: None,
             find_list: None,
+            update: None,
         })
     }
 
@@ -238,12 +263,21 @@ impl MongoDbPublisher {
                 .insert(FOUND_KEY.to_string(), found.is_some().to_string());
             return Ok(Sent::Response(response));
         }
-        let filter = find_filter(&template.render(Some(message)))?;
-        let found = self
-            .collection
-            .find_one(filter)
-            .await
-            .map_err(|e| PublisherError::Retryable(e.into()))?;
+        let found = match &self.update {
+            // A message without a key writes nothing: it would share one counter with all such.
+            Some(update) => match template.render_resolved(Some(message)) {
+                Some(rendered) => {
+                    self.find_and_update(find_filter(&rendered)?, update, message)
+                        .await?
+                }
+                None => None,
+            },
+            None => self
+                .collection
+                .find_one(find_filter(&template.render(Some(message)))?)
+                .await
+                .map_err(|e| PublisherError::Retryable(e.into()))?,
+        };
         let payload = match &found {
             Some(doc) => serde_json::to_vec(&Bson::Document(doc.clone()).into_relaxed_extjson())
                 .map_err(|e| PublisherError::NonRetryable(e.into()))?,
@@ -254,6 +288,82 @@ impl MongoDbPublisher {
             .metadata
             .insert(FOUND_KEY.to_string(), found.is_some().to_string());
         Ok(Sent::Response(response))
+    }
+
+    /// Upserts the rendered `update` on `filter` and returns the document after the update.
+    async fn find_and_update(
+        &self,
+        filter: Document,
+        update: &CompiledTemplate,
+        message: &CanonicalMessage,
+    ) -> Result<Option<Document>, PublisherError> {
+        let update = update_modifications(&update.render(Some(message)))?;
+        let options = FindOneAndUpdateOptions::builder()
+            .upsert(true)
+            .return_document(ReturnDocument::After)
+            .build();
+        self.collection
+            .find_one_and_update(filter, update)
+            .with_options(options)
+            .await
+            .map_err(update_error)
+    }
+
+    /// Answers every message with its updated document: distinct keys in parallel, the
+    /// messages of one key in order, so each sees the state its predecessors left.
+    async fn update_many(
+        &self,
+        find: &CompiledTemplate,
+        update: &CompiledTemplate,
+        messages: &[CanonicalMessage],
+    ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
+        let mut groups: Vec<(Vec<u8>, Vec<usize>)> = Vec::new();
+        let mut by_filter: HashMap<Vec<u8>, usize> = HashMap::new();
+        // Keyless messages join no group and stay unanswered, like `find_many`'s.
+        for (i, message) in messages.iter().enumerate() {
+            let Some(rendered) = find.render_resolved(Some(message)) else {
+                continue;
+            };
+            let group = *by_filter.entry(rendered.clone()).or_insert_with(|| {
+                groups.push((rendered, Vec::new()));
+                groups.len() - 1
+            });
+            groups[group].1.push(i);
+        }
+        let mut answers = futures::stream::iter(groups)
+            .map(|(rendered, indices)| async move {
+                let mut out = Vec::with_capacity(indices.len());
+                let filter = match find_filter(&rendered) {
+                    Ok(filter) => filter,
+                    Err(e) => {
+                        let e = rejected_in_batch(e)?;
+                        warn!(error = %e, "MongoDB `update` lookup: invalid filter; answering not found");
+                        out.extend(indices.into_iter().map(|i| (i, None)));
+                        return Ok(out);
+                    }
+                };
+                for i in indices {
+                    let doc = match self.find_and_update(filter.clone(), update, &messages[i]).await {
+                        Ok(doc) => doc,
+                        // One rejected message must neither stall nor drop the rest of the batch.
+                        Err(e) => {
+                            let e = rejected_in_batch(e)?;
+                            warn!(error = %e, "MongoDB `update` lookup rejected; answering not found");
+                            None
+                        }
+                    };
+                    out.push((i, doc.map(|d| Bson::Document(d).into_relaxed_extjson())));
+                }
+                Ok::<_, PublisherError>(out)
+            })
+            .buffer_unordered(UPDATE_CONCURRENCY);
+        let mut results = vec![None; messages.len()];
+        while let Some(group) = answers.next().await {
+            for (i, doc) in group? {
+                results[i] = doc;
+            }
+        }
+        Ok(results)
     }
 
     /// Answers every message with one `$in` query per chunk of distinct keys.
@@ -384,6 +494,58 @@ pub(crate) fn tag_outcome(
         Sent::Response(message)
     } else {
         Sent::Ack
+    }
+}
+
+/// A server-rejected update (bad data for the pipeline) cannot succeed on retry; a network or
+/// failover error can, and so can E11000 from two upserts racing to insert the same key.
+fn update_error(e: mongodb::error::Error) -> PublisherError {
+    let duplicate = match &*e.kind {
+        ErrorKind::Write(mongodb::error::WriteFailure::WriteError(w)) => w.code == 11000,
+        ErrorKind::Command(c) => c.code == 11000,
+        _ => false,
+    };
+    let rejected = matches!(*e.kind, ErrorKind::Command(_) | ErrorKind::Write(_))
+        && !duplicate
+        && !e.contains_label(mongodb::error::RETRYABLE_WRITE_ERROR);
+    if rejected {
+        PublisherError::NonRetryable(anyhow!(e).context("MongoDB `update` rejected"))
+    } else {
+        PublisherError::Retryable(e.into())
+    }
+}
+
+/// In a batch, a non-retryable error is the message's own and is answered as not found;
+/// a retryable one still fails the batch.
+fn rejected_in_batch(e: PublisherError) -> Result<anyhow::Error, PublisherError> {
+    match e {
+        PublisherError::NonRetryable(e) => Ok(e),
+        other => Err(other),
+    }
+}
+
+/// Parses a rendered `update` into an update document or an aggregation pipeline.
+pub(super) fn update_modifications(rendered: &[u8]) -> Result<UpdateModifications, PublisherError> {
+    let parsed = serde_json::from_slice::<serde_json::Value>(rendered)
+        .map_err(anyhow::Error::from)
+        .and_then(|v| Ok(Bson::try_from(v)?));
+    let invalid =
+        |e: anyhow::Error| PublisherError::NonRetryable(e.context("invalid MongoDB `update`"));
+    match parsed.map_err(invalid)? {
+        Bson::Document(d) => Ok(UpdateModifications::Document(d)),
+        Bson::Array(stages) => stages
+            .into_iter()
+            .map(|stage| match stage {
+                Bson::Document(d) => Ok(d),
+                other => Err(anyhow!("pipeline stage is a {:?}", other.element_type())),
+            })
+            .collect::<anyhow::Result<Vec<_>>>()
+            .map(UpdateModifications::Pipeline)
+            .map_err(invalid),
+        other => Err(invalid(anyhow!(
+            "update is a {:?}, not a document or pipeline",
+            other.element_type()
+        ))),
     }
 }
 
@@ -720,6 +882,9 @@ impl MessagePublisher for MongoDbPublisher {
         &self,
         requests: &[CanonicalMessage],
     ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
+        if let (Some(find), Some(update)) = (&self.find, &self.update) {
+            return Some(self.update_many(find, update, requests).await);
+        }
         let (list, element) = self.find_list.as_ref()?;
         Some(self.find_many(list, element, requests).await)
     }

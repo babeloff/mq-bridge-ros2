@@ -19,7 +19,7 @@ mod pgoutput;
 pub(crate) mod replication;
 mod state;
 
-use crate::canonical_message::CanonicalMessage;
+use crate::canonical_message::{hashed_id, CanonicalMessage};
 use crate::checkpoint::{checkpoint_key, CheckpointStore, FileCheckpointStore};
 use crate::errors::ConsumerError;
 use crate::models::PostgresCdcConfig;
@@ -404,7 +404,7 @@ fn recv_error(e: impl std::fmt::Display) -> ConsumerError {
     }
 }
 
-/// Deterministic dedup id for a change event: FNV-1a 128-bit over
+/// Deterministic dedup id for a change event: [`hashed_id`] over
 /// `schema.table\0key\0operation\0lsn\0ordinal`. A replayed change (same key, op and
 /// in-tx position at the same commit LSN) hashes identically so the dedup middleware /
 /// sink can drop it; distinct changes — including several to one key in one transaction —
@@ -417,11 +417,7 @@ fn cdc_dedup_id(
     operation: &str,
     ordinal: usize,
 ) -> u128 {
-    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013B;
-    let lsn_bytes = lsn.to_be_bytes();
-    let ordinal_bytes = (ordinal as u64).to_be_bytes();
-    let parts: [&[u8]; 11] = [
+    hashed_id(&[
         schema.as_bytes(),
         b".",
         table.as_bytes(),
@@ -430,18 +426,10 @@ fn cdc_dedup_id(
         b"\0",
         operation.as_bytes(),
         b"\0",
-        &lsn_bytes,
+        &lsn.to_be_bytes(),
         b"\0",
-        &ordinal_bytes,
-    ];
-    let mut h = OFFSET;
-    for part in parts {
-        for &b in part {
-            h ^= b as u128;
-            h = h.wrapping_mul(PRIME);
-        }
-    }
-    h
+        &(ordinal as u64).to_be_bytes(),
+    ])
 }
 
 fn add_source_metadata(message: &mut CanonicalMessage, slot: &str, lsn: u64, ordinal: usize) {
