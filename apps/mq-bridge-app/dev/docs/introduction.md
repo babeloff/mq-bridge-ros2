@@ -5,23 +5,38 @@
 </p>
 <p style="margin-top:-12px" align="center"><em>crossing streams</em></p>
 
-`mq-bridge-app` is a **fast, single-command ETL and data-movement tool** built in Rust — and,
-on top of the same engine, a multi-protocol bridge and traffic workbench for messaging.
+**mq-bridge** moves data reliably between message brokers, databases, files, and HTTP — with
+batching, retries, dead-letter queues, deduplication, and change data capture built in. One Rust
+engine, one config format, two ways to use it:
 
-It ships in **three forms that share one engine and one config format**: a **desktop app**
-(visual workbench), a **CLI / server** (headless bridge and one-line `copy`), and a
-**library** (embed the engine in Rust, Python, or Node.js). Design a route once, run it
-anywhere — no rewrite in between.
+| | **mq-bridge** — the library | **mq-bridge-app** — the application |
+| :--- | :--- | :--- |
+| **What** | The engine, embedded in your own service | The same engine as a desktop app, CLI / server, and MCP server |
+| **For** | Code that moves data and adds business logic in handlers | Moving data by config alone — no code, no build step |
+| **Languages** | Rust, Python, Node.js | YAML, environment variables, or one-line `mqb copy` |
+| **Start** | [Quick start: library](getting-started/library-quick-start.md) | [Quick start: `copy`](quick-start.md) |
 
-Supported integrations include **Kafka**, **RabbitMQ (AMQP)**, **NATS**, **AWS SQS**,
-**MQTT**, **IBM MQ** (optional), **HTTP**, **gRPC**, **ZeroMQ**, **MongoDB**, **Redis
-Streams**, **ClickHouse**, **Postgres CDC**, **sqlx (MySQL, MariaDB, PostgreSQL, SQLite)**,
-cloud object storage, and filesystem endpoints.
+Almost everything in this book applies to both: connectors, middleware, delivery guarantees, and
+tuning share the same settings. A CLI URL's query parameters are the same fields you write in a
+library's YAML config.
+
+Supported integrations include **Kafka**, **RabbitMQ (AMQP)**, **NATS**, **AWS SQS / SNS**,
+**MQTT**, **IBM MQ**, **HTTP**, **WebSocket**, **gRPC**, **ZeroMQ**, **MongoDB**, **Redis
+Streams**, **ClickHouse**, **Postgres CDC**, **SQLx (MySQL, MariaDB, PostgreSQL, SQLite)**,
+cloud object storage, and filesystem endpoints — plus Pulsar, Meilisearch, and Redpanda Connect
+through [plugins](reference/endpoints.md#plugin-endpoints).
 
 ## A quick taste
 
-At its core is a zero-config `copy` command that moves data between databases, queues, and
-files in a single line of bash — no YAML, no pipeline definition, no code:
+In code — the same route runs in Rust, Python, or Node.js:
+
+```python
+from mq_bridge import Route
+Route.from_file("routes.yaml", "kafka_to_nats").run()
+```
+
+Without code — `mqb copy` moves data between databases, queues, and files in a single line of
+bash:
 
 ```bash
 mqb copy \
@@ -59,8 +74,10 @@ route code should still be able to receive a batch, process it, publish it, and 
 
 ## Where to go next
 
-- New here? Start with [Installation](INSTALL.md) and the
-  [Quick start](quick-start.md).
+- Writing code? Start with the [library quick start](getting-started/library-quick-start.md),
+  then [Embed the library](tutorials/embedding.md).
+- Moving data without code? Start with [Installation](INSTALL.md) and the
+  [`copy` quick start](quick-start.md).
 - Want the end-to-end walkthroughs? See the [Tutorials](tutorials/postgres-cdc.md).
 - Looking for a specific task? The [Cookbook](cookbook/upserts.md) has short recipes.
 - Need exact fields and defaults? The [Reference](reference/endpoints.md) is authoritative.
@@ -69,10 +86,8 @@ route code should still be able to receive a batch, process it, publish it, and 
 - Driving it from an AI agent? The same binary is an [MCP server](MCP.md) — the rows
   move without entering the model's context.
 
-## App vs. engine
+## Library vs. app
 
-`mq-bridge` is the **engine/library**; `mq-bridge-app` is the **application** — desktop app +
-CLI/server + library distribution — built on that engine. This book is the user-facing home;
-the engine's deep API reference lives on [docs.rs](https://docs.rs/mq-bridge). The
-[library bindings](reference/bindings.md) let you embed the same engine in Rust, Python, or
-Node.js.
+`mq-bridge` is the **engine/library**; `mq-bridge-app` is the **application** built on it. This
+book covers both; the engine's Rust API reference lives on [docs.rs](https://docs.rs/mq-bridge),
+and the [language bindings API](reference/bindings.md) covers Python and Node.js.

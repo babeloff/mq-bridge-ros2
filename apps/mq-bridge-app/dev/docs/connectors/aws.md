@@ -15,6 +15,18 @@ selected by `queue_url` (required for consumers, and for publishers unless
 `topic_arn` is set for SNS). Point `endpoint_url` at LocalStack for local
 testing.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `aws:`.
+
+```yaml
+input:
+  aws: { queue_url: "https://sqs.us-east-1.amazonaws.com/000000000000/orders", region: "us-east-1" }
+output:
+  aws: { topic_arn: "arn:aws:sns:us-east-1:000000000000:events", region: "us-east-1" }
+```
+
 ## Examples
 
 **Drain an SQS queue into a file, one-shot:**

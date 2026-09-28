@@ -13,6 +13,18 @@ clickhouse://host[:port]?table=<name>[&database=<name>]
 `https://`) before being handed to the ClickHouse client — the scheme only
 selects the endpoint kind on the CLI.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `clickhouse:`.
+
+```yaml
+output:
+  clickhouse: { url: "http://localhost:8123", database: "analytics", table: "orders" }
+```
+
+The `url` is the HTTP interface (`http://` or `https://`); `clickhouse://` is CLI-only.
+
 ## Examples
 
 **Bulk insert from a full-table Postgres read, one-shot:**

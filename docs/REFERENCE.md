@@ -4,7 +4,7 @@ Complete listing of every **middleware** and every **structural endpoint** mq-br
 
 Structural endpoints are the ones that do not talk to a broker or store: they compose other
 endpoints, shape routing, or terminate a request. Data endpoints (`kafka`, `nats`, `mqtt`,
-`sqlx`, …) are covered in [README.md](../README.md#backend-features--configuration) and
+`sqlx`, …) are covered in the [connector pages](https://marcomq.github.io/mq-bridge/connectors/index.html) and
 [CONFIGURATION.md](CONFIGURATION.md).
 
 - [Middleware](#middleware)
@@ -1322,7 +1322,7 @@ http_echo:
 Takes no options. Requires an input that carries a reply channel (`http`, `websocket`, `grpc`,
 or a request/reply `nats`/`mongodb`/`memory`). With an `http` or `websocket` input and no
 middleware, `response` (and `static`) enables an inline fast path that skips the normal route
-pipeline. See [README.md](../README.md#patterns-request-response).
+pipeline. See [Request / reply](https://marcomq.github.io/mq-bridge/tutorials/request-reply.html).
 
 ### `reader`
 

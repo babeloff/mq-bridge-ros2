@@ -13,6 +13,16 @@ redis://[user:pass@]host[:port]?stream=<key>
 `redis://` (plain) and `rediss://` (TLS) are both accepted; `redis_streams://`
 is an explicit alias. If `stream` is omitted it defaults to the route name.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `redis_streams:`.
+
+```yaml
+input:
+  redis_streams: { url: "redis://localhost:6379", stream: "orders", group: "mqb" }
+```
+
 ## Examples
 
 **Load a CSV file into a stream, one-shot:**

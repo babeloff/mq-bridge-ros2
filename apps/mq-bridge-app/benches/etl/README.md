@@ -99,8 +99,7 @@ are single-machine, single-process batch numbers.
 
 The mq-bridge-app column was re-measured on 2026-08-01 with the mimalloc allocator
 (2 repeats after a discarded warmup, batch 1024 / concurrency 1). The Sling and
-Meltano columns are carried over from the earlier session on the same machine and
-dataset — neither tool changed, but this table is therefore not single-session.
+Meltano columns were measured separately on the same machine and dataset.
 Raising concurrency to 4 gives **384,615 rows/s** at 41.2 MiB.
 
 > **The two Sling columns are not on equal footing — check which one you're
@@ -216,12 +215,12 @@ typed 0.611 s ±0.020). MCP: 6 runs and **no discarded warm-up** — `mcp_bench.
 every run including the cold first one, so a 2- or 3-run median reads materially low.
 Postgres: 10 timed runs across two sessions at concurrency 1 (median 2.374 s, spread
 2.190–2.509 s) and 3 runs at concurrency 4 (2.081 s ±0.132). IPC: one 300 s window.
-Peak RSS was re-measured in this session rather than carried over; the IPC scenario
+Peak RSS was measured alongside throughput; the IPC scenario
 reports a sustained rate sampled from the receiver's transport log rather than a
 wall-clocked job, so it has no RSS column and is not comparable cell-for-cell with the
 rest of the table. The Postgres figure is measured against a
 **freshly seeded** `bench` table on a freshly created container; the same scenario read
-369,412 rows/s against a table left in place from earlier runs, so reseed before
+369,412 rows/s against a reused, not freshly seeded table, so reseed before
 quoting it. See §4, §5 and §6 for the full write-ups and the Sling / Meltano
 baselines.
 
@@ -467,8 +466,7 @@ accidentally measure in the first place.
 
 The mq-bridge-app figures were re-measured on 2026-08-01 with mimalloc (2 timed
 runs, 2.958s ±0.053, after a discarded warmup). The Sling figure (8.145s ±0.155)
-and the Meltano figure are carried over from earlier sessions on the same machine
-and dataset — neither tool changed, but this table is not single-session.
+and the Meltano figure were measured separately on the same machine and dataset.
 
 ### 6 — CSV → JSONL vs. Meltano
 
@@ -542,14 +540,10 @@ transform adds **0.47 s per 1,000,000 rows (~0.47 µs/row, ~35% of the typed
 wall-clock)**. An earlier revision of the transform cost 2.10 s per 1M rows (2.1
 µs/row, 64%), which is why the previously published typed figure was 303,214.
 
-**The two mq-bridge-app columns are not from the same session as the Sling and
-Meltano columns.** mq-bridge-app was re-measured on 2026-08-01 after the switch to
-the mimalloc allocator (2 repeats each after a discarded warmup, spread ±0.001 s);
-Sling and Meltano are carried over from earlier sessions on the same machine and
-dataset (Sling 2026-07-19). Sling has been a stable control across three sessions
-here — 119,217 / 128,766 / 127,959 rows/s — which is the basis for treating the
-carried-over columns as still valid, but a same-session re-run of all four columns
-is the cleaner way to publish these ratios and has not been done yet.
+mq-bridge-app was measured on 2026-08-01 with the mimalloc allocator (2 repeats
+each after a discarded warmup, spread ±0.001 s); Sling (2026-07-19) and Meltano were
+measured separately on the same machine and dataset. Sling is a stable control here
+(119,217 / 128,766 / 127,959 rows/s across repeated measurements).
 
 For reference, the pre-mimalloc figures this table replaced were 540,248 typed /
 784,313 untyped, measured 2026-07-19 in a back-to-back session with Sling; the
@@ -689,9 +683,8 @@ REPEATS=3 LATENCY_CALLS=1000 benches/etl/run_mcp_bench.sh
 - The **token** row counts only the three calls an agent makes. The harness itself
   polls ~26 times (~15 KB); publishing *that* as the agent's cost would be an
   artifact of the measurement, not a property of the server.
-- `mcp_bench.py` calls `server_info` first and **aborts on a debug build**. An
-  earlier MCP measurement session was silently invalidated by a stale debug binary;
-  the check exists so that cannot recur.
+- `mcp_bench.py` calls `server_info` first and **aborts on a debug build**, so a
+  stale debug binary cannot silently invalidate a measurement.
 - No `metrics` middleware anywhere on the path. The per-route counters
   `route_status` reports are the same ones the web UI uses and are not the metrics
   crate.

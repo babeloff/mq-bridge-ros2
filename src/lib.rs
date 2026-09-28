@@ -78,7 +78,7 @@
 //! - `full` — all supported integrations; some require native build tools or
 //!   runtime libraries.
 //!
-//! See the [README feature matrix](https://github.com/marcomq/mq-bridge#backend-features--configuration)
+//! See the [endpoint capability table](https://marcomq.github.io/mq-bridge/reference/endpoints.html#consumer-vs-subscriber-and-nack-support)
 //! for individual transports, platform requirements, and configuration examples.
 //!
 //! # Where to go next
@@ -88,8 +88,8 @@
 //!   configuration types.
 //! - Read the [architecture guide](https://github.com/marcomq/mq-bridge/blob/dev/docs/ARCHITECTURE.md)
 //!   for routing, handlers, batching, and delivery semantics.
-//! - Read the [project README](https://github.com/marcomq/mq-bridge) for complete
-//!   setup and backend-specific examples.
+//! - Read the [documentation book](https://marcomq.github.io/mq-bridge/) for setup,
+//!   connector configuration, and recipes.
 //!
 //! # Reliability model
 //!

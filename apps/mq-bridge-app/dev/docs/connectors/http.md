@@ -14,6 +14,18 @@ http://host[:port][/path]?method=<verb>
 scheme the driver expects (the target path, if any, is just part of the URL,
 not a separate query param).
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `http:`.
+
+```yaml
+input:
+  http: { url: "0.0.0.0:8080" }                                  # listen address
+output:
+  http: { url: "https://api.example.com/orders", method: "POST" }  # target URL
+```
+
 ## Examples
 
 **Consume a RabbitMQ queue and POST each message to an API, continuous:**

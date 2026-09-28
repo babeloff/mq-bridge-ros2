@@ -5,51 +5,148 @@ for **Python** and **Node.js**. The Tokio runtime, broker I/O, routing, and batc
 all stay in Rust; the binding is a thin layer for handlers and configuration. Behaviour
 and reliability match the Rust engine regardless of which language calls in.
 
-| Language | Package | Install |
-| :--- | :--- | :--- |
-| Rust | [`mq-bridge`](https://crates.io/crates/mq-bridge) | `cargo add mq-bridge` |
-| Python | [`mq-bridge-py`](https://pypi.org/project/mq-bridge-py/) | `pip install mq-bridge-py` |
-| Node.js | [`mq-bridge`](https://www.npmjs.com/package/mq-bridge) | `npm install mq-bridge` |
+This page picks up where the [library quick start](../getting-started/library-quick-start.md)
+ends (install lines are there). The exact constructor and type names are in the
+[Language bindings API](../reference/bindings.md).
 
-## The config-first workflow
+## Design the route as config
 
-The natural way to embed the library is to **design the route as config**, then load
-that exact config from your code. Design and test a route in the desktop UI (or hand-write
-the YAML), export the JSON/YAML, and load it — the running route behaves identically to
-the `--config` CLI form.
+The natural way to embed the library is to **design the route as config**, then load that
+exact config from your code: hand-write the YAML, or build and test the route in the
+[desktop UI](../getting-started/desktop-ui.md) and export it. The running route behaves
+identically to the `mqb --config` form, and every field in the
+[connector pages](../connectors/README.md) and the
+[middleware reference](../engine/reference.md) applies unchanged.
 
-Constructor names are kept aligned across languages (Python `snake_case`, Node
-`camelCase`):
+```yaml
+# routes.yaml
+routes:
+  orders:
+    input:
+      kafka: { url: "localhost:9092", topic: "orders", group_id: "orders-service" }
+    output:
+      middlewares:
+        - retry: { max_attempts: 5 }
+      mongodb: { url: "mongodb://localhost:27017", database: "shop", collection: "orders" }
+```
 
-| Purpose | Python | Node.js |
-|---|---|---|
-| Load a route from a YAML/JSON **file** | `Route.from_file` | `Route.fromFile` |
-| Load from an in-memory YAML/JSON **string** | `Route.from_str` | `Route.fromStr` |
-| Load from a parsed **dict / JS object** | `Route.from_config` | `Route.fromConfig` |
-| Build a publisher endpoint | the matching `Publisher.*` | the matching `Publisher.*` |
+## Handlers
 
-The `name` argument is optional: pass it to select one entry from a
-`routes:`/`publishers:` document, or omit it to treat the config as a single bare
-route/endpoint body.
+A handler runs your business logic between input and output. Return a message to publish it,
+return nothing to acknowledge and drop the input, or raise/throw to fail it (retryable or not).
+
+**Python** — handlers are synchronous; `run()` blocks, `start()` returns:
+
+```python
+from mq_bridge import Route, NonRetryableError
+
+def handle(message):
+    order = message.json()
+    if order.get("amount", 0) <= 0:
+        raise NonRetryableError("invalid amount")
+    return message.with_json({**order, "checked": True})
+
+route = Route.from_file("routes.yaml", "orders").with_handler(handle)
+route.start()   # or route.run() to block, or `with route:` to scope it
+```
+
+**Node.js**
+
+```js
+import { Message, Route } from "mq-bridge";
+
+const route = Route.fromFile("routes.yaml", "orders");
+route.withHandler(async (message) => {
+  const order = message.json();
+  return Message.fromJson({ ...order, checked: true });
+});
+route.start();
+```
+
+**Typed dispatch** — `add_handler` / `addHandler` routes on the message's `kind` metadata field
+and hands you decoded JSON:
+
+```python
+route.add_handler("order.created", lambda order: {"seen": order["order_id"]})
+```
+
+## Publishing into a route
+
+A `Publisher` sends to any endpoint — for example the route's input, to feed it from your own
+code:
+
+```python
+from mq_bridge import Publisher
+
+publisher = Publisher.from_config({"kafka": {"url": "localhost:9092", "topic": "orders"}})
+publisher.send_json({"order_id": 42}, {"kind": "order.created"})
+```
+
+Node.js has the same shape with `Publisher.fromConfig(...)` and `await publisher.sendJson(...)`.
 
 ## Rust
 
-The Rust crate exposes the full engine. The main types:
+The Rust crate exposes the full engine: `Route`, `Endpoint`, `Publisher`, the handler types, and
+the `MessageConsumer` / `MessagePublisher` traits. A config file loads into
+`mq_bridge::models::Config` (a map of route name → `Route`), or build routes in code:
 
-- `Route::new(input, output)` — a pipeline from one endpoint to one endpoint, with
-  `.with_batch_size(n)`, `.with_handler(h)`, `.add_handler(kind, f)`, `.deploy(name)` /
-  `.run()`.
-- `Endpoint` — protocol adapters (`Endpoint::new_memory`, `Endpoint::null`, …) plus the
-  serde-configured variants.
-- `Publisher::new(endpoint)` — publish into a route's input or any endpoint.
-- Handlers: `CommandHandler` (1-to-1 / 1-to-0), `EventHandler` (terminal 1-to-N), and
-  `TypeHandler` (dispatches on the `kind` metadata field, deserializing payloads).
-- `CanonicalMessage` — the unified message type all handlers work with; `msg!(&value,
-  "kind")` builds one with a `kind`.
+```rust
+use mq_bridge::{models::Endpoint, CanonicalMessage, Handled, Route};
 
-The `MessageConsumer` and `MessagePublisher` traits (in `mq_bridge::traits`) are the
-core abstractions. See the [Rust docs on docs.rs](https://docs.rs/mq-bridge) for the
-full API.
+let handler = |mut msg: CanonicalMessage| async move {
+    msg.set_payload_str(format!("handled {}", msg.get_payload_str()));
+    Ok(Handled::Publish(msg))
+};
+let route = Route::new(Endpoint::new_memory("in", 200), Endpoint::new_memory("out", 200))
+    .with_handler(handler);
+route.deploy("my_route").await?;
+```
+
+### Typed handlers and sending commands
+
+`TypeHandler` picks a handler by the message's `kind` metadata field and deserializes the
+payload into your type:
+
+```rust
+use mq_bridge::type_handler::TypeHandler;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct CreateUser { id: u32, username: String }
+
+let typed_handler = TypeHandler::new()
+    .add("create_user", |cmd: CreateUser| async move {
+        println!("create_user {} {}", cmd.id, cmd.username);
+        // () maps to Handled::Ack
+    });
+let route = Route::new(input, output).with_handler(typed_handler);
+
+// Publish into the route's input; msg! sets the `kind` field.
+let input_publisher = Publisher::new(route.input.clone()).await?;
+input_publisher.send(msg!(&CreateUser { id: 1, username: "test".into() }, "create_user")).await?;
+```
+
+### CQRS-style flows
+
+Routes and typed handlers can act as a command bus and an event bus without becoming a domain
+framework. A command route handles the write side and emits an event; downstream routes
+subscribe to those events to update read models:
+
+```rust
+// Write side: handle the command, emit an event
+let command_bus = TypeHandler::new()
+    .add("submit_order", |cmd: SubmitOrder| async move {
+        let evt = OrderSubmitted { id: cmd.id };
+        Ok(Handled::Publish(msg!(evt, "order_submitted")))
+    });
+
+// Read side: project the event
+let projection = TypeHandler::new()
+    .add("order_submitted", |evt: OrderSubmitted| async move {
+        // update read database / cache
+        Ok(())
+    });
+```
 
 ## See also
 

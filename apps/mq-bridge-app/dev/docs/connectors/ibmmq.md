@@ -15,6 +15,20 @@ ibmmq://host(port)?queue_manager=<QM>&channel=<CHANNEL>&queue=<QUEUE>
 (`host1(1414),host2(1414)`). `queue_manager` and `channel` (the SVRCONN
 channel) are always required; supply `queue` **or** `topic`.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `ibmmq:`.
+
+```yaml
+input:
+  ibmmq:
+    url: "localhost(1414)"
+    queue_manager: "QM1"
+    channel: "DEV.APP.SVRCONN"
+    queue: "DEV.QUEUE.1"
+```
+
 ## Examples
 
 **Drain a queue into a file, one-shot:**

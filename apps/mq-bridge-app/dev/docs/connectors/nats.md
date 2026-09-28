@@ -15,6 +15,18 @@ require `stream` (the JetStream stream name), even with `no_jetstream=true`
 (validated but unused there). If the bridge auto-creates a stream it is scoped
 to `{stream}.>`, so prefix your subject accordingly.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `nats:`.
+
+```yaml
+input:
+  nats: { url: "nats://localhost:4222", subject: "orders.new", stream: "orders" }
+```
+
+For a cluster, `url` takes a comma-separated list of servers.
+
 ## Examples
 
 **Load a JSONL file into a JetStream subject, one-shot:**

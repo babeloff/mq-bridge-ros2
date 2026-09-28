@@ -12,6 +12,16 @@ mqtt://[user:pass@]host[:port]?topic=<topic>
 handed to the MQTT client — the scheme only selects the endpoint kind on the
 CLI. MQTT topic wildcards (`+`, `#`) are supported on the source side.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `mqtt:`.
+
+```yaml
+input:
+  mqtt: { url: "mqtt://localhost:1883", topic: "sensors/+/temperature" }
+```
+
 ## Examples
 
 **Subscribe to a wildcard topic and forward to Kafka, continuous:**

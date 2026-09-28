@@ -12,6 +12,20 @@ file:///absolute/path/to/file?format=<normal|json|text|raw|csv>
 The path comes from the URI path itself (`file:///...`), not a query param.
 `format` defaults to `normal` (the full message serialized as JSON).
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `file:`.
+
+```yaml
+input:
+  file: { path: "/data/in.csv", format: csv }
+output:
+  file: { path: "/data/out.jsonl", format: raw }
+```
+
+The URL path becomes the `path` field.
+
 ## Examples
 
 **Load a CSV file into MongoDB, one-shot (first row = header):**

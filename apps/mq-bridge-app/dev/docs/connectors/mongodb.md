@@ -10,6 +10,16 @@ path the way this connector reads them (unlike PostgreSQL).
 mongodb://[user:pass@]host[:port]?database=<db>&collection=<name>
 ```
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `mongodb:`.
+
+```yaml
+output:
+  mongodb: { url: "mongodb://localhost:27017", database: "app", collection: "orders" }
+```
+
 ## Examples
 
 **Load a CSV file into a collection, one-shot:**

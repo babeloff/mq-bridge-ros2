@@ -10,10 +10,9 @@ input:  { kafka:   { url: "localhost:9092", topic: "orders" } }
 output: { mongodb: { url: "mongodb://localhost:27017", database: "app", collection: "orders" } }
 ```
 
-This page catalogs the transport endpoints and their behaviour. For per-connector query
-parameters used by `copy` (name, type, default, required, description), see the generated
-[URL parameter reference](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app/dev/docs/reference)
-and the hand-written [connector pages](https://github.com/marcomq/mq-bridge/tree/main/apps/mq-bridge-app/dev/docs/connectors).
+This page catalogs the transport endpoints and their behaviour, for library configs and the
+CLI alike. Each connector has its own [connector page](../connectors/README.md) with YAML and
+URL examples, plus a generated parameter table (name, type, default, description).
 Structural endpoints (`ref`, `fanout`, `switch`, `response`, …) are documented separately in
 [Structural endpoints](../engine/reference.md).
 
@@ -23,6 +22,21 @@ Kafka, NATS, AMQP (RabbitMQ), MQTT, MongoDB, **Postgres CDC** (logical replicati
 PostgreSQL / MySQL / SQLite / MariaDB (SQLx), ClickHouse, HTTP, WebSocket, gRPC, ZeroMQ,
 Redis Streams, AWS SQS/SNS, cloud object storage (S3 / GCS / Azure), IBM MQ, files, and
 in-memory channels (`memory`, in-process and cross-process IPC).
+
+### Plugin endpoints
+
+These live in their own repositories and load as [native plugins](../extending/plugins.md), so
+the core library carries none of their dependencies:
+
+| Plugin | What it does | In `mqb` |
+| :--- | :--- | :--- |
+| **[Pulsar](https://github.com/marcomq/mq-bridge-pulsar)** | Apache Pulsar input and output | Built in |
+| **[Meilisearch](https://github.com/marcomq/mq-bridge-meilisearch)** | Document sink into a search index; index scan as input | Built in |
+| **[Connect](https://github.com/marcomq/mq-bridge-connect)** | Redpanda Connect's 51 inputs, 63 outputs (`connect+mqtt://…`) and 68 processors; per-message processors also run as middleware | Separate install (size) |
+
+Outside `mqb` (Python, Node.js, your own Rust host), or for Connect, install the plugin with
+`brew install marcomq/tap/<repo>` or `conda install -c marcomq <repo>`; it is then discovered
+automatically.
 
 ## Consumer vs. subscriber, and nack support
 
@@ -164,6 +178,24 @@ writes payloads verbatim (bare documents, no wrapper). `csv` is supported as a s
 file sinks). The file endpoints also carry their own `compression` and `encryption` fields —
 see the [Compression](../cookbook/compression.md) and
 [Encryption at rest](../cookbook/encryption.md) recipes.
+
+A source on `normal`/`json`/`text` expects that same wrapper. A line that is valid JSON but not
+the wrapper becomes the whole payload (its own `metadata` is discarded, with a warning); use
+`format: raw` for plain JSON lines.
+
+In the wrapper, a UTF-8 payload is a plain JSON string under `payload`; a binary one
+(compressed, encrypted, Protobuf, …) is base64-encoded under `payload_base64`. The two are
+mutually exclusive, as in the
+[CloudEvents JSON format](https://github.com/cloudevents/spec/blob/main/cloudevents/formats/json-format.md):
+
+```json
+{"message_id":"019f9b12-d786-7ebe-a7ec-a1aa71bc47ae","payload":"{\"order_id\":7}"}
+{"message_id":"019f9b12-d78a-7c01-b0f4-2f0f4d6a1c33","payload_base64":"KLUv/SBOAQAA"}
+```
+
+Sources still read the older byte-array form (`"payload":[123,34,…]`). A **binary** record
+written by this version is not readable by an older mq-bridge; text records are compatible in
+both directions.
 
 ## Memory endpoint and IPC
 
