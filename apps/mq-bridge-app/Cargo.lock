@@ -4831,9 +4831,9 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-meilisearch"
-version = "0.1.1"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a992841d378d585e400ba6b55e8a506cdd512c6fa631a24c9c6fba8954bddd01"
+checksum = "f56e222d933c8d2a359778c2eb3297f79ace6bc0ad0eb0c630da14a0a8884722"
 dependencies = [
  "anyhow",
  "async-trait",
