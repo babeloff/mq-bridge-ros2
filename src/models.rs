@@ -2045,8 +2045,9 @@ pub struct GrpcConfig {
     /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
-    /// If `true`, start an embedded tonic gRPC server that accepts incoming `Publish` /
-    /// `PublishBatch` RPCs. If `false` (the default), connect to a remote server as a client.
+    /// If `true`, start an embedded tonic gRPC server that accepts `Publish` / `PublishBatch`
+    /// RPCs, plus one descriptor-defined unary method when `method_name` is set. If `false`
+    /// (the default), connect to a remote server as a client.
     #[serde(default)]
     pub server_mode: bool,
     /// HTTP/2 stream-level initial window size in bytes. Applies in both modes.
@@ -2070,7 +2071,7 @@ pub struct GrpcConfig {
     /// Maximum size of an encoded outgoing message in bytes. Default unlimited.
     #[serde(default)]
     pub max_encoding_message_size: Option<usize>,
-    /// Compiled protobuf FileDescriptorSet for dynamic client mode.
+    /// Compiled protobuf FileDescriptorSet for dynamic calls or a served method.
     #[serde(default)]
     pub descriptor_set_path: Option<String>,
     /// Compiled protobuf FileDescriptorSet bytes for embedded callers. Takes precedence
@@ -2080,10 +2081,10 @@ pub struct GrpcConfig {
     /// Discover descriptors from the remote gRPC server reflection v1 service.
     #[serde(default)]
     pub reflection: bool,
-    /// Fully-qualified protobuf service name for dynamic client mode.
+    /// Fully-qualified protobuf service name for dynamic calls or a served method.
     #[serde(default)]
     pub service_name: Option<String>,
-    /// RPC method name for dynamic client mode.
+    /// RPC method name for dynamic calls or a served unary method.
     #[serde(default)]
     pub method_name: Option<String>,
     /// JSON request mapped to the dynamic protobuf input message.

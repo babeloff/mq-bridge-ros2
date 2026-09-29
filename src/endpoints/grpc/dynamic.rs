@@ -188,6 +188,14 @@ async fn resolve_dynamic_method(
         );
     };
 
+    Ok((channel, find_method(&pool, service_name, method_name)?))
+}
+
+pub(super) fn find_method(
+    pool: &DescriptorPool,
+    service_name: &str,
+    method_name: &str,
+) -> Result<prost_reflect::MethodDescriptor> {
     let service = pool.get_service_by_name(service_name).ok_or_else(|| {
         anyhow::anyhow!(
             "gRPC service '{}' not found in the discovered descriptors",
@@ -196,15 +204,13 @@ async fn resolve_dynamic_method(
     })?;
     let method = service
         .methods()
-        .find(|method| method.name() == method_name)
-        .ok_or_else(|| {
-            anyhow::anyhow!("gRPC method '{}.{}' not found", service_name, method_name)
-        })?;
-    Ok((channel, method))
+        .find(|method| method.name() == method_name);
+    method
+        .ok_or_else(|| anyhow::anyhow!("gRPC method '{}.{}' not found", service_name, method_name))
 }
 
 /// Names an RPC's streaming shape for capability errors.
-fn method_shape(method: &prost_reflect::MethodDescriptor) -> &'static str {
+pub(super) fn method_shape(method: &prost_reflect::MethodDescriptor) -> &'static str {
     match (method.is_client_streaming(), method.is_server_streaming()) {
         (true, true) => "bidirectional-streaming",
         (true, false) => "client-streaming",

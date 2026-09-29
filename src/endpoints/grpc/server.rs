@@ -4,15 +4,18 @@
 //  git clone https://github.com/marcomq/mq-bridge
 
 //! Embedded Bridge gRPC server (`server_mode`): hosts the `Bridge` service plus
-//! reflection, and feeds published messages into the route as a consumer.
+//! reflection, and optionally one descriptor-defined unary method per route, and feeds
+//! the requests into the route as a consumer.
 
-use super::dynamic::reject_unsupported_call_metadata;
+use super::dynamic::{find_method, method_shape, reject_unsupported_call_metadata};
 use super::proto;
-use super::{bridge_to_canonical, canonical_to_bridge, parse_addr};
+use super::{bridge_to_canonical, canonical_to_bridge, parse_addr, RawProtobufCodec};
 use crate::models::GrpcConfig;
 use crate::traits::{ConsumerError, MessageConsumer, MessageDisposition};
 use anyhow::Result;
 use async_trait::async_trait;
+use prost::Message as _;
+use prost_reflect::{DescriptorPool, DynamicMessage, MethodDescriptor};
 use proto::{BridgeMessage, SubscribeRequest};
 use std::any::Any;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -77,6 +80,8 @@ pub(super) struct ServerModeConsumer {
     pub(super) drain_start: usize,
     /// Drain mode: only then does an idle first-message poll time out into an empty batch.
     pub(super) exit_on_empty: bool,
+    /// Path of the descriptor-defined method this route serves, if any.
+    pub(super) served_path: Option<String>,
 }
 
 pub(super) const REFLECTION_V1_PREFIX: &str = "/grpc.reflection.v1.ServerReflection/";
@@ -130,6 +135,142 @@ where
     }
 }
 
+/// Serves the descriptor-defined unary methods registered on the router and passes every
+/// other path to `fallback`.
+#[derive(Clone)]
+pub(super) struct DynamicMethodRouter<F> {
+    pub(super) fallback: F,
+    pub(super) router: Arc<SharedGrpcRouter>,
+    pub(super) commit_timeout: Option<Duration>,
+    pub(super) max_decoding_message_size: Option<usize>,
+}
+
+type GrpcResponse = tonic::codegen::http::Response<tonic::body::Body>;
+
+impl<F, B> tonic::codegen::Service<tonic::codegen::http::Request<B>> for DynamicMethodRouter<F>
+where
+    F: tonic::codegen::Service<
+        tonic::codegen::http::Request<B>,
+        Response = GrpcResponse,
+        Error = std::convert::Infallible,
+        Future = tonic::codegen::BoxFuture<GrpcResponse, std::convert::Infallible>,
+    >,
+    B: tonic::codegen::Body + Send + 'static,
+    B::Error: Into<tonic::codegen::StdError> + Send + 'static,
+{
+    type Response = GrpcResponse;
+    type Error = std::convert::Infallible;
+    type Future = F::Future;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        self.fallback.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: tonic::codegen::http::Request<B>) -> Self::Future {
+        let Some((path, method)) = self.router.served_method(request.uri().path()) else {
+            return self.fallback.call(request);
+        };
+        let service = DynamicUnaryService {
+            router: self.router.clone(),
+            path,
+            method,
+            commit_timeout: self.commit_timeout,
+        };
+        let max_decoding = self.max_decoding_message_size;
+        Box::pin(async move {
+            let mut grpc = tonic::server::Grpc::new(RawProtobufCodec)
+                .apply_max_message_size_config(max_decoding, None);
+            Ok(grpc.unary(service, request).await)
+        })
+    }
+}
+
+/// One call to a descriptor-defined unary method: the request reaches the route as its
+/// proto3 JSON mapping, and the route's reply is encoded back as the output message.
+struct DynamicUnaryService {
+    router: Arc<SharedGrpcRouter>,
+    path: String,
+    method: MethodDescriptor,
+    commit_timeout: Option<Duration>,
+}
+
+impl tonic::server::UnaryService<Vec<u8>> for DynamicUnaryService {
+    type Response = Vec<u8>;
+    type Future = tonic::codegen::BoxFuture<Response<Vec<u8>>, Status>;
+
+    fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
+        let router = self.router.clone();
+        let path = std::mem::take(&mut self.path);
+        let method = self.method.clone();
+        let commit_timeout = self.commit_timeout;
+        Box::pin(async move {
+            let input = DynamicMessage::decode(method.input(), request.get_ref().as_slice())
+                .map_err(|e| Status::invalid_argument(format!("invalid request: {e}")))?;
+            let payload = serde_json::to_vec(&input)
+                .map_err(|e| Status::internal(format!("request to JSON failed: {e}")))?;
+            let message = BridgeMessage {
+                payload,
+                id: String::new(),
+                metadata: HashMap::from([("mq_bridge.topic".to_string(), path)]),
+            };
+            let receipt = router
+                .dispatch(message)
+                .await
+                .map_err(|e| Status::unavailable(e.to_string()))?;
+            match await_disposition(receipt, commit_timeout).await {
+                MessageDisposition::Reply(reply) => {
+                    encode_reply(&method, &reply.payload).map(Response::new)
+                }
+                // No reply from the route: answer with the output type's default message.
+                MessageDisposition::Ack => Ok(Response::new(Vec::new())),
+                MessageDisposition::Nack => Err(Status::internal("the route failed the request")),
+            }
+        })
+    }
+}
+
+fn encode_reply(method: &MethodDescriptor, payload: &[u8]) -> Result<Vec<u8>, Status> {
+    let mut deserializer = serde_json::Deserializer::from_slice(payload);
+    let reply = DynamicMessage::deserialize(method.output(), &mut deserializer).map_err(|e| {
+        Status::internal(format!(
+            "reply does not match '{}': {e}",
+            method.output().full_name()
+        ))
+    })?;
+    Ok(reply.encode_to_vec())
+}
+
+/// Loads the unary method a `server_mode` route serves, when `service_name`/`method_name`
+/// name one. Descriptors come from `descriptor_set_bytes` or `descriptor_set_path`.
+async fn served_method(config: &GrpcConfig) -> Result<Option<MethodDescriptor>> {
+    let (service_name, method_name) = match (&config.service_name, &config.method_name) {
+        (None, None) => return Ok(None),
+        (Some(service), Some(method)) => (service, method),
+        _ => anyhow::bail!("gRPC server_mode needs both service_name and method_name"),
+    };
+    let pool = if let Some(bytes) = &config.descriptor_set_bytes {
+        DescriptorPool::decode(bytes.as_slice())?
+    } else if let Some(path) = &config.descriptor_set_path {
+        DescriptorPool::decode(tokio::fs::read(path).await?.as_slice())?
+    } else {
+        anyhow::bail!(
+            "gRPC server_mode with a method needs descriptor_set_bytes or descriptor_set_path"
+        );
+    };
+    let method = find_method(&pool, service_name, method_name)?;
+    if method.is_client_streaming() || method.is_server_streaming() {
+        anyhow::bail!(
+            "gRPC server_mode serves unary methods only; '{}' is {}",
+            method.full_name(),
+            method_shape(&method)
+        );
+    }
+    Ok(Some(method))
+}
+
 /// Tonic service implementation that fans incoming messages into a subscriber
 /// broadcast stream and a reliable internal queue for the server-mode consumer.
 pub(super) struct BridgeService {
@@ -165,6 +306,8 @@ pub(super) struct SharedGrpcRouter {
     // RwLock (not Mutex): `dispatch` only reads the table, so concurrent publishes
     // no longer serialize against each other on the lock.
     pub(super) routes: RwLock<HashMap<u64, SharedGrpcRoute>>,
+    /// Descriptor-defined unary methods, keyed by request path.
+    methods: RwLock<HashMap<String, MethodDescriptor>>,
 }
 
 #[derive(Clone)]
@@ -368,7 +511,15 @@ impl SharedGrpcRouter {
     pub(super) fn new() -> Self {
         Self {
             routes: RwLock::new(HashMap::new()),
+            methods: RwLock::new(HashMap::new()),
         }
+    }
+
+    fn served_method(&self, path: &str) -> Option<(String, MethodDescriptor)> {
+        let methods = self.methods.read().ok()?;
+        methods
+            .get_key_value(path)
+            .map(|(path, method)| (path.clone(), method.clone()))
     }
 }
 
@@ -703,7 +854,14 @@ impl ServerModeConsumer {
             http2_keepalive_timeout_ms: config.http2_keepalive_timeout_ms,
             max_decoding_message_size: config.max_decoding_message_size,
         };
-        let topic = normalize_grpc_topic(config.topic.as_deref());
+        let method = served_method(config).await?;
+        let served_path = method
+            .as_ref()
+            .map(|m| format!("/{}/{}", m.parent_service().full_name(), m.name()));
+        let topic = match &served_path {
+            Some(path) => path.clone(),
+            None => normalize_grpc_topic(config.topic.as_deref()),
+        };
         // Total queue depth stays ~16k, split across shards to cut producer contention.
         let shard_count = std::thread::available_parallelism()
             .map(|n| n.get())
@@ -720,6 +878,14 @@ impl ServerModeConsumer {
         let route_id = GRPC_ROUTE_ID.fetch_add(1, Ordering::Relaxed);
         let shared_server =
             get_or_create_shared_grpc_server(config, &key, route_id, topic, txs).await?;
+        if let (Some(path), Some(method)) = (&served_path, method) {
+            shared_server
+                .router
+                .methods
+                .write()
+                .map_err(|_| anyhow::anyhow!("gRPC method registry lock poisoned"))?
+                .insert(path.clone(), method);
+        }
 
         Ok(Self {
             route_id,
@@ -728,6 +894,7 @@ impl ServerModeConsumer {
             rxs,
             drain_start: 0,
             exit_on_empty: false,
+            served_path,
         })
     }
 
@@ -835,14 +1002,22 @@ async fn get_or_create_shared_grpc_server(
         tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
     };
-    let services = PrefixRouter {
+    let services = DynamicMethodRouter {
         fallback: PrefixRouter {
-            fallback: service,
-            prefix: REFLECTION_V1_PREFIX,
-            matched: configure_reflection().build_v1()?,
+            fallback: PrefixRouter {
+                fallback: service,
+                prefix: REFLECTION_V1_PREFIX,
+                matched: configure_reflection().build_v1()?,
+            },
+            prefix: REFLECTION_V1ALPHA_PREFIX,
+            matched: configure_reflection().build_v1alpha()?,
         },
-        prefix: REFLECTION_V1ALPHA_PREFIX,
-        matched: configure_reflection().build_v1alpha()?,
+        router: router.clone(),
+        commit_timeout: config
+            .request_timeout_ms
+            .or(config.timeout_ms)
+            .map(Duration::from_millis),
+        max_decoding_message_size: config.max_decoding_message_size,
     };
     let handle = tokio::spawn(async move {
         info!(server_addr = %local, "gRPC embedded server starting to serve");
@@ -888,6 +1063,11 @@ impl Drop for ServerModeConsumer {
         let Ok(mut registry) = grpc_server_registry().lock() else {
             return;
         };
+        if let (Some(path), Ok(mut methods)) =
+            (&self.served_path, self.shared_server.router.methods.write())
+        {
+            methods.remove(path);
+        }
         let should_shutdown = self.shared_server.router.unregister_route(self.route_id);
         if !should_shutdown {
             return;
