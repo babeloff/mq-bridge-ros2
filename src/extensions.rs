@@ -95,6 +95,21 @@ pub fn get_middleware_factory(name: &str) -> Option<Arc<dyn CustomMiddlewareFact
     map.get(name).cloned()
 }
 
+/// Every registered middleware, keyed by the name routes address it as, with
+/// the configuration schema it declares (`None` when it declares none).
+///
+/// Unlike [`endpoint_config_schemas`], undeclared middlewares are listed too, so
+/// a host can still offer them. Sorted, for the same reason.
+pub fn middleware_config_schemas() -> BTreeMap<String, Option<serde_json::Value>> {
+    let registry = CUSTOM_MIDDLEWARE_REGISTRY.get_or_init(|| RwLock::new(HashMap::new()));
+    let Ok(map) = registry.read() else {
+        return BTreeMap::new();
+    };
+    map.iter()
+        .map(|(name, factory)| (name.clone(), factory.config_schema()))
+        .collect()
+}
+
 /// Removes the middleware factory registered under `name`, freeing the name for
 /// re-registration and dropping the registry's reference to the factory.
 ///
@@ -146,6 +161,32 @@ mod tests {
 
         assert!(error.to_string().contains("already registered"));
         assert!(Arc::ptr_eq(&first, &get_middleware_factory(name).unwrap()));
+    }
+
+    #[test]
+    fn middleware_config_schemas_lists_declared_and_undeclared_middlewares() {
+        #[derive(Debug)]
+        struct Declaring;
+
+        impl CustomMiddlewareFactory for Declaring {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({ "type": "object" }))
+            }
+        }
+
+        let declaring = "extensions-test-schema-declaring-middleware";
+        let silent = "extensions-test-schema-silent-middleware";
+        register_middleware_factory(declaring, Arc::new(Declaring)).unwrap();
+        register_middleware_factory(silent, Arc::new(MiddlewareFactory)).unwrap();
+        let schemas = middleware_config_schemas();
+        unregister_middleware_factory(declaring);
+        unregister_middleware_factory(silent);
+
+        assert_eq!(
+            schemas.get(declaring),
+            Some(&Some(serde_json::json!({ "type": "object" })))
+        );
+        assert_eq!(schemas.get(silent), Some(&None));
     }
 
     #[test]

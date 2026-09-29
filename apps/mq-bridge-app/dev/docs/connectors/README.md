@@ -1,9 +1,46 @@
 # Connectors
 
-Hand-written per-connector docs: purpose, URL format, and practical
-examples. For the full, auto-generated list of every recognised query
-parameter (type, default, required, description), see the matching page
-under [`../reference/`](../reference/).
+One page per connector: purpose, practical examples, and the same settings in both forms —
+as a `mqb copy` **URL** and as a **YAML** endpoint for config files and the library. The
+nested *Parameters* page under each connector lists every field (type, default, description),
+generated from the same schema the engine uses.
+
+## From URL to config
+
+A URL's query parameters are config fields of the same name. The scheme picks the config
+key, and the part before the query string becomes `url` (or `path`):
+
+| URL scheme | Config key | `url` / `path` in config |
+| :--- | :--- | :--- |
+| `kafka://host:9092` | `kafka` | `url: "host:9092"` (bare host list) |
+| `nats://host:4222` | `nats` | `url: "nats://host:4222"` |
+| `amqp://`, `rabbitmq://` | `amqp` | `url: "amqp://host:5672/%2f"` |
+| `mqtt://`, `mqtts://` | `mqtt` | `url: "mqtt://host:1883"` |
+| `redis://`, `rediss://` | `redis_streams` | `url: "redis://host:6379"` |
+| `postgres://`, `mysql://`, `sqlite://` | `sqlx` | the connection string as `url` |
+| `postgres-cdc://`, `pgcdc://` | `postgres_cdc` | `url: "postgres://…"` |
+| `mongodb://` | `mongodb` | `url: "mongodb://host:27017"` |
+| `clickhouse://`, `clickhouses://` | `clickhouse` | `url: "http://host:8123"` / `https://` |
+| `http://`, `https://` | `http` | unchanged |
+| `ws://`, `wss://` | `websocket` | unchanged |
+| `grpc://`, `grpcs://` | `grpc` | `url: "http://host:50051"` / `https://` |
+| `zeromq://`, `zmq://` | `zeromq` | `url: "tcp://host:5555"` |
+| `ibmmq://host:1414` | `ibmmq` | `url: "host(1414)"` |
+| `aws://` | `aws` | no `url`; `queue_url` / `topic_arn` |
+| `file:///path` | `file` | `path: "/path"` |
+| `dir-spool:///path` | `dir_spool` | `path: "/path"` |
+| `s3://`, `gs://`, `az://`, `local-store://` | `object_store` | `url: "s3://bucket/prefix"` (`local-store://` → `file://`) |
+
+So `kafka://localhost:9092?topic=orders&group_id=sync` becomes:
+
+```yaml
+kafka: { url: "localhost:9092", topic: "orders", group_id: "sync" }
+```
+
+Transport behaviour shared by all connectors — consumer vs. subscriber, nack support, CDC vs.
+polling, file formats, plugins — is on [Overview & capabilities](../reference/endpoints.md).
+
+## All connectors
 
 - [PostgreSQL / MySQL / MariaDB / SQLite](./postgres.md) (including [PostgreSQL CDC](./postgres.md#postgresql-cdc))
 - [ClickHouse](./clickhouse.md)
@@ -22,7 +59,3 @@ under [`../reference/`](../reference/).
 - [File (CSV / JSON / JSONL)](./file.md)
 - [Directory spool](./dir-spool.md)
 - [Object storage (local / cloud)](./object-store.md)
-
-Every connector recognised by `mqb copy` now has a hand-written page.
-For the full, auto-generated parameter tables see the matching page under
-[`../reference/`](../reference/).

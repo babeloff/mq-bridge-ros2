@@ -52,7 +52,7 @@ Test connections and dial in a route in the Postman-inspired UI, export the JSON
 | --- | --- | --- |
 | **Desktop app (UI)** | The visual workbench — build/test routes, run request/response traffic, inspect message history | `brew install --cask marcomq/tap/mq-bridge` |
 | **CLI / server** | Headless binary: a one-line `copy`, a drain-then-exit batch job, or a long-lived bridge (can also serve the same UI in a browser) | `brew install marcomq/tap/mq-bridge-app` |
-| **Library** | The engine embedded in your own code — native **Rust**, **Python**, or **Node.js** bindings | `cargo add mq-bridge` · `pip install mq-bridge-py` · `npm install mq-bridge` |
+| **Library** | The engine embedded in your own code — native **Rust**, **Python**, or **Node.js** bindings | `cargo add mq-bridge` · `pip install mq-bridge` · `npm install mq-bridge` |
 
 ![mq-bridge UI - publishers](dev/images/Screen1.jpg)
 

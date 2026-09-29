@@ -5,6 +5,7 @@
 
 use crate::extensions::get_middleware_factory;
 use crate::models::{Endpoint, Middleware};
+use crate::traits::CustomMiddlewareFactory;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
 use std::sync::Arc;
@@ -25,8 +26,11 @@ pub(crate) mod encryption;
 pub(crate) mod filter;
 mod id;
 mod limiter;
+mod lookup;
 #[cfg(feature = "metrics")]
 mod metrics;
+#[cfg(feature = "otel")]
+mod otel;
 mod pack;
 mod random_panic;
 mod raw_json;
@@ -58,6 +62,45 @@ use timeout::TimeoutPublisher;
 use transform::{TransformConsumer, TransformPublisher};
 use weak_join::WeakJoinConsumer;
 
+/// Leaves the consumer unwrapped unless the host installed a tracer provider, so an unused
+/// `otel` middleware costs nothing per message.
+fn otel_consumer(
+    consumer: Box<dyn MessageConsumer>,
+    route_name: &str,
+) -> Result<Box<dyn MessageConsumer>> {
+    #[cfg(feature = "otel")]
+    if otel::tracer_installed() {
+        return Ok(Box::new(otel::OtelConsumer::new(consumer, route_name)));
+    }
+    otel_inactive(route_name)?;
+    Ok(consumer)
+}
+
+fn otel_publisher(
+    publisher: Box<dyn MessagePublisher>,
+    route_name: &str,
+) -> Result<Box<dyn MessagePublisher>> {
+    #[cfg(feature = "otel")]
+    if otel::tracer_installed() {
+        return Ok(Box::new(otel::OtelPublisher::new(publisher, route_name)));
+    }
+    otel_inactive(route_name)?;
+    Ok(publisher)
+}
+
+fn otel_inactive(route_name: &str) -> Result<()> {
+    if cfg!(feature = "otel") {
+        tracing::debug!(
+            "[middleware:{route_name}] no OpenTelemetry tracer installed; otel middleware inactive"
+        );
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "[middleware:{route_name}] the otel middleware requires the 'otel' feature"
+        ))
+    }
+}
+
 /// Wraps a `MessageConsumer` with the middlewares specified in the endpoint configuration.
 ///
 /// Middlewares are applied in reverse order of the configuration list.
@@ -78,6 +121,7 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsConsumer::new(consumer, cfg, route_name, "input"))
             }
+            Middleware::Otel(_) => otel_consumer(consumer, route_name)?,
             Middleware::Dlq(_) => {
                 tracing::warn!("Dlq middleware is ignored on consumers (input endpoints). It is currently publisher-only.");
                 consumer
@@ -104,6 +148,9 @@ pub async fn apply_middlewares_to_consumer(
                     "[middleware:{route_name}] `pack` is an output-only middleware. Put `pack` on the route's output endpoint and `unpack` on its input."
                 ))
             }
+            Middleware::Lookup(cfg) => {
+                Box::new(lookup::LookupConsumer::new(consumer, cfg, route_name).await?)
+            }
             Middleware::Timeout(_) => {
                 return Err(anyhow::anyhow!(
                     "[middleware:{route_name}] `timeout` bounds sends and is output-only. Move it to the route's output endpoint."
@@ -112,9 +159,7 @@ pub async fn apply_middlewares_to_consumer(
             #[cfg(feature = "filter")]
             Middleware::Filter(expression) => Box::new(FilterConsumer::new(consumer, expression)?),
             Middleware::Custom { name, config } => {
-                let factory = get_middleware_factory(name).ok_or_else(|| {
-                    anyhow::anyhow!("Custom middleware factory '{}' not found", name)
-                })?;
+                let factory = custom_middleware_factory(name)?;
                 factory.apply_consumer(consumer, route_name, config).await?
             }
             #[allow(unreachable_patterns)]
@@ -165,6 +210,10 @@ pub async fn apply_middlewares_to_publisher(
                 ))
             }
             Middleware::Dlq(cfg) => Box::new(DlqPublisher::new(publisher, cfg, route_name).await?),
+            Middleware::Otel(_) => otel_publisher(publisher, route_name)?,
+            Middleware::Lookup(cfg) => {
+                Box::new(lookup::LookupPublisher::new(publisher, cfg, route_name).await?)
+            }
             #[cfg(feature = "metrics")]
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsPublisher::new(publisher, cfg, route_name, "output"))
@@ -199,9 +248,7 @@ pub async fn apply_middlewares_to_publisher(
             #[cfg(feature = "filter")]
             Middleware::Filter(expression) => Box::new(FilterPublisher::new(publisher, expression)?),
             Middleware::Custom { name, config } => {
-                let factory = get_middleware_factory(name).ok_or_else(|| {
-                    anyhow::anyhow!("Custom middleware factory '{}' not found", name)
-                })?;
+                let factory = custom_middleware_factory(name)?;
                 factory
                     .apply_publisher(publisher, route_name, config)
                     .await?
@@ -216,6 +263,27 @@ pub async fn apply_middlewares_to_publisher(
         };
     }
     Ok(publisher.into())
+}
+
+/// Resolves a `custom` middleware name, loading an installed plugin that
+/// provides it when no factory is registered under the name yet.
+fn custom_middleware_factory(name: &str) -> Result<Arc<dyn CustomMiddlewareFactory>> {
+    if let Some(factory) = get_middleware_factory(name) {
+        return Ok(factory);
+    }
+    #[cfg(feature = "plugin")]
+    if crate::plugin::discover_middleware_plugin(name)?.is_some() {
+        if let Some(factory) = get_middleware_factory(name) {
+            return Ok(factory);
+        }
+    }
+    #[cfg(feature = "plugin")]
+    let hint = format!(": {}", crate::plugin::search_path_hint(name));
+    #[cfg(not(feature = "plugin"))]
+    let hint = String::new();
+    Err(anyhow::anyhow!(
+        "Custom middleware factory '{name}' not found{hint}"
+    ))
 }
 
 #[cfg(all(test, feature = "dedup"))]

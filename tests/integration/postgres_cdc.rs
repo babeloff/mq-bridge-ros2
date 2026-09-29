@@ -37,6 +37,7 @@ fn cfg(slot: &str) -> PostgresCdcConfig {
         checkpoint_store: None,
         status_interval_ms: 500,
         tls: Default::default(),
+        id_hash: Default::default(),
     }
 }
 
@@ -570,6 +571,104 @@ pub async fn test_postgres_cdc_restart_safety() {
             ids2.iter().all(|id| *id >= 51),
             "already-acked rows (<=50) must not be redelivered; got {ids2:?}"
         );
+    })
+    .await;
+}
+
+/// Issue #109: build one document per `books` change from `books` + `authors` + `book_stats`
+/// with `lookup` + `sqlx.lookup_query` (one batched `IN`, one per message), configured the way a user would in YAML.
+pub async fn test_postgres_cdc_lookup_join() {
+    setup_logging();
+    run_test_with_docker(COMPOSE, || async {
+        let slot = "mqb_join_slot";
+        let mut conn = connect_retry().await;
+        let _ = sqlx::query(
+            "SELECT pg_drop_replication_slot($1) FROM pg_replication_slots WHERE slot_name = $1",
+        )
+        .bind(slot)
+        .execute(&mut conn)
+        .await;
+        for stmt in [
+            "DROP PUBLICATION IF EXISTS mqb_join_pub",
+            "DROP TABLE IF EXISTS join_books, join_authors, join_book_stats",
+            "CREATE TABLE join_authors (id INT PRIMARY KEY, name TEXT)",
+            "CREATE TABLE join_book_stats (book_id INT PRIMARY KEY, rating NUMERIC(3,1), reads INT, updated_at TIMESTAMPTZ)",
+            "CREATE TABLE join_books (id INT PRIMARY KEY, title TEXT, author_id INT)",
+            "CREATE PUBLICATION mqb_join_pub FOR TABLE join_books",
+            "INSERT INTO join_authors VALUES (7, 'Herbert')",
+            "INSERT INTO join_book_stats VALUES (1, 4.5, 900, '2026-01-02 03:04:05+00')",
+        ] {
+            sqlx::query(stmt).execute(&mut conn).await.expect(stmt);
+        }
+
+        let route: mq_bridge::Route = serde_yaml_ng::from_str(&format!(
+            r#"
+input:
+  postgres_cdc:
+    url: "{URL}"
+    publication: mqb_join_pub
+    slot_name: {slot}
+output:
+  middlewares:
+    - lookup:
+        from:
+          sqlx:
+            url: "{URL}"
+            table: join_authors
+            lookup_query: "SELECT id, name FROM join_authors WHERE id IN (${{payload:author_id}}::int)"
+        into: author
+    - lookup:
+        from:
+          sqlx:
+            url: "{URL}"
+            table: join_book_stats
+            lookup_query: "SELECT rating::text AS rating, reads, updated_at::text AS updated_at FROM join_book_stats WHERE book_id = ${{payload:id}}::int"
+        into: stats
+  memory: {{ topic: join_out, capacity: 100 }}
+"#
+        ))
+        .expect("route yaml");
+        let output = mq_bridge::endpoints::memory::get_or_create_channel(
+            &mq_bridge::models::MemoryConfig::new("join_out", Some(100)),
+        );
+        let handle = route.run("cdc_lookup_join").await.expect("route start");
+
+        for stmt in [
+            "INSERT INTO join_books VALUES (1, 'Dune', 7)",
+            "INSERT INTO join_books VALUES (2, 'Orphan', 99)",
+            "DELETE FROM join_books WHERE id = 1",
+        ] {
+            sqlx::query(stmt).execute(&mut conn).await.expect(stmt);
+        }
+
+        let mut docs = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while docs.len() < 3 {
+            assert!(Instant::now() < deadline, "timed out waiting for joined documents");
+            for msg in output.drain_messages() {
+                let op = msg.metadata.get("postgres.operation").cloned();
+                let doc: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap();
+                println!("{op:?} {doc}");
+                docs.push((op.unwrap_or_default(), doc));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        handle.stop().await;
+
+        let (op, dune) = &docs[0];
+        assert_eq!(op, "insert");
+        assert_eq!(dune["title"], "Dune");
+        assert_eq!(dune["author"], serde_json::json!({"id": 7, "name": "Herbert"}));
+        assert_eq!(dune["stats"]["reads"], 900);
+        println!("stats as delivered: {}", dune["stats"]);
+
+        let (_, orphan) = &docs[1];
+        assert_eq!(orphan["author"], serde_json::Value::Null, "missing author → null");
+        assert_eq!(orphan["stats"], serde_json::Value::Null);
+
+        let (op, deleted) = &docs[2];
+        assert_eq!(op, "delete");
+        assert_eq!(deleted["id"], 1);
     })
     .await;
 }

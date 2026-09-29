@@ -16,6 +16,7 @@ Query parameters recognised as config fields for this connector. The object-type
 | `cursor_column` | string | no | — | (Consumer only) Read an existing table **non-destructively** and resumably, paging by this monotonic column (`SELECT … WHERE {cursor_column} > {last} ORDER BY {cursor_column} ASC LIMIT n`) and persisting the last read value under `cursor_id`. |
 | `cursor_id` | string | no | — | (Consumer only) Cursor id used to key the persisted resume position. Without it, progress is not persisted and every restart re-copies from the beginning. |
 | `database` | string | no | — | Database name. Defaults to `default`. |
+| `lookup_query` | string | no | — | (Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN (${payload:id})` to answer a whole batch in one query, matching rows by `id`. |
 | `max_polling_interval_ms` | integer | no | — | (Consumer only) If set, the poll interval backs off exponentially from `polling_interval_ms` up to this value while drained, resetting on new rows. Unset = constant interval. |
 | `password` | string | no | `null` | Optional password. Takes precedence over any credentials embedded in the `url`. |
 | `polling_interval_ms` | integer | no | — | (Consumer only) Polling interval in milliseconds when the table is drained. Defaults to 100ms. |

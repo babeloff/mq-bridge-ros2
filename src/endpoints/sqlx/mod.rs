@@ -6,6 +6,7 @@
 use super::poll::PollBackoff;
 use crate::canonical_message::tracing_support::LazyMessageIds;
 use crate::models::SqlxConfig;
+use crate::support::lookup_batch::{self, ListQuery};
 use crate::traits::{
     BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
     MessagePublisher, PublisherError, ReceivedBatch, Sent, SentBatch,
@@ -463,6 +464,74 @@ pub struct SqlxPublisher {
     /// Present when `bulk_copy` is enabled (PostgreSQL, token-based query). When set,
     /// `send_batch` streams rows via `COPY FROM STDIN` instead of a multi-row INSERT.
     copy: Option<PgCopySink>,
+    /// Set by `lookup_query`: a read-only lookup publisher.
+    lookup: Option<SqlLookup>,
+}
+
+/// Metadata key telling whether a `lookup_query` returned a row.
+const FOUND_KEY: &str = "sqlx.found";
+
+/// A parsed `lookup_query`: one query per message, or one `IN (…)` query per batch.
+enum SqlLookup {
+    Single(String, Vec<ColumnSource>),
+    List {
+        query: ListQuery,
+        source: ColumnSource,
+    },
+}
+
+impl SqlLookup {
+    fn parse(sql: &str, driver_name: &str) -> anyhow::Result<Self> {
+        let Some(query) = lookup_batch::parse_sql(sql)? else {
+            let (sql, sources) = parse_insert_template(sql, driver_name)?;
+            return Ok(Self::Single(sql, sources));
+        };
+        let (_, mut sources) = parse_insert_template(&query.token, driver_name)?;
+        let source = sources
+            .pop()
+            .ok_or_else(|| anyhow!("lookup_query: `IN (…)` holds no ${{…}} token"))?;
+        Ok(Self::List { query, source })
+    }
+}
+
+/// Whether a `lookup_query` modifies data, e.g. an upsert with `RETURNING`.
+/// `REPLACE` counts only as a statement (first word, or `REPLACE INTO`), not the string function.
+fn lookup_writes(sql: &str) -> bool {
+    let words: Vec<&str> = sql
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let is = |word: &str, kw: &str| word.eq_ignore_ascii_case(kw);
+    words.iter().any(|word| {
+        ["insert", "update", "delete", "merge"]
+            .iter()
+            .any(|kw| is(word, kw))
+    }) || words.first().is_some_and(|w| is(w, "replace"))
+        || words
+            .windows(2)
+            .any(|pair| is(pair[0], "replace") && is(pair[1], "into"))
+}
+
+/// A bound key in the form [`lookup_batch::key_of`] gives the matching row's column.
+fn bind_key(value: &BindValue) -> Option<String> {
+    match value {
+        BindValue::Null => None,
+        BindValue::Int(i) => Some(i.to_string()),
+        BindValue::Float(f) => serde_json::Number::from_f64(*f).map(|n| n.to_string()),
+        BindValue::Bool(b) => Some(b.to_string()),
+        BindValue::Text(s) => Some(s.clone()),
+    }
+}
+
+fn lookup_error(e: sqlx::Error) -> PublisherError {
+    if is_permanent_decode_error(&e) {
+        PublisherError::NonRetryable(anyhow!(
+            "lookup_query returned a column the SQL `Any` driver cannot decode: {e}. \
+             Cast it in the query, e.g. `amount::text AS amount`."
+        ))
+    } else {
+        classify_sql_error(e)
+    }
 }
 
 /// Bulk-load sink using PostgreSQL `COPY FROM STDIN`. `columns[i]` receives the value
@@ -657,6 +726,22 @@ impl SqlxPublisher {
 
         info!(table = %config.table, driver = %driver_name, "SQLx publisher connected");
 
+        if let Some(lookup) = &config.lookup_query {
+            if lookup_writes(lookup) {
+                info!(table = %config.table, "SQLx lookup_query writes on every lookup");
+            }
+            return Ok(Self {
+                pool,
+                _shared_pool: shared_pool,
+                insert_query: String::new(),
+                column_sources: Vec::new(),
+                lookup: Some(SqlLookup::parse(lookup, &driver_name)?),
+                driver_name,
+                table,
+                copy: None,
+            });
+        }
+
         // Resolve the insert query and parse any `${metadata:...}`/`${payload:...}`
         // tokens into ordered value sources, rewriting them to positional placeholders.
         let raw_insert_query =
@@ -799,13 +884,99 @@ impl SqlxPublisher {
             driver_name,
             table,
             copy,
+            lookup: None,
         })
+    }
+
+    /// Runs `lookup_query` and answers with its first row, or an empty payload.
+    async fn lookup_one(&self, message: &CanonicalMessage) -> Result<Sent, PublisherError> {
+        let mut payload = Vec::new();
+        let found = match &self.lookup {
+            Some(SqlLookup::Single(sql, sources)) => {
+                let query = bind_message_sources(sqlx::query(audited_sql(sql)), message, sources)?;
+                let row = query
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(lookup_error)?;
+                if let Some(row) = &row {
+                    JsonRowSchema::from_row(row).encode_row(row, &mut payload);
+                }
+                row.is_some()
+            }
+            Some(SqlLookup::List { query, source }) => {
+                let answer = self
+                    .lookup_list(query, source, std::slice::from_ref(message))
+                    .await?
+                    .pop()
+                    .flatten();
+                if let Some(row) = &answer {
+                    payload = serde_json::to_vec(row)
+                        .map_err(|e| PublisherError::NonRetryable(e.into()))?;
+                }
+                answer.is_some()
+            }
+            None => unreachable!("lookup_one runs only for a lookup publisher"),
+        };
+        let mut response = CanonicalMessage::new(payload, Some(message.message_id));
+        response
+            .metadata
+            .insert(FOUND_KEY.to_string(), found.to_string());
+        Ok(Sent::Response(response))
+    }
+
+    /// Answers every message with one `IN (…)` query per chunk of distinct keys.
+    async fn lookup_list(
+        &self,
+        query: &ListQuery,
+        source: &ColumnSource,
+        messages: &[CanonicalMessage],
+    ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
+        let values: Vec<BindValue> = messages
+            .iter()
+            .map(|m| resolve_source(m, source, &serde_json::from_slice(&m.payload).ok()))
+            .collect();
+        // A key with an embedded NUL cannot match a text column: not found, not an error.
+        let keys: Vec<Option<String>> = values
+            .iter()
+            .map(|v| {
+                reject_embedded_nul(source, v)
+                    .ok()
+                    .and_then(|_| bind_key(v))
+            })
+            .collect();
+        let mut records = Vec::new();
+        for chunk in lookup_batch::distinct(&keys).chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            let sql = query.expand(chunk.len(), |i| {
+                positional_placeholder(&self.driver_name, i + 1)
+            });
+            // Not cached: a Postgres generic plan made on a small table stays a seq scan.
+            let mut select = sqlx::query(audited_sql(&sql)).persistent(false);
+            for &i in chunk {
+                select = bind_value(select, values[i].clone());
+            }
+            let rows = select.fetch_all(&self.pool).await.map_err(lookup_error)?;
+            let Some(first) = rows.first() else { continue };
+            let schema = JsonRowSchema::from_row(first);
+            let mut buf = Vec::new();
+            for row in &rows {
+                buf.clear();
+                schema.encode_row(row, &mut buf);
+                records.push(
+                    serde_json::from_slice(&buf)
+                        .map_err(|e| PublisherError::NonRetryable(e.into()))?,
+                );
+            }
+        }
+        lookup_batch::answer(&keys, records, &query.key).map_err(PublisherError::NonRetryable)
     }
 }
 
 #[async_trait]
 impl MessagePublisher for SqlxPublisher {
     async fn send(&self, message: CanonicalMessage) -> Result<Sent, PublisherError> {
+        if self.lookup.is_some() {
+            return self.lookup_one(&message).await;
+        }
         trace!(message_id = %format!("{:032x}", message.message_id), table = %self.table, "Publishing to SQL");
         let query = sqlx::query(audited_sql(&self.insert_query));
         let query = if self.column_sources.is_empty() {
@@ -826,6 +997,11 @@ impl MessagePublisher for SqlxPublisher {
     ) -> Result<SentBatch, PublisherError> {
         if messages.is_empty() {
             return Ok(SentBatch::Ack);
+        }
+
+        if self.lookup.is_some() {
+            return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
+                .await;
         }
 
         if let Some(sink) = &self.copy {
@@ -950,6 +1126,18 @@ impl MessagePublisher for SqlxPublisher {
             error,
             details: serde_json::json!({ "driver": self.driver_name, "pool_size": self.pool.size(), "pool_idle": self.pool.num_idle() }),
             ..Default::default()
+        }
+    }
+
+    async fn lookup_batch(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Result<Vec<Option<serde_json::Value>>, PublisherError>> {
+        match &self.lookup {
+            Some(SqlLookup::List { query, source }) => {
+                Some(self.lookup_list(query, source, requests).await)
+            }
+            _ => None,
         }
     }
 
@@ -1419,7 +1607,8 @@ impl MessageConsumer for SqlxConsumer {
 
                     let mut attempts = 0;
                     loop {
-                        let mut query = sqlx::query(audited_sql(&sql));
+                        // Not cached: a Postgres generic plan made on a small table stays a seq scan.
+                        let mut query = sqlx::query(audited_sql(&sql)).persistent(false);
                         for id in &ids_to_ack {
                             query = query.bind(*id);
                         }

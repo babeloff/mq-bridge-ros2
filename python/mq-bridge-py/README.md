@@ -4,14 +4,14 @@ Thin Python bindings for the Rust `mq-bridge` core.
 
 ## Install
 
-`pip install mq-bridge-py` is all you need. Both packages install the same import path: `mq_bridge`.
+`pip install mq-bridge` is all you need. Both packages install the same import path: `mq_bridge`.
 
 | Package | Install | Includes |
 | :--- | :--- | :--- |
-| Default | `pip install mq-bridge-py` | Full set on glibc-Linux/macOS/Windows-x64 (Kafka, AWS, gRPC, MongoDB, SQLx + basic); reduced set automatically on musl/Alpine and Windows arm64 (no Kafka/SQLx/gRPC) |
-| Basic | `pip install mq-bridge-py-basic` | HTTP, NATS, MQTT, AMQP, WebSocket, ZeroMQ, MongoDB, AWS — the lean set on **every** platform |
+| Default | `pip install mq-bridge` | Full set on glibc-Linux/macOS/Windows-x64 (Kafka, AWS, gRPC, MongoDB, SQLx + basic); reduced set automatically on musl/Alpine and Windows arm64 (no Kafka/SQLx/gRPC) |
+| Basic | `pip install mq-bridge-basic` | HTTP, NATS, MQTT, AMQP, WebSocket, ZeroMQ, MongoDB, AWS — the lean set on **every** platform |
 
-`mq-bridge-py` resolves by platform automatically: pip installs the full wheel on glibc-Linux/macOS/Windows-x64 and the reduced (basic-feature) wheel on musl/Alpine and Windows arm64 — no marker or manual choice needed. Kafka/SQLx/gRPC/static-IBM-MQ don't build on those targets, so calling them there raises a clear runtime error; everything else works identically. Install `mq-bridge-py-basic` only if you explicitly want the lean build on a full-support system too. Memory and file endpoints are always present.
+`mq-bridge` resolves by platform automatically: pip installs the full wheel on glibc-Linux/macOS/Windows-x64 and the reduced (basic-feature) wheel on musl/Alpine and Windows arm64 — no marker or manual choice needed. Kafka/SQLx/gRPC/static-IBM-MQ don't build on those targets, so calling them there raises a clear runtime error; everything else works identically. Install `mq-bridge-basic` only if you explicitly want the lean build on a full-support system too. Memory and file endpoints are always present.
 
 The public API stays close to mq-bridge itself:
 

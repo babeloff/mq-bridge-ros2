@@ -13,6 +13,18 @@ rabbitmq://[user:pass@]host[:port]/<vhost>?queue=<name>
 `amqp(s)` before being handed to the driver. The default vhost `/` must be
 percent-encoded as `%2f` in the URL path, per the AMQP URI spec.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `amqp:`.
+
+```yaml
+input:
+  amqp: { url: "amqp://localhost:5672/%2f", queue: "orders" }
+```
+
+The config key is `amqp`; `rabbitmq://` is a CLI-only alias for `amqp://`.
+
 ## Examples
 
 **Consume a queue and forward each message to an HTTP endpoint, continuous:**

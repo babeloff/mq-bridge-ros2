@@ -19,8 +19,8 @@ requests do not share a reply queue or race on correlation IDs.
 
 > Not every backend can do request-reply. It is only supported/tested for endpoints
 > that natively support or emulate it. SQLx, files, AWS, IBM MQ, and Sled do **not**
-> support request-reply. Check the backend table in the engine
-> [README](https://github.com/marcomq/mq-bridge/blob/main/README.md).
+> support request-reply. Check the Request-Reply column in
+> [Consumer vs. subscriber, and nack support](../reference/endpoints.md#consumer-vs-subscriber-and-nack-support).
 
 ## Example: MongoDB request/response
 
@@ -62,7 +62,14 @@ See [Embed the library](embedding.md) for the full load-and-run scaffolding, and
 [Core concepts](../getting-started/concepts.md) for the handler model
 (`CommandHandler` / `EventHandler` / `TypeHandler`).
 
+## Caveats
+
+- If the input does not support responses (e.g. File, SQLx), a message sent to `response` is
+  dropped.
+- Configure timeouts on the requester side: the bridge's processing time adds latency.
+- Middleware that drops metadata (like `correlation_id`) can break the response chain.
+- MongoDB request/reply is emulated by polling for the reply; set its timeouts deliberately.
+
 ## See also
 
 - [`request` / `response` structural endpoints](../engine/reference.md#structural-endpoints) — the reference definitions.
-- Engine [README, Patterns: Request-Response](https://github.com/marcomq/mq-bridge/blob/main/README.md) — the authoritative write-up.

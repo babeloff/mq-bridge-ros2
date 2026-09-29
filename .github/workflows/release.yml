@@ -255,7 +255,7 @@ jobs:
           echo "::error::PyPI refused this workflow's OIDC identity (HTTP $code)"
           python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("message", d))' \
             "$RUNNER_TEMP/pypi.json" >&2 || true
-          echo "::error::Every mq-bridge-py* project needs a trusted publisher naming this repo, release.yml and the pypi environment. Note that PyPI matches the reusable workflow but verifies attestations against the caller, which is why the upload lives in release.yml."
+          echo "::error::Every mq-bridge and mq-bridge-basic project needs a trusted publisher naming this repo, release.yml and the pypi environment. Note that PyPI matches the reusable workflow but verifies attestations against the caller, which is why the upload lives in release.yml."
           exit 1
 
   preflight-crates-io:
@@ -1096,27 +1096,27 @@ jobs:
       - name: Split distributions by project
         run: |
           set -euo pipefail
-          mkdir -p dist/mq-bridge-py dist/mq-bridge-py-basic
-          mv dist/mq_bridge_py_basic-* dist/mq-bridge-py-basic/
-          mv dist/mq_bridge_py-* dist/mq-bridge-py/
-          for d in dist/mq-bridge-py dist/mq-bridge-py-basic; do
+          mkdir -p dist/mq-bridge dist/mq-bridge-basic
+          mv dist/mq_bridge_basic-* dist/mq-bridge-basic/
+          mv dist/mq_bridge-* dist/mq-bridge/
+          for d in dist/mq-bridge dist/mq-bridge-basic; do
             [ -n "$(ls -A "$d")" ] || { echo "::error::no distributions for $d"; exit 1; }
           done
-          ls -lh dist/mq-bridge-py dist/mq-bridge-py-basic
+          ls -lh dist/mq-bridge dist/mq-bridge-basic
 
       # skip-existing keeps a partial upload retryable: without it, re-publishing
       # after one project was refused dies on the other's duplicate files.
-      - name: Publish mq-bridge-py to PyPI
+      - name: Publish mq-bridge to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist/mq-bridge-py/
+          packages-dir: dist/mq-bridge/
           skip-existing: true
 
-      - name: Publish mq-bridge-py-basic to PyPI
+      - name: Publish mq-bridge-basic to PyPI
         if: ${{ !cancelled() }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: dist/mq-bridge-py-basic/
+          packages-dir: dist/mq-bridge-basic/
           skip-existing: true
 
   update-homebrew-tap:

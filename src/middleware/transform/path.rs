@@ -3,7 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use super::coerce::type_name;
+use super::coerce::{render_path, type_name, Crumb};
 use super::error::{ErrorKind, TransformError};
 use serde_json::{Map, Value};
 
@@ -109,6 +109,11 @@ pub(super) fn paths_are_disjoint(rules: &[CompiledRule]) -> bool {
     })
 }
 
+fn render_output_path(path: &[String]) -> String {
+    let crumbs: Vec<Crumb<'_>> = path.iter().map(|key| Crumb::Key(key)).collect();
+    render_path(&crumbs)
+}
+
 /// Writes `value` at `path`, creating intermediate objects as needed.
 pub(super) fn insert_at(
     root: &mut Value,
@@ -126,7 +131,7 @@ pub(super) fn insert_at(
             Value::Object(map) => map,
             other => {
                 return Err(TransformError::new(
-                    format!("$.{}", path.join(".")),
+                    render_output_path(path),
                     ErrorKind::TypeMismatch,
                     format!(
                         "cannot nest under '{key}': it is already a {}",
@@ -145,7 +150,7 @@ pub(super) fn insert_at(
             Ok(())
         }
         other => Err(TransformError::new(
-            format!("$.{}", path.join(".")),
+            render_output_path(path),
             ErrorKind::TypeMismatch,
             format!("cannot set '{last}': parent is a {}", type_name(other)),
         )),

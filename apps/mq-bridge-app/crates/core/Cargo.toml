@@ -38,6 +38,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync"] }
 tracing = { workspace = true }
+opentelemetry_sdk = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", optional = true, default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
 url = "2.5.8"
 uuid = { version = "1.24", features = ["v4", "v7"] }
 
@@ -71,8 +73,8 @@ default = ["full", "zeromq-omq"]
 integration-test = []
 ibm-mq = ["mq-bridge/ibm-mq"]
 arm64-cross-compile = ["rdkafka", "rdkafka/cmake-build"]
-full = ["mq-bridge/full", "rustls-aws-lc", "pulsar", "meilisearch"]
-full-dynamic = ["mq-bridge/full-dynamic", "rustls-aws-lc", "pulsar", "meilisearch"]
+full = ["mq-bridge/full", "otel", "rustls-aws-lc", "pulsar", "meilisearch"]
+full-dynamic = ["mq-bridge/full-dynamic", "otel", "rustls-aws-lc", "pulsar", "meilisearch"]
 # Lean feature set for the ETL/CDC benchmarks (benches/etl): Postgres bulk-insert
 # (sqlx) + logical-replication CDC + per-route metrics. Avoids the heavy `full`
 # deps (rdkafka/librdkafka, grpc/protoc, ibm-mq) that aren't needed to move
@@ -101,6 +103,8 @@ bench = [
 # present and none was installed — hence `rustls-aws-lc`, which installs one.
 bench-cdc = ["bench", "mq-bridge/postgres-cdc", "rustls-aws-lc"]
 middleware = ["mq-bridge/middleware"]
+# OTLP export for the `otel` middleware, active when `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+otel = ["mq-bridge/otel", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
 compression = ["mq-bridge/compression"]
 encryption = ["mq-bridge/encryption"]
 sqlx = ["mq-bridge/sqlx"]

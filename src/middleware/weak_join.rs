@@ -1,24 +1,121 @@
-use crate::models::{WeakJoinMiddleware, WeakJoinTimeout};
-use crate::traits::{BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch};
+use crate::models::{WeakJoinAck, WeakJoinMiddleware, WeakJoinTimeout};
+use crate::traits::{
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch,
+};
 use crate::CanonicalMessage;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+/// A buffered member's place in the source batch it came from.
+#[derive(Clone, Copy)]
+struct Slot {
+    seq: u64,
+    idx: usize,
+}
+
+struct Group {
+    started: Instant,
+    messages: Vec<CanonicalMessage>,
+    slots: Vec<Slot>,
+}
+
 struct JoinState {
-    // Key -> (CreationTime, Messages)
-    pending: HashMap<String, (Instant, Vec<CanonicalMessage>)>,
-    ready_buffer: Vec<CanonicalMessage>,
+    pending: HashMap<String, Group>,
+    ready_buffer: VecDeque<(CanonicalMessage, Vec<Slot>)>,
+}
+
+struct InnerBatch {
+    commit: Option<BatchCommitFunc>,
+    dispositions: Vec<MessageDisposition>,
+    remaining: usize,
+}
+
+/// Holds each source batch's commit until every member has been settled by its joined
+/// message. On a source needing ordered commits only the settled prefix is committed.
+struct AckTracker {
+    ordered: bool,
+    base: u64,
+    batches: VecDeque<InnerBatch>,
+}
+
+type DueCommits = Vec<(BatchCommitFunc, Vec<MessageDisposition>)>;
+
+impl AckTracker {
+    fn register(&mut self, commit: BatchCommitFunc, len: usize) -> u64 {
+        let seq = self.base + self.batches.len() as u64;
+        self.batches.push_back(InnerBatch {
+            commit: Some(commit),
+            dispositions: vec![MessageDisposition::Ack; len],
+            remaining: len,
+        });
+        seq
+    }
+
+    fn settle(&mut self, slot: Slot, disposition: MessageDisposition, due: &mut DueCommits) {
+        let Some(batch) = self.batches.get_mut((slot.seq - self.base) as usize) else {
+            return;
+        };
+        batch.dispositions[slot.idx] = disposition;
+        batch.remaining -= 1;
+        if !self.ordered && batch.remaining == 0 {
+            if let Some(commit) = batch.commit.take() {
+                due.push((commit, std::mem::take(&mut batch.dispositions)));
+            }
+        }
+    }
+
+    /// Pops the settled prefix one batch at a time, so batches behind a failed commit stay tracked.
+    fn pop_due(&mut self) -> Option<(BatchCommitFunc, Vec<MessageDisposition>)> {
+        while self.batches.front().is_some_and(|b| b.remaining == 0) {
+            let batch = self.batches.pop_front().expect("front checked");
+            self.base += 1;
+            if let Some(commit) = batch.commit {
+                return Some((commit, batch.dispositions));
+            }
+        }
+        None
+    }
+}
+
+/// Settles members and runs the source commits that became due, oldest first. The tracker
+/// stays locked while they run so concurrent settles cannot reorder them.
+async fn settle_and_commit(
+    tracker: &Mutex<AckTracker>,
+    settled: impl IntoIterator<Item = (Slot, MessageDisposition)>,
+) -> anyhow::Result<()> {
+    let mut tracker = tracker.lock().await;
+    let mut due = Vec::new();
+    for (slot, disposition) in settled {
+        tracker.settle(slot, disposition, &mut due);
+    }
+    while let Some((commit, dispositions)) = tracker.pop_due() {
+        if tracker.ordered {
+            commit(dispositions).await?;
+        } else {
+            due.push((commit, dispositions));
+        }
+    }
+    // Unordered commits are independent, so one failure must not drop the rest.
+    let mut first_err = None;
+    for (commit, dispositions) in due {
+        if let Err(e) = commit(dispositions).await {
+            first_err.get_or_insert(e);
+        }
+    }
+    first_err.map_or(Ok(()), Err)
 }
 
 pub struct WeakJoinConsumer {
     inner: Box<dyn MessageConsumer>,
     config: WeakJoinMiddleware,
     state: Arc<Mutex<JoinState>>,
+    /// `None` under `ack: on_receive`, where sources are acked as they arrive.
+    tracker: Option<Arc<Mutex<AckTracker>>>,
     /// Drain flag, tracked locally: on drain we must flush buffered pending groups before
     /// exposing an empty batch, so exit only happens once every group is drained.
     exit_on_empty: bool,
@@ -31,13 +128,21 @@ impl WeakJoinConsumer {
                 "weak_join: 'required' is set but 'branch_by' is not; 'required' only applies in branch mode and will be ignored in count mode."
             );
         }
+        let tracker = (config.ack == WeakJoinAck::OnJoin).then(|| {
+            Arc::new(Mutex::new(AckTracker {
+                ordered: inner.commit_requires_order(),
+                base: 0,
+                batches: VecDeque::new(),
+            }))
+        });
         Self {
             inner,
             config: config.clone(),
             state: Arc::new(Mutex::new(JoinState {
                 pending: HashMap::new(),
-                ready_buffer: Vec::new(),
+                ready_buffer: VecDeque::new(),
             })),
+            tracker,
             exit_on_empty: false,
         }
     }
@@ -130,33 +235,101 @@ impl WeakJoinConsumer {
         }
     }
 
-    fn check_timeouts(&self, state: &mut JoinState, ready_messages: &mut Vec<CanonicalMessage>) {
+    /// Emits a finished group, or under `on_timeout: discard` settles its members as dropped.
+    fn close_group(
+        &self,
+        key: &str,
+        group: Group,
+        ready: &mut Vec<(CanonicalMessage, Vec<Slot>)>,
+        discarded: &mut Vec<Slot>,
+    ) {
+        if self.config.on_timeout == WeakJoinTimeout::Discard {
+            discarded.extend(group.slots);
+        } else {
+            ready.push((self.emit_join(key, &group.messages), group.slots));
+        }
+    }
+
+    fn check_timeouts(
+        &self,
+        state: &mut JoinState,
+        ready: &mut Vec<(CanonicalMessage, Vec<Slot>)>,
+        discarded: &mut Vec<Slot>,
+    ) {
         let now = Instant::now();
         let timeout = Duration::from_millis(self.config.timeout_ms);
-
-        // One pass, no key clones: expired groups are emitted (unless discarding) as
-        // they are removed.
-        state.pending.retain(|key, (start_time, msgs)| {
-            if now.duration_since(*start_time) < timeout {
-                return true;
-            }
-            if self.config.on_timeout != WeakJoinTimeout::Discard {
-                ready_messages.push(self.emit_join(key, msgs));
-            }
-            false
-        });
+        let expired: Vec<String> = state
+            .pending
+            .iter()
+            .filter(|(_, g)| now.duration_since(g.started) >= timeout)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in expired {
+            let group = state.pending.remove(&key).expect("key just listed");
+            self.close_group(&key, group, ready, discarded);
+        }
     }
 
     /// Drains every remaining pending group, used when the upstream is exhausted (drain
     /// mode) so no buffered group is stranded when the empty batch propagates up. Honours
     /// `on_timeout`: incomplete groups are emitted unless configured to discard.
-    fn flush_all_pending(&self, state: &mut JoinState, ready_messages: &mut Vec<CanonicalMessage>) {
-        if self.config.on_timeout != WeakJoinTimeout::Discard {
-            for (key, (_, msgs)) in state.pending.iter() {
-                ready_messages.push(self.emit_join(key, msgs));
-            }
+    fn flush_all_pending(
+        &self,
+        state: &mut JoinState,
+        ready: &mut Vec<(CanonicalMessage, Vec<Slot>)>,
+        discarded: &mut Vec<Slot>,
+    ) {
+        for (key, group) in std::mem::take(&mut state.pending) {
+            self.close_group(&key, group, ready, discarded);
         }
-        state.pending.clear();
+    }
+
+    /// Acks the members of discarded groups at once: they were dropped on purpose.
+    async fn ack_discarded(&self, discarded: Vec<Slot>) -> Result<(), ConsumerError> {
+        match &self.tracker {
+            Some(tracker) if !discarded.is_empty() => settle_and_commit(
+                tracker,
+                discarded.into_iter().map(|s| (s, MessageDisposition::Ack)),
+            )
+            .await
+            .map_err(ConsumerError::Connection),
+            _ => Ok(()),
+        }
+    }
+
+    /// Joins stay in `ready_buffer` until the discarded members are acked, so a failed
+    /// ack loses none of them.
+    async fn ack_then_take_ready(
+        &self,
+        discarded: Vec<Slot>,
+        max_messages: usize,
+    ) -> Result<ReceivedBatch, ConsumerError> {
+        self.ack_discarded(discarded).await?;
+        let mut state = self.state.lock().await;
+        Ok(self.take_ready(&mut state, max_messages))
+    }
+
+    /// Returns up to `max_messages` ready joins; the rest wait in `ready_buffer`. Their
+    /// commit settles every member slot with the joined message's disposition.
+    fn take_ready(&self, state: &mut JoinState, max_messages: usize) -> ReceivedBatch {
+        let count = state.ready_buffer.len().min(max_messages);
+        let (messages, slots): (Vec<_>, Vec<_>) = state.ready_buffer.drain(..count).unzip();
+        let commit: BatchCommitFunc = match self.tracker.clone() {
+            Some(tracker) => Box::new(move |dispositions: Vec<MessageDisposition>| {
+                Box::pin(async move {
+                    // A joined message with no disposition leaves its members unsettled, so
+                    // the source redelivers them rather than acking unprocessed input. A
+                    // reply goes to every member, since each one is waiting on the join.
+                    let settled = slots
+                        .into_iter()
+                        .zip(dispositions)
+                        .flat_map(|(slots, d)| slots.into_iter().map(move |s| (s, d.clone())));
+                    settle_and_commit(&tracker, settled).await
+                })
+            }),
+            None => Box::new(|_| Box::pin(async { Ok(()) })),
+        };
+        ReceivedBatch { messages, commit }
     }
 }
 
@@ -192,12 +365,7 @@ impl MessageConsumer for WeakJoinConsumer {
         let mut state = self.state.lock().await;
 
         if !state.ready_buffer.is_empty() {
-            let count = std::cmp::min(state.ready_buffer.len(), max_messages);
-            let messages: Vec<_> = state.ready_buffer.drain(0..count).collect();
-            return Ok(ReceivedBatch {
-                messages,
-                commit: Box::new(|_| Box::pin(async { Ok(()) })),
-            });
+            return Ok(self.take_ready(&mut state, max_messages));
         }
 
         let now = Instant::now();
@@ -205,7 +373,7 @@ impl MessageConsumer for WeakJoinConsumer {
         let next_timeout = state
             .pending
             .values()
-            .map(|(start, _)| *start + timeout_duration)
+            .map(|g| g.started + timeout_duration)
             .min()
             .unwrap_or(now + Duration::from_secs(3600));
 
@@ -215,78 +383,73 @@ impl MessageConsumer for WeakJoinConsumer {
         let batch_future = self.inner.receive_batch(max_messages);
         let timeout_future = tokio::time::sleep(sleep_duration);
 
+        let mut ready = Vec::new();
+        let mut discarded = Vec::new();
         tokio::select! {
             res = batch_future => {
-                match res {
-                    Ok(batch) => {
-                        // Weak join: Ack immediately to avoid complex disposition mapping
-                        let count = batch.messages.len();
-                        if count > 0 {
-                            if let Err(e) = (batch.commit)(vec![MessageDisposition::Ack; count]).await {
-                                return Err(ConsumerError::Connection(e));
-                            }
-                        }
-
-                        let mut state = self.state.lock().await;
-                        let mut ready_messages = Vec::new();
-                        // Flush expired groups before admitting new messages, so a
-                        // fresh message for an expired key starts a new group rather
-                        // than joining a stale one.
-                        self.check_timeouts(&mut state, &mut ready_messages);
-
-                        // An empty upstream batch under exit_on_empty means the source is
-                        // drained: flush every remaining pending group so none is stranded,
-                        // and only then let an empty batch propagate up to end the route.
-                        if count == 0 && self.exit_on_empty {
-                            self.flush_all_pending(&mut state, &mut ready_messages);
-                        }
-
-                        let now = Instant::now();
-                        for msg in batch.messages {
-                            let key = msg
-                                .metadata
-                                .get(&self.config.group_by)
-                                .cloned()
-                                .unwrap_or_else(|| "default".to_string());
-                            let entry = state
-                                .pending
-                                .entry(key.clone())
-                                .or_insert_with(|| (now, Vec::new()));
-                            entry.1.push(msg);
-
-                            if self.is_complete(&entry.1) {
-                                let (_, msgs) = state.pending.remove(&key).unwrap();
-                                ready_messages.push(self.emit_join(&key, &msgs));
-                            }
-                        }
-
-                        if ready_messages.len() > max_messages {
-                            let overflow = ready_messages.split_off(max_messages);
-                            state.ready_buffer.extend(overflow);
-                        }
-
-                        Ok(ReceivedBatch {
-                            messages: ready_messages,
-                            commit: Box::new(|_| Box::pin(async { Ok(()) })),
-                        })
+                let batch = res?;
+                let count = batch.messages.len();
+                let seq = match &self.tracker {
+                    Some(tracker) if count > 0 => {
+                        Some(tracker.lock().await.register(batch.commit, count))
                     }
-                    Err(e) => Err(e),
+                    Some(_) => None,
+                    None => {
+                        if count > 0 {
+                            (batch.commit)(vec![MessageDisposition::Ack; count])
+                                .await
+                                .map_err(ConsumerError::Connection)?;
+                        }
+                        None
+                    }
+                };
+
+                let mut state = self.state.lock().await;
+                // Flush expired groups before admitting new messages, so a
+                // fresh message for an expired key starts a new group rather
+                // than joining a stale one.
+                self.check_timeouts(&mut state, &mut ready, &mut discarded);
+
+                // An empty upstream batch under exit_on_empty means the source is
+                // drained: flush every remaining pending group so none is stranded,
+                // and only then let an empty batch propagate up to end the route.
+                if count == 0 && self.exit_on_empty {
+                    self.flush_all_pending(&mut state, &mut ready, &mut discarded);
                 }
+
+                let now = Instant::now();
+                for (idx, msg) in batch.messages.into_iter().enumerate() {
+                    let key = msg
+                        .metadata
+                        .get(&self.config.group_by)
+                        .cloned()
+                        .unwrap_or_else(|| "default".to_string());
+                    let group = state.pending.entry(key.clone()).or_insert_with(|| Group {
+                        started: now,
+                        messages: Vec::new(),
+                        slots: Vec::new(),
+                    });
+                    group.messages.push(msg);
+                    if let Some(seq) = seq {
+                        group.slots.push(Slot { seq, idx });
+                    }
+
+                    if self.is_complete(&group.messages) {
+                        let group = state.pending.remove(&key).expect("entry just used");
+                        ready.push((self.emit_join(&key, &group.messages), group.slots));
+                    }
+                }
+
+                state.ready_buffer.extend(ready);
+                drop(state);
+                self.ack_then_take_ready(discarded, max_messages).await
             }
             _ = timeout_future => {
                 let mut state = self.state.lock().await;
-                let mut ready_messages = Vec::new();
-                self.check_timeouts(&mut state, &mut ready_messages);
-
-                if ready_messages.len() > max_messages {
-                    let overflow = ready_messages.split_off(max_messages);
-                    state.ready_buffer.extend(overflow);
-                }
-
-                Ok(ReceivedBatch {
-                    messages: ready_messages,
-                    commit: Box::new(|_| Box::pin(async { Ok(()) })),
-                })
+                self.check_timeouts(&mut state, &mut ready, &mut discarded);
+                state.ready_buffer.extend(ready);
+                drop(state);
+                self.ack_then_take_ready(discarded, max_messages).await
             }
         }
     }
@@ -312,6 +475,7 @@ mod tests {
             branch_by: None,
             required: Vec::new(),
             on_timeout: WeakJoinTimeout::Fire,
+            ack: WeakJoinAck::OnJoin,
         };
 
         let mem_consumer = MemoryConsumer::new_local("join_test", 10);
@@ -353,6 +517,7 @@ mod tests {
             branch_by: None,
             required: Vec::new(),
             on_timeout: WeakJoinTimeout::Fire,
+            ack: WeakJoinAck::OnJoin,
         };
 
         let mem_consumer = MemoryConsumer::new_local("join_timeout_test", 10);
@@ -393,6 +558,7 @@ mod tests {
             branch_by: Some("branch".to_string()),
             required: vec!["postgres".to_string(), "features".to_string()],
             on_timeout: WeakJoinTimeout::Fire,
+            ack: WeakJoinAck::OnJoin,
         };
 
         let mem_consumer = MemoryConsumer::new_local("join_branch_test", 10);
@@ -435,6 +601,7 @@ mod tests {
             branch_by: Some("branch".to_string()),
             required: vec!["postgres".to_string(), "features".to_string()],
             on_timeout: WeakJoinTimeout::Fire,
+            ack: WeakJoinAck::OnJoin,
         };
 
         let mem_consumer = MemoryConsumer::new_local("join_branch_incomplete", 10);
@@ -468,6 +635,7 @@ mod tests {
             branch_by: Some("branch".to_string()),
             required: vec!["postgres".to_string(), "features".to_string()],
             on_timeout: WeakJoinTimeout::Discard,
+            ack: WeakJoinAck::OnJoin,
         };
 
         let mem_consumer = MemoryConsumer::new_local("join_branch_discard", 10);
@@ -489,5 +657,229 @@ mod tests {
         // Incomplete group is dropped on timeout, not emitted as a partial.
         let batch2 = join_consumer.receive_batch(10).await.unwrap();
         assert!(batch2.messages.is_empty());
+    }
+
+    type CommitLog = Arc<std::sync::Mutex<Vec<(usize, Vec<&'static str>)>>>;
+
+    /// Hands out scripted batches and records each batch's commit as (batch index, dispositions).
+    struct ScriptedSource {
+        batches: VecDeque<Vec<CanonicalMessage>>,
+        next: usize,
+        ordered: bool,
+        log: CommitLog,
+        fail: Option<usize>,
+    }
+
+    impl ScriptedSource {
+        fn new(batches: Vec<Vec<CanonicalMessage>>, ordered: bool) -> (Self, CommitLog) {
+            let log = CommitLog::default();
+            let source = Self {
+                batches: batches.into(),
+                next: 0,
+                ordered,
+                log: log.clone(),
+                fail: None,
+            };
+            (source, log)
+        }
+    }
+
+    #[async_trait]
+    impl MessageConsumer for ScriptedSource {
+        fn commit_requires_order(&self) -> bool {
+            self.ordered
+        }
+
+        async fn receive_batch(&mut self, _max: usize) -> Result<ReceivedBatch, ConsumerError> {
+            let messages = self.batches.pop_front().unwrap_or_default();
+            let id = self.next;
+            self.next += 1;
+            let log = self.log.clone();
+            let fail = self.fail == Some(id);
+            Ok(ReceivedBatch {
+                messages,
+                commit: Box::new(move |dispositions| {
+                    Box::pin(async move {
+                        if fail {
+                            anyhow::bail!("commit {id} failed");
+                        }
+                        let named = dispositions
+                            .iter()
+                            .map(|d| match d {
+                                MessageDisposition::Nack => "nack",
+                                MessageDisposition::Reply(_) => "reply",
+                                MessageDisposition::Ack => "ack",
+                            })
+                            .collect();
+                        log.lock().unwrap().push((id, named));
+                        Ok(())
+                    })
+                }),
+            })
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    fn member(group: &str) -> CanonicalMessage {
+        CanonicalMessage::from_json(json!({"g": group}))
+            .unwrap()
+            .with_metadata_kv("group_id", group)
+    }
+
+    fn pair_config(
+        ack: WeakJoinAck,
+        on_timeout: WeakJoinTimeout,
+        timeout_ms: u64,
+    ) -> WeakJoinMiddleware {
+        WeakJoinMiddleware {
+            group_by: "group_id".to_string(),
+            expected_count: 2,
+            timeout_ms,
+            branch_by: None,
+            required: Vec::new(),
+            on_timeout,
+            ack,
+        }
+    }
+
+    fn logged(log: &CommitLog) -> Vec<(usize, Vec<&'static str>)> {
+        log.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn members_are_acked_only_once_the_join_commits() {
+        let (source, log) = ScriptedSource::new(vec![vec![member("A"), member("A")]], false);
+        let config = pair_config(WeakJoinAck::OnJoin, WeakJoinTimeout::Fire, 1000);
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+        let batch = join.receive_batch(10).await.unwrap();
+        assert_eq!(batch.messages.len(), 1);
+        assert!(
+            logged(&log).is_empty(),
+            "must not ack before the join is committed"
+        );
+
+        (batch.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        assert_eq!(logged(&log), vec![(0, vec!["ack", "ack"])]);
+    }
+
+    #[tokio::test]
+    async fn a_nacked_join_nacks_its_members() {
+        let (source, log) = ScriptedSource::new(vec![vec![member("A"), member("A")]], false);
+        let config = pair_config(WeakJoinAck::OnJoin, WeakJoinTimeout::Fire, 1000);
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+        let batch = join.receive_batch(10).await.unwrap();
+        (batch.commit)(vec![MessageDisposition::Nack])
+            .await
+            .unwrap();
+        assert_eq!(logged(&log), vec![(0, vec!["nack", "nack"])]);
+    }
+
+    #[tokio::test]
+    async fn a_joined_reply_reaches_every_member() {
+        let (source, log) = ScriptedSource::new(vec![vec![member("A"), member("A")]], false);
+        let config = pair_config(WeakJoinAck::OnJoin, WeakJoinTimeout::Fire, 1000);
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+        let batch = join.receive_batch(10).await.unwrap();
+        (batch.commit)(vec![MessageDisposition::Reply(CanonicalMessage::from(
+            "ok",
+        ))])
+        .await
+        .unwrap();
+        assert_eq!(logged(&log), vec![(0, vec!["reply", "reply"])]);
+    }
+
+    /// Group B completes before the older group A. An ordered source must still commit its
+    /// batches in the order it produced them; an unordered one commits B's batch at once.
+    #[tokio::test]
+    async fn source_batches_commit_in_order_only_when_the_source_needs_it() {
+        for ordered in [true, false] {
+            let (source, log) = ScriptedSource::new(
+                vec![
+                    vec![member("A")],
+                    vec![member("B"), member("B")],
+                    vec![member("A")],
+                ],
+                ordered,
+            );
+            let config = pair_config(WeakJoinAck::OnJoin, WeakJoinTimeout::Fire, 10_000);
+            let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+            assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+            let b = join.receive_batch(10).await.unwrap();
+            (b.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+            if ordered {
+                assert!(logged(&log).is_empty(), "batch 1 must wait for batch 0");
+            } else {
+                assert_eq!(logged(&log), vec![(1, vec!["ack", "ack"])]);
+            }
+
+            let a = join.receive_batch(10).await.unwrap();
+            (a.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+            let order: Vec<usize> = logged(&log).into_iter().map(|(id, _)| id).collect();
+            if ordered {
+                assert_eq!(order, vec![0, 1, 2]);
+            } else {
+                assert_eq!(order, vec![1, 0, 2]);
+            }
+        }
+    }
+
+    /// Three source batches become due at once and the oldest commit fails: the later two
+    /// must stay tracked and commit, in order, on the next settle.
+    #[tokio::test]
+    async fn a_failed_ordered_commit_keeps_later_batches() {
+        let (mut source, log) = ScriptedSource::new(
+            vec![
+                vec![member("A")],
+                vec![member("B")],
+                vec![member("A"), member("B")],
+                vec![member("C"), member("C")],
+            ],
+            true,
+        );
+        source.fail = Some(0);
+        let config = pair_config(WeakJoinAck::OnJoin, WeakJoinTimeout::Fire, 10_000);
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+        assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+        assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+        let ab = join.receive_batch(10).await.unwrap();
+        assert_eq!(ab.messages.len(), 2);
+        assert!((ab.commit)(vec![MessageDisposition::Ack; 2]).await.is_err());
+        assert!(logged(&log).is_empty());
+
+        let c = join.receive_batch(10).await.unwrap();
+        (c.commit)(vec![MessageDisposition::Ack]).await.unwrap();
+        let order: Vec<usize> = logged(&log).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(order, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn a_discarded_group_is_acked_on_timeout() {
+        let (source, log) = ScriptedSource::new(vec![vec![member("A")]], true);
+        let config = pair_config(WeakJoinAck::OnJoin, WeakJoinTimeout::Discard, 50);
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+        assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+        assert!(logged(&log).is_empty());
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+        assert_eq!(logged(&log), vec![(0, vec!["ack"])]);
+    }
+
+    #[tokio::test]
+    async fn on_receive_acks_as_messages_arrive() {
+        let (source, log) = ScriptedSource::new(vec![vec![member("A")]], true);
+        let config = pair_config(WeakJoinAck::OnReceive, WeakJoinTimeout::Fire, 1000);
+        let mut join = WeakJoinConsumer::new(Box::new(source), &config);
+
+        assert!(join.receive_batch(10).await.unwrap().messages.is_empty());
+        assert_eq!(logged(&log), vec![(0, vec!["ack"])]);
     }
 }

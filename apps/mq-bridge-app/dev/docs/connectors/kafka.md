@@ -15,6 +15,18 @@ cluster, use the `?url=` escape hatch (see
 [Quick Start](../quick-start.md#escape-hatch-driver-options-and-full-connection-strings)):
 `kafka://_/?url=broker1:9092,broker2:9092&topic=orders`.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `kafka:`.
+
+```yaml
+input:
+  kafka: { url: "localhost:9092", topic: "orders", group_id: "mqb-orders-sync" }
+```
+
+In config, `url` is the bare `host:port` bootstrap list (comma-separated for a cluster); `kafka://` is CLI-only.
+
 ## Examples
 
 **Forward an MQTT stream into a Kafka topic, continuous:**

@@ -170,8 +170,8 @@ Measured through `mq-bridge-app`'s `copy` CLI (the zero-code path) on an Apple M
 All rows measured with the mimalloc allocator used by the shipped binaries. It is
 the default-on `mimalloc` cargo feature (also implied by `bench`); build with
 `--no-default-features` and without it in the feature list to fall back to the
-system allocator on platforms where mimalloc is unsupported. The `Version` column
-matters: the rows are not all from one measurement session.
+system allocator on platforms where mimalloc is unsupported. Rows were measured on
+different versions; see the `Version` column.
 
 Two things the table shows:
 

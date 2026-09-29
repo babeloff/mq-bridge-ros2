@@ -155,7 +155,7 @@ pub async fn ensure_slot(
         .bind(slot_name)
         .execute(&mut conn)
         .await
-        .map_err(|e| anyhow!("postgres-cdc: create slot failed: {e}"))?;
+        .map_err(|e| anyhow!("postgres-cdc: create slot failed: {e}{}", setup_hint(&e)))?;
 
     if drop_on_stop {
         debug!(
@@ -170,6 +170,61 @@ pub async fn ensure_slot(
         );
     }
     Ok(())
+}
+
+/// The server-side fix for a slot creation that failed on a missing prerequisite.
+fn setup_hint(error: &sqlx::Error) -> &'static str {
+    let code = error.as_database_error().and_then(|e| e.code());
+    sqlstate_hint(code.as_deref())
+}
+
+fn sqlstate_hint(code: Option<&str>) -> &'static str {
+    match code {
+        Some("55000") => {
+            ". If `wal_level` is not `logical`: run `ALTER SYSTEM SET wal_level = logical` and \
+             restart Postgres (managed services have their own switch, e.g. RDS \
+             `rds.logical_replication`). A read replica before Postgres 16 cannot decode at all"
+        }
+        Some("42501") => {
+            ". The user lacks replication rights: `ALTER ROLE <user> WITH REPLICATION` \
+             (on RDS: `GRANT rds_replication TO <user>`)"
+        }
+        Some("53400") => {
+            ". No free replication slot: drop an unused one from `pg_replication_slots` or raise \
+             `max_replication_slots`"
+        }
+        _ => "",
+    }
+}
+
+/// Published tables Postgres cannot replicate updates or deletes of: no primary key under
+/// the default replica identity, `REPLICA IDENTITY NOTHING`, or `USING INDEX` on an index
+/// that no longer exists. Postgres then rejects the
+/// application's own `UPDATE`/`DELETE` on them, so a publication covering one breaks writes.
+pub async fn tables_without_replica_identity(
+    url: &str,
+    publication: &str,
+    tls: &crate::models::TlsConfig,
+) -> anyhow::Result<Vec<String>> {
+    let mut conn = control_conn(url, tls).await?;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT format('%I.%I', pt.schemaname, pt.tablename) \
+         FROM pg_publication_tables pt \
+         JOIN pg_publication p ON p.pubname = pt.pubname \
+         JOIN pg_namespace n ON n.nspname = pt.schemaname \
+         JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = pt.tablename \
+         WHERE pt.pubname = $1 AND (p.pubupdate OR p.pubdelete) \
+           AND (c.relreplident = 'n' OR (c.relreplident = 'd' AND NOT EXISTS \
+             (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary)) \
+             OR (c.relreplident = 'i' AND NOT EXISTS \
+             (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisreplident))) \
+         ORDER BY 1",
+    )
+    .bind(publication)
+    .fetch_all(&mut conn)
+    .await
+    .map_err(|e| anyhow!("postgres-cdc: replica identity check failed: {e}"))?;
+    Ok(rows.into_iter().map(|(table,)| table).collect())
 }
 
 /// A table a `capture_all`/`snapshot` backfill will page through.
@@ -530,4 +585,18 @@ pub async fn start_replication(
             anyhow!(msg)
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sqlstate_hint;
+
+    #[test]
+    fn a_missing_prerequisite_names_its_fix() {
+        assert!(sqlstate_hint(Some("55000")).contains("wal_level = logical"));
+        assert!(sqlstate_hint(Some("42501")).contains("WITH REPLICATION"));
+        assert!(sqlstate_hint(Some("53400")).contains("max_replication_slots"));
+        assert_eq!(sqlstate_hint(Some("23505")), "");
+        assert_eq!(sqlstate_hint(None), "");
+    }
 }

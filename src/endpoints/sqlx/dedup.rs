@@ -207,6 +207,110 @@ impl SqlDedupStore {
             .await
             .map(|_| ())
     }
+
+    /// `n` placeholders from 1-based slot `first`, comma-separated for an `IN (…)` list.
+    /// Batch statements run with `persistent(false)`: a cached Postgres generic plan made while
+    /// the table was small stays a seq scan as it grows (measured ~400 ms per 128-key batch).
+    fn placeholders(&self, first: usize, n: usize) -> String {
+        (first..first + n)
+            .map(|i| self.placeholder(i))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// The stored `expire_at` of every present id, in one query.
+    async fn stored_expiries(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>, ConsumerError> {
+        let sql = format!(
+            "SELECT dedup_key, expire_at FROM {} WHERE dedup_key IN ({})",
+            self.table,
+            self.placeholders(1, ids.len())
+        );
+        let mut select = sqlx::query(audited_sql(&sql)).persistent(false);
+        for id in ids {
+            select = select.bind(id.clone());
+        }
+        let rows = select.fetch_all(&self.pool).await.map_err(store_failed)?;
+        rows.iter()
+            .map(|row| Ok((row.try_get::<String, _>(0)?, row.try_get::<i64, _>(1)?)))
+            .collect::<Result<_, sqlx::Error>>()
+            .map_err(store_failed)
+    }
+
+    /// Claims every id in one multi-row INSERT. The statement is atomic, so a unique
+    /// violation means none of them was claimed.
+    async fn insert_claims(&self, ids: &[&str], claim: i64) -> Result<(), sqlx::Error> {
+        let rows = (0..ids.len())
+            .map(|i| {
+                format!(
+                    "({}, {})",
+                    self.placeholder(2 * i + 1),
+                    self.placeholder(2 * i + 2)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "INSERT INTO {} (dedup_key, expire_at) VALUES {rows}",
+            self.table
+        );
+        let mut insert = sqlx::query(audited_sql(&sql)).persistent(false);
+        for id in ids {
+            insert = insert.bind(id.to_string()).bind(claim);
+        }
+        insert.execute(&self.pool).await.map(|_| ())
+    }
+
+    /// Reserves one chunk: a read for the whole chunk, then one INSERT for the absent keys.
+    /// Keys that are expired, or that another instance inserted meanwhile, take the per-key path.
+    async fn reserve_chunk(
+        &self,
+        keys: &[Vec<u8>],
+        now: u64,
+    ) -> Result<Vec<crate::middleware::deduplication::Reservation>, ConsumerError> {
+        use crate::middleware::deduplication::{
+            hex_key, DedupStore, Reservation, PENDING_TTL_SECS,
+        };
+        let ids: Vec<String> = keys.iter().map(|k| hex_key(k)).collect();
+        let stored = self.stored_expiries(&ids).await?;
+        let mut states = vec![Reservation::Claimed; ids.len()];
+        let mut absent = Vec::new();
+        let mut contested = Vec::new();
+        for (i, id) in ids.iter().enumerate() {
+            match stored.get(id) {
+                None => absent.push(i),
+                Some(&stored) => match expiry_state(stored) {
+                    (expiry, state) if expiry > now as i64 => states[i] = state,
+                    _ => contested.push(i),
+                },
+            }
+        }
+        if !absent.is_empty() {
+            let absent_ids: Vec<&str> = absent.iter().map(|&i| ids[i].as_str()).collect();
+            let claim = -((now + PENDING_TTL_SECS) as i64);
+            match self.insert_claims(&absent_ids, claim).await {
+                Ok(()) => {}
+                Err(e) if is_unique_violation(&e) => contested.extend(absent),
+                Err(e) => return Err(store_failed(e)),
+            }
+        }
+        for i in contested {
+            states[i] = self.reserve(&keys[i], now).await?;
+        }
+        Ok(states)
+    }
+}
+
+/// A stored `expire_at` as its absolute expiry and state: negative is an in-flight claim.
+fn expiry_state(stored: i64) -> (i64, crate::middleware::deduplication::Reservation) {
+    use crate::middleware::deduplication::Reservation;
+    if stored < 0 {
+        (-stored, Reservation::InFlight)
+    } else {
+        (stored, Reservation::Processed)
+    }
 }
 
 #[async_trait]
@@ -231,11 +335,7 @@ impl crate::middleware::deduplication::DedupStore for SqlDedupStore {
             let Some(stored) = self.stored_expiry(&id).await? else {
                 continue;
             };
-            let (expiry, state) = if stored < 0 {
-                (-stored, Reservation::InFlight)
-            } else {
-                (stored, Reservation::Processed)
-            };
+            let (expiry, state) = expiry_state(stored);
             if expiry > now {
                 return Ok(state);
             }
@@ -247,10 +347,60 @@ impl crate::middleware::deduplication::DedupStore for SqlDedupStore {
         Ok(Reservation::InFlight)
     }
 
+    async fn reserve_many(
+        &self,
+        keys: &[Vec<u8>],
+        now: u64,
+    ) -> Result<Vec<crate::middleware::deduplication::Reservation>, ConsumerError> {
+        let mut states = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            states.extend(self.reserve_chunk(chunk, now).await?);
+        }
+        Ok(states)
+    }
+
     async fn mark_processed(&self, key: &[u8], now: u64) {
         let id = crate::middleware::deduplication::hex_key(key);
         self.write_marker(&id, (now + self.ttl_seconds) as i64, None)
             .await;
+    }
+
+    /// One UPDATE per chunk. A chunk with a row missing (swept after its claim lapsed) is
+    /// redone key by key, which inserts the missing marker.
+    async fn mark_processed_many(&self, keys: &[Vec<u8>], now: u64) {
+        let expire_at = (now + self.ttl_seconds) as i64;
+        let clear_response = if self.replay_response {
+            ", response = NULL"
+        } else {
+            ""
+        };
+        for chunk in keys.chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            let ids: Vec<String> = chunk
+                .iter()
+                .map(|k| crate::middleware::deduplication::hex_key(k))
+                .collect();
+            let sql = format!(
+                "UPDATE {} SET expire_at = {}{clear_response} WHERE dedup_key IN ({})",
+                self.table,
+                self.placeholder(1),
+                self.placeholders(2, ids.len())
+            );
+            let mut update = sqlx::query(audited_sql(&sql))
+                .persistent(false)
+                .bind(expire_at);
+            for id in &ids {
+                update = update.bind(id.clone());
+            }
+            match update.execute(&self.pool).await {
+                Ok(result) if result.rows_affected() as usize == ids.len() => {}
+                Ok(_) => {
+                    for id in &ids {
+                        self.write_marker(id, expire_at, None).await;
+                    }
+                }
+                Err(e) => warn!("Failed to mark dedup keys processed in SQL: {}", e),
+            }
+        }
     }
 
     async fn mark_processed_with_response(&self, key: &[u8], now: u64, response: &[u8]) {
@@ -291,6 +441,23 @@ impl crate::middleware::deduplication::DedupStore for SqlDedupStore {
             .await
         {
             warn!("Failed to release dedup key in SQL: {}", e);
+        }
+    }
+
+    async fn release_many(&self, keys: &[Vec<u8>]) {
+        for chunk in keys.chunks(lookup_batch::MAX_KEYS_PER_QUERY) {
+            let sql = format!(
+                "DELETE FROM {} WHERE expire_at < 0 AND dedup_key IN ({})",
+                self.table,
+                self.placeholders(1, chunk.len())
+            );
+            let mut delete = sqlx::query(audited_sql(&sql)).persistent(false);
+            for key in chunk {
+                delete = delete.bind(crate::middleware::deduplication::hex_key(key));
+            }
+            if let Err(e) = delete.execute(&self.pool).await {
+                warn!("Failed to release dedup keys in SQL: {}", e);
+            }
         }
     }
 

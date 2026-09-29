@@ -52,6 +52,7 @@ class ClickHouseConfig(TypedDict, total=False):
     cursor_column: Optional[str]
     cursor_id: Optional[str]
     database: Optional[str]
+    lookup_query: Optional[str]
     max_polling_interval_ms: Optional[int]
     password: Optional[str]
     polling_interval_ms: Optional[int]
@@ -294,6 +295,34 @@ class LimiterMiddleware(TypedDict, total=False):
     messages_per_second: Required[float]
 
 
+# One lookup of a `lookup` middleware.
+LookupEntry = TypedDict(
+    "LookupEntry",
+    {
+        "from": Required[Endpoint],
+        "into": Required[str],
+        "metadata": Dict[str, str],
+        "payload": Optional[str],
+    },
+    total=False,
+)
+
+
+# Lookup (enrich) middleware configuration.
+LookupMiddleware = TypedDict(
+    "LookupMiddleware",
+    {
+        "concurrency": int,
+        "entries": List[LookupEntry],
+        "from": Optional[Endpoint],
+        "into": Optional[str],
+        "metadata": Dict[str, str],
+        "payload": Optional[str],
+    },
+    total=False,
+)
+
+
 class MemoryConfig(TypedDict, total=False):
     capacity: Optional[int]
     enable_nack: bool
@@ -322,7 +351,9 @@ class Middleware(TypedDict, total=False):
     filter: str
     id: str
     limiter: LimiterMiddleware
+    lookup: LookupMiddleware
     metrics: MetricsMiddleware
+    otel: OtelMiddleware
     pack: PackMiddleware
     random_panic: RandomPanicMiddleware
     retry: RetryMiddleware
@@ -341,6 +372,7 @@ class MongoDbConfig(TypedDict, total=False):
     consume: Optional[MongoConsume]
     cursor_id: Optional[str]
     database: Required[str]
+    find: Optional[str]
     format: MongoDbFormat
     id_field: Optional[str]
     meta_collection: Optional[str]
@@ -418,6 +450,11 @@ class ObjectStoreConfig(TypedDict, total=False):
     url: Required[str]
 
 
+class OtelMiddleware(TypedDict, total=False):
+    """OpenTelemetry middleware configuration."""
+    pass
+
+
 class PackMiddleware(TypedDict, total=False):
     """Transport batching middleware configuration (`pack`, output side)."""
     drop_message_id: bool
@@ -433,6 +470,7 @@ class PostgresCdcConfig(TypedDict, total=False):
     create_publication: bool
     create_slot: bool
     cursor_id: Optional[str]
+    id_hash: IdHash
     publication: Required[str]
     publication_tables: List[str]
     slot_name: str
@@ -529,6 +567,7 @@ class SqlxConfig(TypedDict, total=False):
     delete_after_read: bool
     idle_timeout_ms: Optional[int]
     insert_query: Optional[str]
+    lookup_query: Optional[str]
     max_connections: Optional[int]
     max_lifetime_ms: Optional[int]
     max_polling_interval_ms: Optional[int]
@@ -608,6 +647,7 @@ class UnpackMiddleware(TypedDict, total=False):
 
 class WeakJoinMiddleware(TypedDict, total=False):
     """Weak Join middleware configuration."""
+    ack: WeakJoinAck
     branch_by: Optional[str]
     expected_count: Required[int]
     group_by: Required[str]
@@ -644,6 +684,7 @@ DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
+IdHash = Literal["fnv1a", "sha256"]
 MappingRule = Union[str, DetailedMappingRule]
 MongoConsume = Literal["consumer", "snapshot", "capture_new", "capture_all"]
 MongoDbFormat = Literal["normal", "json", "text", "raw"]
@@ -657,6 +698,7 @@ SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]
 StaticConfig = Union[str, Dict[str, Any]]
 TransformErrorPolicy = Literal["reject", "pass_through"]
+WeakJoinAck = Literal["on_join", "on_receive"]
 WeakJoinTimeout = Literal["fire", "discard"]
 WebSocketExecutionMode = Literal["auto", "direct_only", "routed"]
 ZeroMqBackend = Union[Literal["zmq", "omq"], Literal["try_omq"]]

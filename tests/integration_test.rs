@@ -345,6 +345,15 @@ async fn test_clickhouse() {
 #[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires docker compose (postgres with wal_level=logical)"]
+async fn test_postgres_cdc_lookup_join() {
+    if should_run("postgres_cdc") || should_run("postgres") {
+        integration::postgres_cdc::test_postgres_cdc_lookup_join().await;
+    }
+}
+
+#[cfg(all(feature = "postgres-cdc", feature = "test-utils"))]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose (postgres with wal_level=logical)"]
 async fn test_postgres_cdc() {
     if should_run("postgres_cdc") || should_run("postgres") {
         integration::postgres_cdc::test_postgres_cdc_pipeline().await;

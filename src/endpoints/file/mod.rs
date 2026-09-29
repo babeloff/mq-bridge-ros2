@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use once_cell::sync::Lazy;
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Seek;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -44,13 +44,27 @@ fn get_file_lock(path: &str) -> Arc<Mutex<()>> {
 
 /// Appends a CSV-escaped field to `buf` without allocating for the common
 /// (no special characters) case. Hot path for CSV row encoding.
-fn csv_append_field(buf: &mut Vec<u8>, s: &str) {
+///
+/// `delimiter` is the record separator: a field containing it is quoted too, so the
+/// reader's quote-aware framing keeps it in one record, and so is one ending in a prefix
+/// of a multi-byte delimiter, which would otherwise complete it early. A leading U+FEFF
+/// is quoted so the reader cannot mistake it for a byte-order mark.
+fn csv_append_field(buf: &mut Vec<u8>, s: &str, delimiter: &[u8]) {
     let bytes = s.as_bytes();
     // One byte pass instead of four `contains` scans.
-    if !bytes
+    let special = bytes
         .iter()
         .any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r'))
-    {
+        || bytes.starts_with(UTF8_BOM);
+    let has_delimiter = || match delimiter {
+        [] | [b'\n'] | [b'\r', b'\n'] => false,
+        [d] => bytes.contains(d),
+        d => {
+            memchr::memmem::find(bytes, d).is_some()
+                || (1..d.len()).any(|n| bytes.ends_with(&d[..n]))
+        }
+    };
+    if !special && !has_delimiter() {
         buf.extend_from_slice(bytes);
         return;
     }
@@ -111,71 +125,107 @@ fn json_append_escaped(buf: &mut Vec<u8>, s: &[u8]) {
     buf.extend_from_slice(&s[run..]);
 }
 
-fn csv_encode_row(fields: &[String]) -> Vec<u8> {
+fn csv_encode_row(fields: &[String], delimiter: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         if i > 0 {
             buf.push(b',');
         }
-        csv_append_field(&mut buf, f);
+        csv_append_field(&mut buf, f, delimiter);
     }
+    quote_blank_record(&mut buf, fields.len());
     buf
 }
 
+/// A record of one empty field is written `""`: bare, it would be a blank line, which
+/// the reader skips.
+fn quote_blank_record(record: &mut Vec<u8>, fields: usize) {
+    if fields == 1 && record.is_empty() {
+        record.extend_from_slice(b"\"\"");
+    }
+}
+
+/// Drops raw line breaks from valid JSON text. Inside a JSON string they must be
+/// escaped, so a raw one is always insignificant whitespace; every other byte of the
+/// producer's spelling is kept. Borrows when there is nothing to drop.
+fn strip_json_line_breaks(text: &str) -> std::borrow::Cow<'_, str> {
+    if memchr::memchr2(b'\n', b'\r', text.as_bytes()).is_none() {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(text.chars().filter(|c| !matches!(c, '\n' | '\r')).collect())
+}
+
+/// A payload's top-level fields, values left as unparsed JSON. Keys are borrowed when
+/// they can be; only keys carrying JSON escapes need owning.
+enum CsvPayloadRow<'a> {
+    Borrowed(HashMap<&'a str, &'a serde_json::value::RawValue>),
+    Owned(HashMap<String, &'a serde_json::value::RawValue>),
+}
+
+impl<'a> CsvPayloadRow<'a> {
+    fn parse(payload: &'a [u8]) -> Option<Self> {
+        match serde_json::from_slice(payload) {
+            Ok(row) => Some(Self::Borrowed(row)),
+            Err(_) => serde_json::from_slice(payload).ok().map(Self::Owned),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&'a serde_json::value::RawValue> {
+        match self {
+            Self::Borrowed(row) => row.get(key).copied(),
+            Self::Owned(row) => row.get(key).copied(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Borrowed(row) => row.len(),
+            Self::Owned(row) => row.len(),
+        }
+    }
+
+    fn sorted_keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = match self {
+            Self::Borrowed(row) => row.keys().map(|k| (*k).to_string()).collect(),
+            Self::Owned(row) => row.keys().cloned().collect(),
+        };
+        keys.sort();
+        keys
+    }
+}
+
+fn invalid_data(message: String) -> serde_json::Error {
+    serde_json::Error::io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
+}
+
 /// Encodes `msg`'s JSON-object payload as a CSV row into `row_buf` (cleared first),
-/// establishing the column order from its keys when `hdr` is still unset. Returns
+/// establishing the column order from its sorted keys when `hdr` is still unset. Returns
 /// `true` when this call established the header, so the caller can emit the header
 /// line for a new file. Shared by the plain-append and member (compressed/encrypted)
-/// write paths.
+/// write paths. A payload that fails leaves `hdr` untouched.
 fn csv_encode_message(
     msg: &CanonicalMessage,
     hdr: &mut Option<Vec<String>>,
     row_buf: &mut Vec<u8>,
+    delimiter: &[u8],
 ) -> Result<bool, serde_json::Error> {
-    // Preferred path: borrow the keys and leave the values as unparsed
-    // JSON slices, so a row costs one scan plus byte copies instead of
-    // building (and re-serializing) a whole `Value` tree. Payloads with
-    // escaped keys can't be borrowed, so those fall back to the tree.
-    let raw_row =
-        serde_json::from_slice::<HashMap<&str, &serde_json::value::RawValue>>(&msg.payload).ok();
-    let parsed_row = match raw_row {
-        Some(_) => None,
-        None => match serde_json::from_slice::<serde_json::Value>(&msg.payload) {
-            Ok(serde_json::Value::Object(obj)) => Some(obj),
-            _ => None,
-        },
-    };
     // An object with no fields is rejected too: it carries no columns, so letting it
     // establish the header would fix an empty column set for the rest of the file.
-    let no_columns = match (&raw_row, &parsed_row) {
-        (Some(raw), _) => raw.is_empty(),
-        (_, Some(obj)) => obj.is_empty(),
-        _ => true,
+    let Some(row) = CsvPayloadRow::parse(&msg.payload).filter(|row| row.len() > 0) else {
+        return Err(invalid_data(
+            "CSV format requires a non-empty JSON object payload".to_string(),
+        ));
     };
-    if no_columns {
-        return Err(serde_json::Error::io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "CSV format requires a non-empty JSON object payload",
-        )));
-    }
 
-    let mut header_established = false;
-    if hdr.is_none() {
-        // Sort keys so the column order is deterministic and
-        // independent of serde_json's map type (BTreeMap vs the
-        // IndexMap enabled by the `preserve_order` feature, which
-        // `bson`/mongodb turns on under feature unification).
-        let mut cols: Vec<String> = match (&raw_row, &parsed_row) {
-            (Some(raw), _) => raw.keys().map(|k| (*k).to_string()).collect(),
-            (_, Some(obj)) => obj.keys().cloned().collect(),
-            _ => unreachable!(),
-        };
-        cols.sort();
-        *hdr = Some(cols);
-        header_established = true;
-    }
+    let new_cols = hdr.is_none().then(|| row.sorted_keys());
+    let cols = match (&new_cols, &*hdr) {
+        (Some(cols), _) | (None, Some(cols)) => cols,
+        (None, None) => unreachable!("header is either set or being established"),
+    };
 
-    let cols = hdr.as_ref().expect("header set above");
     // Reused across the batch: rows are all the same shape, so
     // after the first one this never reallocates.
     row_buf.clear();
@@ -186,88 +236,62 @@ fn csv_encode_message(
         if i > 0 {
             row_buf.push(b',');
         }
-        match (&raw_row, &parsed_row) {
-            (Some(raw), _) => {
-                if let Some(v) = raw.get(c.as_str()) {
-                    csv_append_raw(row_buf, v);
-                    matched += 1;
-                }
-            }
-            (_, Some(obj)) => {
-                if let Some(v) = obj.get(c) {
-                    csv_append_value(row_buf, v);
-                    matched += 1;
-                }
-            }
-            _ => unreachable!(),
+        if let Some(v) = row.get(c) {
+            csv_append_raw(row_buf, v, delimiter)
+                .map_err(|e| invalid_data(format!("CSV column '{c}': {e}")))?;
+            matched += 1;
         }
     }
-    if !header_established {
+    quote_blank_record(row_buf, cols.len());
+
+    if new_cols.is_none() && (matched < cols.len() || row.len() > matched) {
         // Keys the payload has beyond the ones the header covers are dropped silently, and
-        // missing ones become empty fields; both mean the file's schema drifted. Counting
-        // matches costs nothing extra, and the diagnostic is emitted once per process so a
-        // whole drifted stream doesn't flood the log.
-        let row_len = match (&raw_row, &parsed_row) {
-            (Some(raw), _) => raw.len(),
-            (_, Some(obj)) => obj.len(),
-            _ => 0,
-        };
-        if matched < cols.len() || row_len > matched {
-            static WARNED: AtomicBool = AtomicBool::new(false);
-            if !WARNED.swap(true, Ordering::Relaxed) {
-                warn!(
-                    header_columns = cols.len(),
-                    payload_keys = row_len,
-                    matched_columns = matched,
-                    "CSV payload keys differ from the established header: extra keys are dropped and missing ones written as empty fields. Logged once per process."
-                );
-            }
+        // missing ones become empty fields; both mean the file's schema drifted. Logged
+        // once per process so a whole drifted stream doesn't flood the log.
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            warn!(
+                header_columns = cols.len(),
+                payload_keys = row.len(),
+                matched_columns = matched,
+                "CSV payload keys differ from the established header: extra keys are dropped and missing ones written as empty fields. Logged once per process."
+            );
         }
     }
-    Ok(header_established)
+    let established = new_cols.is_some();
+    if established {
+        *hdr = new_cols;
+    }
+    Ok(established)
 }
 
-/// Appends one still-unparsed JSON value as a CSV field. Scalars are copied
-/// straight from the source bytes; only escaped strings and nested
-/// arrays/objects need any decoding.
-fn csv_append_raw(buf: &mut Vec<u8>, raw: &serde_json::value::RawValue) {
+/// Appends one still-unparsed JSON value as a CSV field. Scalars are copied straight
+/// from the source bytes, so numbers keep their spelling; nested arrays/objects are
+/// written as their own JSON text, keeping the producer's key order.
+///
+/// Fails for a string with no UTF-8 spelling (a lone surrogate escape) rather than
+/// silently writing the cell empty.
+fn csv_append_raw(
+    buf: &mut Vec<u8>,
+    raw: &serde_json::value::RawValue,
+    delimiter: &[u8],
+) -> Result<(), serde_json::Error> {
     let text = raw.get();
     match text.as_bytes().first() {
         Some(b'"') => {
             let inner = &text[1..text.len() - 1];
-            if !inner.as_bytes().contains(&b'\\') {
-                csv_append_field(buf, inner);
-            } else if let Ok(decoded) = serde_json::from_str::<String>(text) {
-                csv_append_field(buf, &decoded);
+            if inner.as_bytes().contains(&b'\\') {
+                csv_append_field(buf, &serde_json::from_str::<String>(text)?, delimiter);
+            } else {
+                csv_append_field(buf, inner, delimiter);
             }
         }
-        // Nested values are re-serialized compactly, matching the parsed path.
-        Some(b'{') | Some(b'[') => {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-                csv_append_field(buf, &v.to_string());
-            }
-        }
+        // Raw line breaks are JSON whitespace; dropping them keeps the cell on one line.
+        Some(b'{') | Some(b'[') => csv_append_field(buf, &strip_json_line_breaks(text), delimiter),
         // Numbers, bools, null: never need quoting, but the scan is one pass anyway.
-        _ => csv_append_field(buf, text),
+        _ => csv_append_field(buf, text, delimiter),
     }
-}
-
-/// Appends one JSON value as a CSV field. Numbers, bools and nulls are written
-/// straight into `buf` — they can never need CSV quoting, so this skips both the
-/// escape scan and the `to_string` allocation that dominates numeric-heavy rows.
-fn csv_append_value(buf: &mut Vec<u8>, v: &serde_json::Value) {
-    use std::io::Write as _;
-    match v {
-        serde_json::Value::String(s) => csv_append_field(buf, s),
-        serde_json::Value::Number(n) => {
-            let _ = write!(buf, "{n}");
-        }
-        serde_json::Value::Bool(true) => buf.extend_from_slice(b"true"),
-        serde_json::Value::Bool(false) => buf.extend_from_slice(b"false"),
-        serde_json::Value::Null => buf.extend_from_slice(b"null"),
-        // Nested arrays/objects keep their JSON spelling and do need escaping.
-        other => csv_append_field(buf, &other.to_string()),
-    }
+    Ok(())
 }
 
 /// Parses a single CSV line into fields. Supports quoted fields with escaped `""`.
@@ -279,7 +303,7 @@ fn csv_append_value(buf: &mut Vec<u8>, v: &serde_json::Value) {
 /// copied in bulk: no per-field `String`, and a row costs one allocation (the payload)
 /// rather than one per column.
 ///
-/// Quote handling matches [`csv_ends_inside_quotes`] exactly, including its quirk that a
+/// Quote handling matches [`CsvQuoteState`] exactly, including its quirk that a
 /// quote opens a section only while the field is still empty — so `in"ch` keeps a literal
 /// quote and `"a"x` reads as `ax`. The two must never disagree about where a record ends.
 ///
@@ -336,6 +360,8 @@ fn emit_csv_field(out: &mut Vec<u8>, bytes: &[u8], pos: &mut usize) -> bool {
     false
 }
 
+const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
+
 /// The column state one CSV source threads across the records of a file.
 ///
 /// Each column is stored as the bytes a data row writes ahead of its value — the
@@ -348,28 +374,54 @@ pub(crate) struct CsvHeader {
 }
 
 impl CsvHeader {
-    /// Reads the header record. `bytes` must be valid UTF-8.
+    /// Reads the header record. `bytes` must be valid UTF-8. A leading byte-order mark
+    /// (Excel's "CSV UTF-8") is encoding framing, not part of the first column's name.
     fn parse(bytes: &[u8]) -> Self {
-        let mut prefixes: Vec<Vec<u8>> = Vec::new();
+        let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
+        // Kept JSON-escaped: escaping is one-to-one, so comparing them compares the names.
+        let mut names: Vec<Vec<u8>> = Vec::new();
         let mut pos = 0;
         loop {
-            let mut prefix = Vec::with_capacity(16);
-            if !prefixes.is_empty() {
-                prefix.push(b',');
-            }
-            prefix.push(b'"');
-            let more = emit_csv_field(&mut prefix, bytes, &mut pos);
-            prefix.extend_from_slice(b"\":\"");
-            prefixes.push(prefix);
+            let mut name = Vec::with_capacity(16);
+            let more = emit_csv_field(&mut name, bytes, &mut pos);
+            names.push(name);
             if !more {
                 break;
             }
         }
+        dedup_column_names(&mut names);
+        let prefixes: Vec<Vec<u8>> = names
+            .into_iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let mut prefix = Vec::with_capacity(name.len() + 5);
+                if i > 0 {
+                    prefix.push(b',');
+                }
+                prefix.push(b'"');
+                prefix.extend_from_slice(&name);
+                prefix.extend_from_slice(b"\":\"");
+                prefix
+            })
+            .collect();
         let prefix_len = prefixes.iter().map(Vec::len).sum();
         Self {
             prefixes,
             prefix_len,
         }
+    }
+
+    /// The decoded column names, in file order.
+    fn column_names(&self) -> Vec<String> {
+        self.prefixes
+            .iter()
+            .map(|prefix| {
+                // `[,]"<escaped name>":"` → the quoted name.
+                let prefix = prefix.strip_prefix(b",").unwrap_or(prefix);
+                serde_json::from_slice(&prefix[..prefix.len() - 2])
+                    .expect("header prefixes hold JSON-escaped names")
+            })
+            .collect()
     }
 
     /// Encodes one data record as a JSON object of string values.
@@ -425,7 +477,10 @@ impl CsvHeader {
     }
 }
 
-pub(crate) fn parse_delimiter(delimiter: Option<&str>) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn parse_delimiter(
+    delimiter: Option<&str>,
+    format: &FileFormat,
+) -> anyhow::Result<Vec<u8>> {
     let bytes = match delimiter {
         Some(s) if s.starts_with("0x") => {
             let hex = s.trim_start_matches("0x");
@@ -447,40 +502,83 @@ pub(crate) fn parse_delimiter(delimiter: Option<&str>) -> anyhow::Result<Vec<u8>
     if bytes.is_empty() {
         return Err(anyhow::anyhow!("Delimiter cannot be empty"));
     }
+    // A comma or quote in the record separator is indistinguishable from CSV syntax.
+    if matches!(format, FileFormat::Csv) && bytes.iter().any(|b| matches!(b, b',' | b'"')) {
+        return Err(anyhow::anyhow!(
+            "CSV record delimiter must not contain ',' or '\"'"
+        ));
+    }
 
     Ok(bytes)
 }
 
 /// True when `buf` stops inside an open quote, so the delimiter it ended on was field
 /// data: RFC 4180 lets a quoted field contain the record separator. Mirrors the quote
-/// handling in [`parse_csv_row`], down to only opening a quote at the start of a field,
+/// handling in [`emit_csv_field`], down to only opening a quote at the start of a field,
 /// so the splitter and the parser can never disagree about where a record ends.
+#[cfg(test)]
 fn csv_ends_inside_quotes(buf: &[u8]) -> bool {
-    let mut in_quotes = false;
-    let mut field_is_empty = true;
-    let mut i = 0;
-    while i < buf.len() {
-        let b = buf[i];
-        if in_quotes {
-            if b == b'"' {
-                if buf.get(i + 1) == Some(&b'"') {
-                    i += 1;
-                } else {
-                    in_quotes = false;
-                }
-            }
-        } else if b == b'"' && field_is_empty {
-            in_quotes = true;
-        } else if b == b',' {
-            field_is_empty = true;
-            i += 1;
-            continue;
-        } else {
-            field_is_empty = false;
+    let mut state = CsvQuoteState::default();
+    state.feed(buf);
+    state.in_quotes()
+}
+
+/// Tracks whether CSV bytes fed so far stop inside an open quote. Incremental, so a
+/// record read in pieces is scanned once in total, not once per piece.
+///
+/// A quote seen last inside a quoted section may be the first half of a `""` escape, so
+/// it is held as `pending_quote` until the next byte (or the end) decides it.
+pub(crate) struct CsvQuoteState {
+    in_quotes: bool,
+    field_is_empty: bool,
+    pending_quote: bool,
+    started: bool,
+}
+
+impl Default for CsvQuoteState {
+    fn default() -> Self {
+        Self {
+            in_quotes: false,
+            field_is_empty: true,
+            pending_quote: false,
+            started: false,
         }
-        i += 1;
     }
-    in_quotes
+}
+
+impl CsvQuoteState {
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        // A leading BOM is framing, so it must not make the first field non-empty.
+        let bytes = if self.started {
+            bytes
+        } else {
+            self.started = true;
+            bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes)
+        };
+        for &b in bytes {
+            if self.pending_quote {
+                self.pending_quote = false;
+                if b == b'"' {
+                    continue;
+                }
+                self.in_quotes = false;
+            }
+            if self.in_quotes {
+                if b == b'"' {
+                    self.pending_quote = true;
+                }
+            } else if b == b'"' && self.field_is_empty {
+                self.in_quotes = true;
+            } else {
+                self.field_is_empty = b == b',';
+            }
+        }
+    }
+
+    /// True when the bytes fed so far stop inside an open quote.
+    pub(crate) fn in_quotes(&self) -> bool {
+        self.in_quotes && !self.pending_quote
+    }
 }
 
 /// Reads one *record*, which for CSV may span several delimiters. Every read loop and
@@ -492,15 +590,20 @@ async fn read_record<R: AsyncBufReadExt + Unpin>(
     format: &FileFormat,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<usize> {
+    let start = buf.len();
     let mut total = read_until_bytes(reader, delimiter, buf).await?;
     if !matches!(format, FileFormat::Csv) {
         return Ok(total);
     }
-    while total > 0 && csv_ends_inside_quotes(buf) {
+    let mut quotes = CsvQuoteState::default();
+    quotes.feed(&buf[start..]);
+    while total > 0 && quotes.in_quotes() {
+        let from = buf.len();
         let n = read_until_bytes(reader, delimiter, buf).await?;
         if n == 0 {
             break; // Unterminated quote at EOF: emit what there is rather than hang.
         }
+        quotes.feed(&buf[from..]);
         total += n;
     }
     Ok(total)
@@ -638,6 +741,64 @@ async fn write_finalized_file(path: &Path, body: &[u8]) -> Result<(), PublisherE
 }
 
 impl FilePublisher {
+    /// Columns of the header an existing CSV file already has, so appended rows line up
+    /// with it. `None` when it has none or it can't be read; the first payload's keys
+    /// then decide, as for a new file.
+    async fn existing_csv_header(&self) -> Option<Vec<String>> {
+        let this = self.clone();
+        let read = tokio::task::spawn_blocking(move || this.read_csv_header_sync()).await;
+        match read {
+            Ok(Ok(columns)) => columns,
+            Ok(Err(e)) => {
+                warn!(path = %self.path, error = %e, "Could not read the existing CSV header; columns follow the first payload.");
+                None
+            }
+            Err(e) => {
+                warn!(path = %self.path, error = %e, "Reading the existing CSV header failed; columns follow the first payload.");
+                None
+            }
+        }
+    }
+
+    fn read_csv_header_sync(&self) -> std::io::Result<Option<Vec<String>>> {
+        let file = std::fs::File::open(&self.path)?;
+        let mut reader = std::io::BufReader::new(self.decoded_reader(file));
+        let mut buf = Vec::new();
+        while buf.is_empty() {
+            if read_record_sync(&mut reader, &self.delimiter, &FileFormat::Csv, &mut buf)? == 0 {
+                return Ok(None);
+            }
+            if buf.ends_with(&self.delimiter) {
+                buf.truncate(buf.len() - self.delimiter.len());
+            }
+            if self.delimiter == b"\n" && buf.ends_with(b"\r") {
+                buf.pop();
+            }
+        }
+        let header = CsvHeader::parse(String::from_utf8_lossy(&buf).as_bytes());
+        Ok(Some(header.column_names()))
+    }
+
+    /// The file's plaintext, undoing whatever compression/encryption the sink applies.
+    fn decoded_reader(&self, file: std::fs::File) -> Box<dyn std::io::Read> {
+        #[cfg(feature = "encryption")]
+        if let Some(crypto) = &self.crypto {
+            return Box::new(EncryptedFramesReader::new(
+                std::io::BufReader::new(file),
+                crypto.clone(),
+                self.compression,
+            ));
+        }
+        #[cfg(feature = "compression")]
+        if self.compression != Compression::None {
+            return crate::support::compression::decompress_reader(
+                self.compression,
+                std::io::BufReader::new(file),
+            );
+        }
+        Box::new(file)
+    }
+
     /// Opens the sink with the naming scheme the config alone implies. Without a route there
     /// is no input to resolve `auto` against, so it falls back to `write_time`.
     pub async fn new(config: &FileConfig) -> anyhow::Result<Self> {
@@ -677,7 +838,7 @@ impl FilePublisher {
         }
 
         let file_lock = get_file_lock(path_str);
-        let delimiter = parse_delimiter(config.delimiter.as_deref())?;
+        let delimiter = parse_delimiter(config.delimiter.as_deref(), &config.format)?;
         let format = config.format.clone();
         // Part names must advertise what the bytes actually are: a compressed or sealed part
         // holds one member, so it earns the same suffixes the appending sink's file would.
@@ -751,7 +912,7 @@ impl FilePublisher {
                 let mut body = Vec::new();
                 for mut message in run.messages {
                     message.strip_source_metadata();
-                    let bytes = encode_record(&message, &self.format)
+                    let bytes = encode_record(&message, &self.format, &self.delimiter)
                         .map_err(|error| PublisherError::NonRetryable(anyhow::anyhow!(error)))?;
                     body.extend_from_slice(&bytes);
                     body.extend_from_slice(&self.delimiter);
@@ -865,6 +1026,11 @@ impl FilePublisher {
         } else {
             None
         };
+        if let Some(hdr) = csv_header_guard.as_mut() {
+            if hdr.is_none() && !file_is_empty {
+                **hdr = self.existing_csv_header().await;
+            }
+        }
         let mut wrote_csv_header = false;
         let mut csv_row_buf: Vec<u8> = Vec::new();
         for mut msg in messages {
@@ -873,11 +1039,12 @@ impl FilePublisher {
             let encoded = match self.format {
                 FileFormat::Csv => {
                     let hdr = csv_header_guard.as_mut().expect("csv header lock held");
-                    match csv_encode_message(&msg, hdr, &mut csv_row_buf) {
+                    match csv_encode_message(&msg, hdr, &mut csv_row_buf, &self.delimiter) {
                         Ok(header_established) => {
                             if header_established && file_is_empty {
                                 raw.extend_from_slice(&csv_encode_row(
                                     hdr.as_ref().expect("header set above"),
+                                    &self.delimiter,
                                 ));
                                 raw.extend_from_slice(&self.delimiter);
                                 wrote_csv_header = true;
@@ -887,7 +1054,7 @@ impl FilePublisher {
                         Err(e) => Err(e),
                     }
                 }
-                ref fmt => encode_record(&msg, fmt).map(Some),
+                ref fmt => encode_record(&msg, fmt, &self.delimiter).map(Some),
             };
             match encoded {
                 Ok(Some(bytes)) => {
@@ -1056,6 +1223,11 @@ impl MessagePublisher for FilePublisher {
         } else {
             None
         };
+        if let Some(hdr) = csv_header_guard.as_mut() {
+            if hdr.is_none() && pre_len.is_some_and(|len| len > 0) {
+                **hdr = self.existing_csv_header().await;
+            }
+        }
         // Row buffer reused for every CSV record in this batch.
         let mut csv_row_buf: Vec<u8> = Vec::new();
         // Body + delimiter, likewise reused, so one contiguous write costs no
@@ -1075,11 +1247,13 @@ impl MessagePublisher for FilePublisher {
             let serialized_msg = match self.format {
                 FileFormat::Csv => {
                     let hdr = csv_header_guard.as_mut().expect("csv header lock held");
-                    match csv_encode_message(&msg, hdr, &mut csv_row_buf) {
+                    match csv_encode_message(&msg, hdr, &mut csv_row_buf, &self.delimiter) {
                         Ok(header_established) => {
                             if header_established && file_is_empty {
-                                let mut line =
-                                    csv_encode_row(hdr.as_ref().expect("header set above"));
+                                let mut line = csv_encode_row(
+                                    hdr.as_ref().expect("header set above"),
+                                    &self.delimiter,
+                                );
                                 line.extend_from_slice(&self.delimiter);
                                 csv_header_line = Some(line);
                             }
@@ -1088,7 +1262,7 @@ impl MessagePublisher for FilePublisher {
                         Err(e) => Err(e),
                     }
                 }
-                ref fmt => encode_record(&msg, fmt).map(Some),
+                ref fmt => encode_record(&msg, fmt, &self.delimiter).map(Some),
             };
             if let Some(line) = csv_header_line {
                 // Set before the write: the header is established in memory either way, so a
@@ -1501,15 +1675,20 @@ fn read_record_sync<R: std::io::BufRead>(
     format: &FileFormat,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<usize> {
+    let start = buf.len();
     let mut total = read_until_bytes_sync(reader, delimiter, buf)?;
     if !matches!(format, FileFormat::Csv) {
         return Ok(total);
     }
-    while total > 0 && csv_ends_inside_quotes(buf) {
+    let mut quotes = CsvQuoteState::default();
+    quotes.feed(&buf[start..]);
+    while total > 0 && quotes.in_quotes() {
+        let from = buf.len();
         let n = read_until_bytes_sync(reader, delimiter, buf)?;
         if n == 0 {
             break;
         }
+        quotes.feed(&buf[from..]);
         total += n;
     }
     Ok(total)
@@ -1697,9 +1876,14 @@ fn run_file_tail_task_sync(
     }
 }
 
+/// Blank lines that precede a queued message in the file, by message id; acking the
+/// message deletes them too.
+type ExtraLines = Arc<StdMutex<HashMap<u128, usize>>>;
+
 struct FileQueueConsumer {
     msg_rx: async_channel::Receiver<Vec<CanonicalMessage>>,
     lines_in_memory: Arc<AtomicUsize>,
+    extra_lines: ExtraLines,
     path: String,
     file_lock: Arc<Mutex<()>>,
     buffer: Arc<Mutex<Vec<CanonicalMessage>>>,
@@ -1722,6 +1906,7 @@ fn run_file_queue_task(
     delimiter: Vec<u8>,
     format: FileFormat,
     ready: Arc<AtomicBool>,
+    extra_lines: ExtraLines,
 ) {
     let mut current_sleep = std::time::Duration::from_millis(1);
     const MAX_SLEEP: std::time::Duration = std::time::Duration::from_millis(100);
@@ -1735,6 +1920,7 @@ fn run_file_queue_task(
         buf.clear();
         let mut batch = Vec::with_capacity(128);
         let mut lines_read = 0;
+        let mut blanks = 0;
 
         {
             let _guard = runtime_handle.block_on(file_lock.lock());
@@ -1768,7 +1954,9 @@ fn run_file_queue_task(
             }
 
             if !error {
-                for _ in 0..128 {
+                // Bounded by emitted rows, not records: a run of blank records must not end the
+                // read early, or an empty batch would pose as EOF.
+                while batch.len() < 128 {
                     buf.clear();
                     match read_record_sync(&mut reader, &delimiter, &format, &mut buf) {
                         Ok(0) => break,
@@ -1782,12 +1970,19 @@ fn run_file_queue_task(
                             }
                             match parse_message(&buf, &format, &mut csv_header) {
                                 Some(msg) => {
+                                    if blanks > 0 {
+                                        extra_lines
+                                            .lock()
+                                            .unwrap_or_else(|e| e.into_inner())
+                                            .insert(msg.message_id, blanks);
+                                    }
+                                    lines_read += 1 + blanks;
+                                    blanks = 0;
                                     batch.push(msg);
-                                    lines_read += 1;
                                 }
-                                None => {
-                                    // CSV header line: remove it immediately so it never
-                                    // occupies a slot in the ack/delete line accounting.
+                                // A header or blank line at the file's front: nothing unacked
+                                // precedes it, so remove it now, outside the line accounting.
+                                None if skip_count == 0 && lines_read == 0 && blanks == 0 => {
                                     if let Err(e) = runtime_handle.block_on(remove_lines_from_file(
                                         &path, 1, &delimiter, &format,
                                     )) {
@@ -1798,6 +1993,8 @@ fn run_file_queue_task(
                                         );
                                     }
                                 }
+                                // A blank line behind unacked rows is deleted with the next row.
+                                None => blanks += 1,
                             }
                         }
                         Err(_) => break,
@@ -2239,7 +2436,7 @@ impl FileConsumer {
     }
 
     async fn new_backend(config: &FileConfig) -> anyhow::Result<Self> {
-        let delimiter = parse_delimiter(config.delimiter.as_deref())?;
+        let delimiter = parse_delimiter(config.delimiter.as_deref(), &config.format)?;
         let format = config.format.clone();
         if matches!(format, FileFormat::Csv)
             && matches!(
@@ -2312,6 +2509,8 @@ impl FileConsumer {
                 let (msg_tx, msg_rx) = async_channel::bounded(100);
                 let file_lock = get_file_lock(&config.path);
                 let lines_in_memory = Arc::new(AtomicUsize::new(0));
+                let extra_lines = ExtraLines::default();
+                let extra_lines_clone = extra_lines.clone();
                 let ready = Arc::new(AtomicBool::new(false));
                 let ready_clone = ready.clone();
                 let lines_clone = lines_in_memory.clone();
@@ -2331,6 +2530,7 @@ impl FileConsumer {
                         delimiter_clone,
                         format_clone,
                         ready_clone,
+                        extra_lines_clone,
                     );
                 });
 
@@ -2338,6 +2538,7 @@ impl FileConsumer {
                 Ok(Self::wrap(ConsumerBackend::Queue(FileQueueConsumer {
                     msg_rx,
                     lines_in_memory,
+                    extra_lines,
                     path: config.path.clone(),
                     file_lock,
                     buffer: Arc::new(Mutex::new(Vec::new())),
@@ -2738,6 +2939,7 @@ impl FileConsumer {
                 let lock = c.file_lock.clone();
                 let buffer_clone = c.buffer.clone();
                 let lines_mem = c.lines_in_memory.clone();
+                let extra_lines = c.extra_lines.clone();
                 let batch_for_commit = batch.clone();
                 let delimiter = c.delimiter.clone();
                 let format = c.format.clone();
@@ -2779,14 +2981,21 @@ impl FileConsumer {
                             }
 
                             if leading_acks > 0 {
+                                let lines = {
+                                    let mut extra =
+                                        extra_lines.lock().unwrap_or_else(|e| e.into_inner());
+                                    batch_for_commit[..leading_acks]
+                                        .iter()
+                                        .map(|m| 1 + extra.remove(&m.message_id).unwrap_or(0))
+                                        .sum()
+                                };
                                 let _guard = lock.lock().await;
                                 if let Err(e) =
-                                    remove_lines_from_file(&path, leading_acks, &delimiter, &format)
-                                        .await
+                                    remove_lines_from_file(&path, lines, &delimiter, &format).await
                                 {
                                     tracing::error!("Failed to remove lines from {}: {}", path, e);
                                 }
-                                lines_mem.fetch_sub(leading_acks, Ordering::SeqCst);
+                                lines_mem.fetch_sub(lines, Ordering::SeqCst);
                             }
                             Ok(())
                         })
@@ -2817,14 +3026,18 @@ struct RecordWrapper<'a, P: serde::Serialize> {
 /// Encodes a single message body for a non-CSV [`FileFormat`] (Raw/Normal/Json/Text).
 /// Shared by the file sink and the object-store sink. CSV needs cross-record header
 /// state, so it is handled inline by the file sink and rejected by the object sink.
+///
+/// `delimiter` is the record separator the caller appends. JSON records are rewritten so
+/// they cannot contain it (see [`escape_delimiter_in_json`]); `raw` is written as is.
 pub(crate) fn encode_record(
     msg: &CanonicalMessage,
     format: &FileFormat,
+    delimiter: &[u8],
 ) -> Result<Bytes, serde_json::Error> {
-    match format {
+    let record = match format {
         // `Bytes` is refcounted, so a verbatim copy costs no allocation and no memcpy;
         // the caller's append into the batch buffer is then the only copy of the payload.
-        FileFormat::Raw => Ok(msg.payload.clone()),
+        FileFormat::Raw => return Ok(msg.payload.clone()),
         // The sink format decides the encoding, not the message's origin: `normal`
         // always writes the wrapper so `message_id` and metadata survive the round
         // trip. Use `format: raw` for verbatim, unwrapped copies.
@@ -2834,9 +3047,16 @@ pub(crate) fn encode_record(
         // keys and reformat its numbers, which the reader then cannot undo.
         FileFormat::Json => {
             if let Ok(raw) = serde_json::from_slice::<&serde_json::value::RawValue>(&msg.payload) {
+                // A pretty-printed payload's line breaks would split the record.
+                let one_line = match strip_json_line_breaks(raw.get()) {
+                    std::borrow::Cow::Borrowed(_) => None,
+                    std::borrow::Cow::Owned(text) => {
+                        Some(serde_json::value::RawValue::from_string(text)?)
+                    }
+                };
                 serde_json::to_vec(&RecordWrapper {
                     message_id: msg.message_id,
-                    payload: raw,
+                    payload: one_line.as_deref().unwrap_or(raw),
                     metadata: &msg.metadata,
                 })
                 .map(Bytes::from)
@@ -2860,7 +3080,66 @@ pub(crate) fn encode_record(
         FileFormat::Parquet => Err(serde::ser::Error::custom(
             "parquet is encoded per batch by the object_store sink, not per record",
         )),
+    }?;
+    escape_delimiter_in_json(record, delimiter)
+}
+
+/// Makes a JSON record safe to frame with a custom `delimiter`: inside strings, every
+/// character sharing a byte with it becomes a `\u` escape, which decodes to the same
+/// value. Fails when the delimiter still occurs, i.e. in JSON syntax outside a string.
+fn escape_delimiter_in_json(record: Bytes, delimiter: &[u8]) -> Result<Bytes, serde_json::Error> {
+    // Line breaks never occur raw in these records: serde escapes them in strings, and
+    // `json` strips them from verbatim payloads.
+    if matches!(delimiter, [b'\n'] | [b'\r', b'\n'])
+        || memchr::memmem::find(&record, delimiter).is_none()
+    {
+        return Ok(record);
     }
+    let text = std::str::from_utf8(&record)
+        .map_err(|e| invalid_data(format!("record is not UTF-8: {e}")))?;
+    let shares_byte = |c: char| {
+        c.encode_utf8(&mut [0; 4])
+            .bytes()
+            .any(|b| delimiter.contains(&b))
+    };
+
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut in_string = false;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if in_string => {
+                // An existing escape is copied whole; `\uXXXX` carries four more chars.
+                out.push(c);
+                if let Some(kind) = chars.next() {
+                    out.push(kind);
+                    if kind == 'u' {
+                        out.extend(chars.by_ref().take(4));
+                    }
+                }
+            }
+            '"' => {
+                in_string = !in_string;
+                out.push(c);
+            }
+            c if in_string && shares_byte(c) => {
+                for unit in c.encode_utf16(&mut [0; 2]) {
+                    use std::fmt::Write as _;
+                    let _ = write!(out, "\\u{unit:04x}");
+                }
+            }
+            c => out.push(c),
+        }
+    }
+
+    if memchr::memmem::find(out.as_bytes(), delimiter).is_some() {
+        return Err(invalid_data(format!(
+            "record contains the delimiter {:?} outside a JSON string, where it cannot be \
+             escaped; use a delimiter JSON never contains, such as 0x1e",
+            String::from_utf8_lossy(delimiter)
+        )));
+    }
+    Ok(Bytes::from(out))
 }
 
 /// Marks a record whose payload is neither JSON nor UTF-8 and was therefore written as a
@@ -2901,7 +3180,7 @@ fn decode_one(
     // `Some` only for CSV, where it makes the decode a pure function of the header;
     // every other format ignores the header slot entirely.
     let mut msg = match header {
-        Some(header) => decode_csv_row(header, bytes),
+        Some(header) => decode_csv_row(header, bytes)?,
         None => parse_message(bytes, format, &mut None)?,
     };
     if with_offset {
@@ -2931,7 +3210,11 @@ pub(crate) fn decode_records(
     let mut out = Vec::with_capacity(spans.len());
 
     if matches!(format, FileFormat::Csv) && csv_header.is_none() {
-        let Some((&(start, end, _), rest)) = spans.split_first() else {
+        let blank = spans
+            .iter()
+            .take_while(|&&(start, end, _)| start == end)
+            .count();
+        let Some((&(start, end, _), rest)) = spans[blank..].split_first() else {
             return out;
         };
         *csv_header = Some(Arc::new(CsvHeader::parse(
@@ -3009,13 +3292,45 @@ pub(crate) fn decode_records(
     out
 }
 
+/// Renames repeated header names `name_2`, `name_3`, … so every column keeps its own
+/// JSON key; a repeated key would leave readers to silently keep only one value. A
+/// suffix never takes a name the header already has.
+fn dedup_column_names(names: &mut [Vec<u8>]) {
+    let original: HashSet<Vec<u8>> = names.iter().cloned().collect();
+    if original.len() == names.len() {
+        return;
+    }
+    let mut used = HashSet::with_capacity(names.len());
+    for name in names.iter_mut() {
+        if used.insert(name.clone()) {
+            continue;
+        }
+        let renamed = (2u32..)
+            .map(|n| [name.as_slice(), format!("_{n}").as_bytes()].concat())
+            .find(|candidate| !original.contains(candidate) && !used.contains(candidate))
+            .expect("the suffixes are unbounded");
+        used.insert(renamed.clone());
+        *name = renamed;
+    }
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        warn!("CSV header repeats column names; repeats are renamed with a _2, _3, … suffix. Logged once per process.");
+    }
+}
+
 /// Decodes one CSV record against an established header.
 ///
 /// Validated once per record so the field walk can stay byte-wise, and lossy so an
 /// ill-encoded source still yields a valid JSON string.
-fn decode_csv_row(header: &CsvHeader, buffer: &[u8]) -> CanonicalMessage {
+fn decode_csv_row(header: &CsvHeader, buffer: &[u8]) -> Option<CanonicalMessage> {
+    if buffer.is_empty() {
+        return None;
+    }
     let line = String::from_utf8_lossy(buffer);
-    CanonicalMessage::new(header.encode_row(line.as_bytes()), None)
+    Some(CanonicalMessage::new(
+        header.encode_row(line.as_bytes()),
+        None,
+    ))
 }
 
 pub(crate) fn parse_message(
@@ -3025,11 +3340,12 @@ pub(crate) fn parse_message(
 ) -> Option<CanonicalMessage> {
     match format {
         FileFormat::Csv => match csv_header {
+            _ if buffer.is_empty() => None,
             None => {
                 *csv_header = Some(CsvHeader::parse(String::from_utf8_lossy(buffer).as_bytes()));
                 None
             }
-            Some(header) => Some(decode_csv_row(header, buffer)),
+            Some(header) => decode_csv_row(header, buffer),
         },
         // Parquet objects are decoded whole by the object_store source; there are no lines.
         FileFormat::Parquet => None,

@@ -25,12 +25,15 @@ process-local or **shared across every instance of the route**:
 | `store` | Scope | Extra feature |
 |---|---|---|
 | `sled:///path` (or a bare path) | per-process only | — |
+| `memory://[name][?max_keys=N]` | per-process, forgotten on restart | — |
 | `mongodb://host/db[/collection]` | shared between instances | `mongodb` |
 | `postgres` / `mysql` / `mariadb` / `sqlite` `://…[/table]` | shared between instances | `sqlx` |
 
 The collection/table defaults to `mqb_dedup_<route>`. Point a shared store at the deployment
 your sink already uses rather than standing up extra infrastructure. `sled_path` is the legacy
-spelling of a local sled store, equivalent to `store: "sled://<path>"`.
+spelling of a local sled store, equivalent to `store: "sled://<path>"`. `memory://` is the
+fastest store (~3x sled) but forgets every key on restart, so redeliveries after a restart go
+through again; it holds at most `max_keys` keys (default 1,000,000), evicting the oldest first.
 
 ```yaml
 # Shared across every instance of this route.
@@ -51,8 +54,20 @@ every writer:
   skip.
 - **SQL** — `ON CONFLICT (key) DO NOTHING` / `ON DUPLICATE KEY UPDATE`.
 - **ClickHouse** — `ReplacingMergeTree(version)` collapses duplicates by sort key at merge time.
+- **File / object storage** — no constraint, so the file name does the job:
+  `name_by: source_position` names each part after the source range it holds, and a restart
+  skips ranges already written. Needs a replayable input (Kafka, Postgres CDC, SQL cursor,
+  MongoDB change stream, `file` in `consume` mode); `object_store` picks it by default for one.
 
-Full examples in [Upserts & insert-if-absent](upserts.md).
+```yaml
+output:
+  object_store:
+    url: "s3://my-bucket/orders"
+    name_by: source_position   # part-orders-<partition>-<start>-<end>.jsonl
+```
+
+Full examples in [Upserts & insert-if-absent](upserts.md) and, for files,
+[Files & object storage](../engine/delivery.md#files--object-storage--name_by).
 
 ## Deduplicating CDC replays
 

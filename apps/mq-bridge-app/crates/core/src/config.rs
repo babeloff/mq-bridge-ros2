@@ -130,7 +130,22 @@ pub fn app_config_schema() -> serde_json::Value {
     }
 
     for (name, declared) in registered_endpoint_schemas() {
-        add_endpoint_definition(&mut schema, &name, declared);
+        let prefix = pascal_case(&name);
+        let definition = format!("{prefix}Config");
+        add_variant_definition(
+            &mut schema,
+            "Endpoint",
+            &name,
+            &prefix,
+            &definition,
+            declared,
+        );
+    }
+    // A middleware that declares nothing is still offered, with a free-form config.
+    for (name, declared) in mq_bridge::extensions::middleware_config_schemas() {
+        let declared = declared.unwrap_or_else(|| serde_json::json!({ "type": "object" }));
+        let prefix = format!("{}Middleware", pascal_case(&name));
+        add_variant_definition(&mut schema, "Middleware", &name, &prefix, &prefix, declared);
     }
     schema
 }
@@ -159,16 +174,22 @@ fn registered_endpoint_schemas() -> std::collections::BTreeMap<String, serde_jso
     schemas
 }
 
-/// Puts one endpoint's declared schema into the document and lists it as an
-/// `Endpoint` variant, which is what makes the UI offer it.
-fn add_endpoint_definition(schema: &mut serde_json::Value, name: &str, declared: serde_json::Value) {
-    let prefix = pascal_case(name);
+/// Puts one endpoint's or middleware's declared schema into the document and
+/// lists it as a variant of `union`, which is what makes the UI offer it.
+fn add_variant_definition(
+    schema: &mut serde_json::Value,
+    union: &str,
+    name: &str,
+    prefix: &str,
+    definition: &str,
+    declared: serde_json::Value,
+) {
     // Claimed before lifting, so a nested definition cannot take the same key.
-    let definition = reserve_definition(schema, &format!("{prefix}Config"));
-    schema["$defs"][&definition] = lift_definitions(schema, &prefix, declared);
-    schema["$defs"]["Endpoint"]["oneOf"]
+    let definition = reserve_definition(schema, definition);
+    schema["$defs"][&definition] = lift_definitions(schema, prefix, declared);
+    schema["$defs"][union]["oneOf"]
         .as_array_mut()
-        .expect("AppConfig schema should contain Endpoint variants")
+        .unwrap_or_else(|| panic!("AppConfig schema should contain {union} variants"))
         .push(serde_json::json!({
             "type": "object",
             "properties": { name: { "$ref": format!("#/$defs/{definition}") } },
@@ -773,13 +794,23 @@ fn load_config_internal(
         builder = builder.add_source(source_from_str(override_str, config::FileFormat::Yaml)?);
     }
 
+    let env_vars: HashMap<String, String> = std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .collect();
     let builder = if use_env_overrides {
+        // Consumers/publishers are lists, so the env source can't index into them.
+        let env_source = env_vars
+            .iter()
+            .filter(|(key, _)| !is_entity_secret_key(key, false))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
         builder.add_source(
             config::Environment::default()
                 .prefix("MQB")
                 .separator("__")
                 .ignore_empty(true)
-                .try_parsing(true),
+                .try_parsing(true)
+                .source(Some(env_source)),
         )
     } else {
         builder
@@ -799,8 +830,106 @@ fn load_config_internal(
             .try_deserialize()?,
         None => settings.try_deserialize()?,
     };
+    // Without env overrides (desktop) route secrets need re-applying as well.
+    let stored_secrets: HashMap<String, String> = env_vars
+        .into_iter()
+        .filter(|(key, _)| is_entity_secret_key(key, !use_env_overrides))
+        .collect();
+    config.apply_stored_secrets(&stored_secrets, !use_env_overrides);
     config.migrate_legacy_routes();
     Ok((config, persistent_file))
+}
+
+fn is_entity_secret_key(key: &str, include_routes: bool) -> bool {
+    let key = key.to_ascii_uppercase();
+    key.starts_with("MQB__CONSUMERS__")
+        || key.starts_with("MQB__PUBLISHERS__")
+        || (include_routes && key.starts_with("MQB__ROUTES__"))
+}
+
+/// Keys come from [`AppConfig::extract_secrets`]: `ENTITY__{name|id}__PATH__TO__FIELD`.
+fn entity_secrets(
+    secrets: &HashMap<String, String>,
+    entity_type: &str,
+    name: &str,
+    id: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut parts = vec![sanitize_name_for_env(name)];
+    parts.extend(id.map(sanitize_id_for_env));
+    let mut matched = Vec::new();
+    // Id-keyed entries come last so they win over a stale name key.
+    for part in parts {
+        let prefix = format!("MQB__{entity_type}__{part}__");
+        let mut found: Vec<(String, String)> = secrets
+            .iter()
+            .filter_map(|(key, value)| {
+                let suffix = key.to_ascii_uppercase().strip_prefix(&prefix)?.to_string();
+                Some((suffix, value.clone()))
+            })
+            .collect();
+        found.sort();
+        matched.extend(found);
+    }
+    matched
+}
+
+fn apply_secrets_to<T: serde::Serialize + serde::de::DeserializeOwned>(
+    target: &mut T,
+    secrets: &[(String, String)],
+    label: &str,
+) {
+    if secrets.is_empty() {
+        return;
+    }
+    let result = serde_json::to_value(&*target).and_then(|mut value| {
+        for (suffix, secret) in secrets {
+            let segments: Vec<&str> = suffix.split("__").collect();
+            set_secret_at_path(&mut value, &segments, secret);
+        }
+        serde_json::from_value(value)
+    });
+    match result {
+        Ok(updated) => *target = updated,
+        Err(error) => eprintln!("WARN: Could not apply stored secrets to '{label}': {error}"),
+    }
+}
+
+/// Mirrors how the `config` env source maps `A__B__0` onto nested fields.
+fn set_secret_at_path(node: &mut serde_json::Value, segments: &[&str], secret: &str) {
+    let Some((segment, rest)) = segments.split_first() else {
+        *node = serde_json::Value::String(secret.to_string());
+        return;
+    };
+    let child = if let serde_json::Value::Array(items) = node {
+        let Ok(index) = segment.parse::<usize>() else {
+            return;
+        };
+        if items.len() <= index {
+            items.resize(index + 1, serde_json::Value::Null);
+        }
+        &mut items[index]
+    } else {
+        if !node.is_object() {
+            *node = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let serde_json::Value::Object(map) = node else {
+            return;
+        };
+        let key = map
+            .keys()
+            .find(|key| sanitize_name_for_env(key) == *segment)
+            .cloned()
+            .unwrap_or_else(|| segment.to_ascii_lowercase());
+        map.entry(key).or_insert(serde_json::Value::Null)
+    };
+    if child.is_null()
+        && rest
+            .first()
+            .is_some_and(|next| next.parse::<usize>().is_ok())
+    {
+        *child = serde_json::Value::Array(Vec::new());
+    }
+    set_secret_at_path(child, rest, secret);
 }
 
 pub fn load_config(
@@ -1134,6 +1263,42 @@ impl AppConfig {
         all_secrets
     }
 
+    /// Reverses [`Self::extract_secrets`] for existing entities; unknown keys are ignored.
+    fn apply_stored_secrets(&mut self, secrets: &HashMap<String, String>, include_routes: bool) {
+        if secrets.is_empty() {
+            return;
+        }
+        for consumer in &mut self.consumers {
+            let found = entity_secrets(secrets, "CONSUMERS", &consumer.name, Some(&consumer.id));
+            apply_secrets_to(&mut consumer.endpoint, &found, &consumer.name);
+        }
+        for publisher in &mut self.publishers {
+            let mut found =
+                entity_secrets(secrets, "PUBLISHERS", &publisher.name, Some(&publisher.id));
+            found.retain(|(suffix, value)| {
+                let env_suffix = format!("__{suffix}");
+                if !env_suffix.starts_with("__HEADERS__") {
+                    return true;
+                }
+                if let Some(row) = publisher
+                    .headers
+                    .iter_mut()
+                    .find(|row| publisher_header_env_suffix(&row.key) == env_suffix)
+                {
+                    row.value = value.clone();
+                }
+                false
+            });
+            apply_secrets_to(&mut publisher.endpoint, &found, &publisher.name);
+        }
+        if include_routes {
+            for (name, route) in &mut self.routes {
+                let found = entity_secrets(secrets, "ROUTES", name, None);
+                apply_secrets_to(route, &found, name);
+            }
+        }
+    }
+
     /// A publisher's request headers are rows beside the endpoint, not inside it,
     /// so `extract_secrets_to_all` never reaches them. Without this an
     /// `Authorization: Bearer …` row is exported verbatim by
@@ -1398,6 +1563,40 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// Serializes tests that write the process-wide `MQB__` environment.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Restores the given environment variables to their prior values when dropped, even on panic.
+    struct EnvVarsGuard(Vec<(String, Option<std::ffi::OsString>)>);
+
+    impl EnvVarsGuard {
+        fn capture(keys: impl IntoIterator<Item = String>) -> Self {
+            Self(
+                keys.into_iter()
+                    .map(|key| {
+                        let prior = std::env::var_os(&key);
+                        (key, prior)
+                    })
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for EnvVarsGuard {
+        fn drop(&mut self) {
+            for (key, prior) in &self.0 {
+                match prior {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
+
     #[derive(Default)]
     struct RecordingSecretStore {
         stored: Mutex<Vec<HashMap<String, String>>>,
@@ -1477,6 +1676,7 @@ routes:
     }
     #[test]
     fn test_config_from_env_vars() {
+        let _env = env_lock();
         // Set environment variables
         // Clear the var first to avoid interference from other tests
         unsafe {
@@ -1641,10 +1841,68 @@ publishers:
             "the endpoint must be offered as a variant"
         );
         // Its own `$defs` are lifted under a prefix, and the ref follows.
-        assert!(schema.pointer("/$defs/ConfigSchemaTestEndpointTls").is_some());
+        assert!(
+            schema
+                .pointer("/$defs/ConfigSchemaTestEndpointTls")
+                .is_some()
+        );
         assert_eq!(
             schema.pointer(&format!("/$defs/{definition}/properties/tls/$ref")),
             Some(&serde_json::json!("#/$defs/ConfigSchemaTestEndpointTls"))
+        );
+    }
+
+    /// A registered middleware is offered in "Add Middleware", declared schema
+    /// or not.
+    #[test]
+    fn app_schema_lists_registered_middlewares() {
+        #[derive(Debug)]
+        struct Declaring;
+
+        impl mq_bridge::traits::CustomMiddlewareFactory for Declaring {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "header": { "type": "string" } },
+                    "required": ["header"]
+                }))
+            }
+        }
+
+        #[derive(Debug)]
+        struct Silent;
+
+        impl mq_bridge::traits::CustomMiddlewareFactory for Silent {}
+
+        let declaring = "config-schema-test-middleware";
+        let silent = "config-schema-test-silent-middleware";
+        mq_bridge::extensions::register_middleware_factory(
+            declaring,
+            std::sync::Arc::new(Declaring),
+        )
+        .unwrap();
+        mq_bridge::extensions::register_middleware_factory(silent, std::sync::Arc::new(Silent))
+            .unwrap();
+        let schema = app_config_schema();
+        mq_bridge::extensions::unregister_middleware_factory(declaring);
+        mq_bridge::extensions::unregister_middleware_factory(silent);
+
+        let variants = schema["$defs"]["Middleware"]["oneOf"].as_array().unwrap();
+        for name in [declaring, silent] {
+            assert!(
+                variants
+                    .iter()
+                    .any(|variant| variant["required"] == serde_json::json!([name])),
+                "middleware '{name}' must be offered as a variant"
+            );
+        }
+        assert_eq!(
+            schema.pointer("/$defs/ConfigSchemaTestMiddlewareMiddleware/required/0"),
+            Some(&serde_json::json!("header"))
+        );
+        assert_eq!(
+            schema.pointer("/$defs/ConfigSchemaTestSilentMiddlewareMiddleware/type"),
+            Some(&serde_json::json!("object"))
         );
     }
 
@@ -2080,6 +2338,68 @@ consumers: []
         assert_eq!(secret_store.stored.lock().unwrap().len(), 1);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_balanced_secrets_survive_reload() {
+        let config: AppConfig = serde_yaml_ng::from_str(
+            r#"
+config_security:
+  mode: balanced
+consumers:
+  - name: "rt_auth_srv"
+    endpoint:
+      http:
+        url: "127.0.0.1:0"
+        basic_auth: ["rt_user", "rt_pass"]
+publishers:
+  - name: "rt_auth_cli"
+    endpoint:
+      http:
+        url: "http://127.0.0.1:0"
+        basic_auth: ["rt_user", "rt_pass"]
+    headers:
+      - key: "Authorization"
+        value: "Bearer rt_token"
+"#,
+        )
+        .unwrap();
+        let secret_store = RecordingSecretStore::default();
+        let path = std::env::temp_dir().join("mqb-config-balanced-reload.yml");
+        let path_str = path.to_str().unwrap().to_string();
+        config
+            .save_with_secret_store(&path_str, &secret_store)
+            .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("rt_pass") && !saved.contains("rt_token"));
+
+        let stored = secret_store.stored.lock().unwrap()[0].clone();
+        let _env = env_lock();
+        let _vars = EnvVarsGuard::capture(stored.keys().cloned());
+        unsafe {
+            for (key, value) in &stored {
+                std::env::set_var(key, value);
+            }
+        }
+        let cli = load_config_internal(Some(path_str.clone()), None, None, None, false, true);
+        let desktop = load_config_at_path(path_str);
+        let _ = std::fs::remove_file(path);
+
+        for (loaded, _) in [cli.unwrap(), desktop.unwrap()] {
+            let expected = Some(("rt_user".to_string(), "rt_pass".to_string()));
+            for endpoint in [
+                &loaded.consumers[0].endpoint,
+                &loaded.publishers[0].endpoint,
+            ] {
+                match &endpoint.endpoint_type {
+                    mq_bridge::models::EndpointType::Http(http) => {
+                        assert_eq!(http.basic_auth, expected)
+                    }
+                    other => panic!("expected http endpoint, got {other:?}"),
+                }
+            }
+            assert_eq!(loaded.publishers[0].headers[0].value, "Bearer rt_token");
+        }
     }
 
     #[test]

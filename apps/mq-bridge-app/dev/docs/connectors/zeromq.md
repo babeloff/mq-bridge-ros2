@@ -14,6 +14,20 @@ zeromq://<transport>?socket_type=<type>[&bind=true]
 address such as `tcp://127.0.0.1:5555`. Choose `bind=true` on exactly one side
 of a socket pair; the other connects.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `zeromq:`.
+
+```yaml
+input:
+  zeromq: { url: "tcp://0.0.0.0:5555", socket_type: "pull", bind: true }
+output:
+  zeromq: { url: "tcp://localhost:5556", socket_type: "push" }
+```
+
+`zeromq://` / `zmq://` are CLI-only; in config `url` is the ZeroMQ transport address.
+
 ## Examples
 
 **Pull from a PUSH producer and write to a file, continuous:**

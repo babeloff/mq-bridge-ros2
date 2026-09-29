@@ -7,8 +7,10 @@ use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 use uuid::Uuid;
 
+pub use crate::models::IdHash;
 use crate::type_handler::KIND_KEY;
 
 /// The unified message format.
@@ -394,23 +396,89 @@ pub(crate) fn u128_from_json(val: &serde_json::Value) -> Result<u128, String> {
         // folded into a stable u128 instead of failing. Rejecting it used to make a
         // whole JSON line unparseable, and a `file`/`json` source then silently kept
         // the line as an opaque raw payload, discarding its own `metadata`.
-        return Ok(fnv1a_128(s.as_bytes()));
+        return Ok(hashed_id(string_id_hash(), &[s.as_bytes()]));
     }
     Err("Invalid u128 format".to_string())
 }
 
-/// FNV-1a, 128-bit. Deterministic and stable forever (unlike `DefaultHasher`), so the
-/// same string id maps to the same message id in every process and every release —
-/// which is what deduplication and correlation rely on.
-fn fnv1a_128(bytes: &[u8]) -> u128 {
-    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013b;
-    let mut hash = OFFSET;
-    for b in bytes {
-        hash ^= *b as u128;
-        hash = hash.wrapping_mul(PRIME);
+const ID_HASH_UNSET: u8 = 0;
+const ID_HASH_FNV1A: u8 = 1;
+const ID_HASH_SHA256: u8 = 2;
+static STRING_ID_HASH: AtomicU8 = AtomicU8::new(ID_HASH_UNSET);
+
+/// Choose the hash that folds a non-numeric, non-UUID string `message_id` into a `u128`,
+/// for the whole process. Call once at startup, before any message is parsed.
+///
+/// Defaults to [`IdHash::Fnv1a`], or to the `MQB_ID_HASH` environment variable
+/// (`fnv1a` / `sha256`) when it is set. Switching changes every such id, so a dedup store
+/// or unique-keyed sink filled under the other hash no longer recognises replays.
+pub fn set_string_id_hash(hash: IdHash) {
+    STRING_ID_HASH.store(id_hash_code(hash), Ordering::Relaxed);
+}
+
+/// The hash in effect for string `message_id`s; see [`set_string_id_hash`].
+pub fn string_id_hash() -> IdHash {
+    let code = match STRING_ID_HASH.load(Ordering::Relaxed) {
+        ID_HASH_UNSET => {
+            let from_env = match std::env::var("MQB_ID_HASH") {
+                Ok(v) if v.trim().eq_ignore_ascii_case("sha256") => IdHash::Sha256,
+                Ok(v) if !v.trim().eq_ignore_ascii_case("fnv1a") && !v.trim().is_empty() => {
+                    tracing::warn!("MQB_ID_HASH={v} is not `fnv1a` or `sha256`; using fnv1a");
+                    IdHash::Fnv1a
+                }
+                _ => IdHash::Fnv1a,
+            };
+            // Lose to a concurrent `set_string_id_hash` rather than overwrite it.
+            let _ = STRING_ID_HASH.compare_exchange(
+                ID_HASH_UNSET,
+                id_hash_code(from_env),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
+            STRING_ID_HASH.load(Ordering::Relaxed)
+        }
+        code => code,
+    };
+    if code == ID_HASH_SHA256 {
+        IdHash::Sha256
+    } else {
+        IdHash::Fnv1a
     }
-    hash
+}
+
+fn id_hash_code(hash: IdHash) -> u8 {
+    match hash {
+        IdHash::Fnv1a => ID_HASH_FNV1A,
+        IdHash::Sha256 => ID_HASH_SHA256,
+    }
+}
+
+/// A deterministic 128-bit id for `parts`, stable across processes and releases.
+///
+/// [`IdHash::Fnv1a`] matches the ids earlier releases produced; [`IdHash::Sha256`] (its
+/// first 128 bits) is as collision-resistant as a random UUID.
+pub(crate) fn hashed_id(hash: IdHash, parts: &[&[u8]]) -> u128 {
+    match hash {
+        IdHash::Fnv1a => {
+            const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+            const PRIME: u128 = 0x0000000001000000000000000000013b;
+            let mut h = OFFSET;
+            for b in parts.iter().flat_map(|part| part.iter()) {
+                h ^= *b as u128;
+                h = h.wrapping_mul(PRIME);
+            }
+            h
+        }
+        IdHash::Sha256 => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            for part in parts {
+                hasher.update(part);
+            }
+            let digest = hasher.finalize();
+            u128::from_be_bytes(digest[..16].try_into().expect("SHA-256 is 32 bytes"))
+        }
+    }
 }
 
 /// Parse a message id from a string, accepting the same formats as the JSON
@@ -840,6 +908,16 @@ mod tests {
         assert_ne!(
             message_id_from_str("not-an-id").unwrap(),
             message_id_from_str("also-not-an-id").unwrap()
+        );
+        // Pinned: dedup stores hold these ids across releases. The default must stay the
+        // FNV-1a id 0.4.15 produced, so an update never invalidates existing dedup state.
+        assert_eq!(
+            message_id_from_str("not-an-id").unwrap(),
+            0x3c3017d95205dfc16efe5d0be8368354
+        );
+        assert_eq!(
+            hashed_id(IdHash::Sha256, &[b"not-an-id"]),
+            0x4e60bf522c63daf90c048a963f1114ab
         );
 
         // A UUID id round-trips through format_message_id unchanged.

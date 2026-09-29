@@ -4,7 +4,7 @@ Complete listing of every **middleware** and every **structural endpoint** mq-br
 
 Structural endpoints are the ones that do not talk to a broker or store: they compose other
 endpoints, shape routing, or terminate a request. Data endpoints (`kafka`, `nats`, `mqtt`,
-`sqlx`, …) are covered in [README.md](../README.md#backend-features--configuration) and
+`sqlx`, …) are covered in the [connector pages](https://marcomq.github.io/mq-bridge/connectors/index.html) and
 [CONFIGURATION.md](CONFIGURATION.md).
 
 - [Middleware](#middleware)
@@ -85,6 +85,8 @@ middlewares:
 | [`pack`](#pack) | – | ✅ | – | Combine a batch into one physical transport message |
 | [`unpack`](#unpack) | ✅ | – | – | Split a packed physical message back into messages |
 | [`metrics`](#metrics) | ✅ | ✅ | `metrics` | Emit throughput/latency/error metrics |
+| [`otel`](#otel) | ✅ | ✅ | `otel` | OpenTelemetry span per message, continuing `traceparent` |
+| [`lookup`](#lookup) | ✅ | ✅ | – | Enrich each message with other endpoints' responses |
 | [`random_panic`](#random_panic) | ✅ | ✅ | – | Fault injection for testing |
 | [`custom`](#custom-middleware) | ✅ | ✅ | – | Your own middleware via a registered factory |
 
@@ -105,13 +107,14 @@ middlewares:
 above rather than assuming:
 
 - `dlq` / `retry` on an input log a warning and are skipped. The route still starts.
-- `deduplication`, `weak_join` and `id` on an output are **hard startup errors**. Deduplication
+- `deduplication`, `weak_join` and `id` on an output are **hard
+  startup errors**. Deduplication
   cannot work on the publish side, and silently starting an un-deduplicated route is worse
   than refusing to start. `pack` on an input and `unpack` on an output are hard errors too —
   the pair is directional.
 
 A middleware whose feature is not compiled in (`deduplication` without `dedup`, `metrics`
-without `metrics`) is likewise a startup error, not a silent no-op.
+without `metrics`, `otel` without `otel`) is likewise a startup error, not a silent no-op.
 
 ---
 
@@ -216,13 +219,17 @@ For calculated output, use `expression` (available with the `zen` Cargo feature)
 
 Paths accept `$.field`, `$.a.b`, and `$.items[0]`; the `$.` prefix is optional. Dots in the
 *output* key nest the result. An absent optional source field is omitted rather than emitted
-as null.
+as null. Paths have no quoting, so a source key that itself contains `.` or `[` (a CSV header
+such as `price.usd`) cannot be addressed: the path reads it as nesting and finds nothing.
+Error paths spell such keys unambiguously, as `$['price.usd']`.
 
 Schema keywords honoured: `type`, `properties`, `required`, `default`, `items`, `nullable`
 (also `"type": ["string","null"]`), `enum`, `contentMediaType`, `contentSchema`. Everything
 else is ignored, so an existing fuller schema can be used as-is. Coercions are limited to the
 lossless ones: `string → integer`, `string → number`, `string → boolean` (`true`/`false`/`1`/`0`),
-`number → string`.
+`number → string`. `string → number` keeps integral text an exact integer (`"42"` → `42`,
+`"9007199254740993"` unrounded); other text goes through f64, so digits beyond ~17
+significant ones are rounded.
 
 #### Empty strings
 
@@ -415,6 +422,11 @@ dedup to survive a re-read.
 `store` selects the backend by URL scheme:
 
 - `sled:///path` (or a bare path) — a local sled database; per-process, not cluster-wide.
+- `memory://[name][?max_keys=N]` — process memory, the fastest store (~3x sled). Keys are
+  compared exactly and survive reconnects and redeploys, but not a restart. Routes that name
+  the same store share it; the name defaults to the route's. `max_keys` (default 1,000,000)
+  caps it: past the cap the oldest keys are evicted before their TTL, so later copies of them
+  pass through again (a warning is logged once).
 - `mongodb://host/db[/collection]` — a shared collection, so multiple instances of a route
   deduplicate against one another. Requires the `mongodb` feature. Expiry is judged on read,
   so a `ttl_seconds` boundary is honoured exactly; the TTL index only reclaims space
@@ -439,6 +451,10 @@ default.
 
 ```yaml middleware
 - deduplication: { store: "sled:///var/lib/mq-bridge/dedup", ttl_seconds: 3600 }
+```
+
+```yaml middleware
+- deduplication: { store: "memory://orders?max_keys=5000000", ttl_seconds: 600, key: "${payload:order_id}" }
 ```
 
 ```yaml middleware
@@ -473,6 +489,7 @@ Correlates messages by a metadata key and emits them as one joined message. Inpu
 | `branch_by` | string (metadata key) | – |
 | `required` | list of branch names | `[]` |
 | `on_timeout` | `fire` \| `discard` | `fire` |
+| `ack` | `on_join` \| `on_receive` | `on_join` |
 
 ```yaml middleware
 # Count mode: wait for any 3 messages sharing a correlation_id, emit a JSON array.
@@ -486,6 +503,7 @@ Correlates messages by a metadata key and emits them as one joined message. Inpu
     branch_by: "source"
     required: ["inventory", "pricing"]
     on_timeout: discard
+    ack: on_join
 ```
 
 `group_by` reads message **metadata** only — never the payload. A message that lacks the key
@@ -495,8 +513,17 @@ first (a `transform` mapping, or the source's own metadata options).
 
 Setting `branch_by` switches to branch mode, where `required` overrides `expected_count`.
 On timeout an incomplete group is either emitted partially (`fire`) or dropped (`discard`).
-Messages are acknowledged on receipt, so a crash before the group completes loses the
-buffered members.
+A discarded group's members are acknowledged at once.
+
+With `ack: on_join` (the default) a buffered message is acknowledged only once the joined
+message it went into is committed downstream; a Nack of the joined message nacks its members,
+and a crash before a group completes redelivers them. On a source that needs ordered commits
+(Kafka, file, SQL) a source batch is committed only after every older batch is, so an open
+group holds back later commits for up to `timeout_ms`. The source must also let enough
+messages stay unacknowledged: with a prefetch limit (`prefetch_count` on AMQP and
+NATS) below the number of messages held in open groups, groups can only finish by
+timeout. `ack: on_receive` acknowledges on receipt instead, which avoids that limit but loses
+the buffered members on a crash.
 
 ### `buffer`
 
@@ -854,6 +881,166 @@ Emits throughput, latency and error metrics for the endpoint. Input and output. 
 
 Input and output are labelled separately, so attaching it to both sides is meaningful.
 
+### `otel`
+
+Opens an OpenTelemetry span per message and carries its W3C trace context in the
+`traceparent` / `tracestate` metadata. Input and output. Requires the `otel` feature. Takes no
+options.
+
+```yaml middleware
+- otel: {}
+```
+
+- **Input**: a `Consumer` span named `<route> receive` that continues the incoming
+  `traceparent` and lasts until the message is committed. A Nack or a failed commit marks it
+  as an error. The metadata then points at this span, so the output continues the trace.
+- **Output**: a `Producer` span named `<route> send`, ending with the send result. The
+  published message carries the new `traceparent`, so a downstream service can continue the trace.
+- Attributes: `mqb.route` and `messaging.message.id`.
+
+The library only uses the OpenTelemetry API; the host exports the spans. The middleware
+activates itself when a tracer provider is installed (`opentelemetry::global::set_tracer_provider`,
+re-exported as `mq_bridge::opentelemetry`) **before the route starts**. Without one it is left
+out of the chain at startup and costs nothing per message. `mq-bridge-app` installs an OTLP
+HTTP exporter when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set;
+`OTEL_SERVICE_NAME` defaults to `mq-bridge-app`.
+
+The activation check starts one unsampled `mq-bridge.probe` span per middleware. The default
+parent-based sampler drops it, but an `always_on` sampler exports it.
+
+### `lookup`
+
+Asks other endpoints per message and writes their responses into the payload. Input and
+output. The typical use is enriching an event with records fetched by key, then routing on
+whether they were found. On an input, the handler already sees the enriched message.
+
+| Field | Type | Default |
+|---|---|---|
+| `from` | endpoint | must answer with a response; required unless `entries` is set |
+| `into` | dotted payload path | required with `from` |
+| `metadata` | map string→template | `{}` |
+| `payload` | template | the message's own payload and metadata |
+| `entries` | list of `{from, into, metadata, payload}` | `[]`; further lookups |
+| `concurrency` | integer | `16` requests in flight per entry, when `from` cannot answer a batch at once |
+
+```yaml middleware
+- lookup:
+    from:
+      http:
+        url: "http://users:8080"
+        pass_through_status: true
+    metadata:
+      http_path: "/users/${payload:user_id}"
+      http_method: GET
+    into: user
+```
+
+- `metadata` and `payload` are [placeholder templates](#placeholders), rendered against the
+  outgoing message. `metadata` is added to the request, so it sets `http_path`, `http_method`
+  or `http_query` on an `http` endpoint. Those three keys are not inherited from the message.
+- The response is parsed as JSON; a non-JSON response is written as a string. An empty
+  response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
+  `false`, for a following [`switch`](#switch).
+- `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
+  `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, or `grpc` to an
+  mq-bridge `grpc` input whose route replies. An endpoint that only acknowledges fails the
+  message as non-retryable.
+- `mongodb.find` is an Extended-JSON filter template and answers with the first matching
+  document; `sqlx.lookup_query` binds `${payload:…}` / `${metadata:…}` tokens like
+  `insert_query` and answers with the first row as a JSON object. Neither adds a write of its own
+  (a `lookup_query` that writes, e.g. `INSERT … RETURNING`, runs as given and is logged at startup);
+  they also set `mongodb.found` / `sqlx.found`.
+- `clickhouse.lookup_query` takes the same tokens and sends each as a typed query
+  parameter (`Int64`, `UInt64`, `Float64`, `Bool`, `String`; a missing field is `NULL`), so
+  compare against a matching column or wrap it, e.g. `toDate(${payload:day})`. Add `LIMIT 1`
+  and no `FORMAT` clause. It sets `clickhouse.found`; a query error (HTTP 4xx other than 408
+  / 429) is non-retryable.
+- On Postgres, cast placeholders to the column type (`WHERE id = ${payload:author_id}::int`):
+  tokens are bound untyped, and a field missing from the payload (e.g. on a CDC delete) is
+  bound as text. Cast `NUMERIC`, `TIMESTAMPTZ` and similar result columns to `::text`; the
+  `Any` driver cannot decode them and fails the message as non-retryable.
+
+**Batched lookups.** Put the token inside `IN (…)` (SQL) or `$in: […]` (MongoDB) and one
+query answers the whole batch instead of one query per message:
+
+```yaml middleware
+- lookup:
+    from:
+      sqlx:
+        url: "postgres://localhost/crm"
+        table: "customers"
+        lookup_query: "SELECT id, name, tier FROM customers WHERE id IN (${payload:customer_id}::bigint)"
+    into: customer
+```
+
+- The query's shape picks the mode: a token compared directly (`id = ${…}`) runs once per
+  message; the same token as the only element of `id IN (…)` runs once per batch, with the
+  element repeated for each distinct key (at most 1000 per query).
+- Rows are matched back to messages by the column left of `IN` (`c.id` matches the result
+  column `id`), so select that column under that name. A message whose key is missing or
+  matches no row gets `null`; if several rows match, the first wins.
+- A batched query takes no other token and no plain `LIMIT` (it would cap the whole batch;
+  ClickHouse's `LIMIT 1 BY id` is fine). An error fails every message of the batch.
+- MongoDB: `find: '{"_id": {"$in": ["${payload:customer_id}"]}}'` matches documents by the
+  field that holds `$in` (dotted paths work).
+- Only the endpoint itself batches: `middlewares` on `from` (e.g. `retry`) fall back to one
+  request per message.
+
+```yaml middleware
+- lookup:
+    from:
+      mongodb:
+        url: "mongodb://localhost:27017"
+        database: "crm"
+        collection: "customers"
+        find: '{"_id": "${payload:customer_id}"}'
+    into: customer
+```
+- HTTP 408, 429 and 5xx fail the message as retryable, other statuses as non-retryable.
+  Without `pass_through_status: true` the `http` endpoint already fails on any non-2xx
+  response, so a missing record is an error rather than `null`.
+- The payload must be a JSON object along `into`.
+- On an output, a failed lookup fails only its message; the rest of the batch is published.
+  List `retry` / `dlq` after `lookup` to catch its failures.
+- On an input, a retryable error (e.g. the database is down) nacks the whole received batch,
+  so the source redelivers it, and reconnects the route. A non-retryable error (non-JSON
+  payload, HTTP 4xx, a query error) is logged and acks and drops only its message; the rest
+  of the batch goes on. A misconfigured `from` therefore drops every message.
+
+`from` and every entry in `entries` run **in parallel**, so a batch waits for the slowest
+lookup, not the sum of all. Each batched entry costs one query per batch; for a lookup that
+needs another's result (e.g. a merchant id from the fetched user), chain a second `lookup`. Each one sets `lookup.<into>.found`, and
+`lookup.found` is `true` only when all of them found something.
+
+```yaml middleware
+- lookup:
+    concurrency: 64
+    entries:
+      - into: features.user
+        from:
+          mongodb:
+            url: "mongodb://localhost:27017"
+            database: "features"
+            collection: "users"
+            find: '{"_id": "${payload:user_id}"}'
+      - into: features.card_avg
+        from:
+          sqlx:
+            url: "postgres://localhost/payments"
+            table: "payments"
+            lookup_query: >-
+              SELECT avg(amount)::text AS avg20 FROM (SELECT amount FROM payments
+              WHERE card_id = ${payload:card_id} ORDER BY ts DESC LIMIT 20) t
+      - into: features.risk
+        from:
+          clickhouse:
+            url: "http://localhost:8123"
+            table: "card_risk"
+            lookup_query: >-
+              SELECT score, updated_at FROM card_risk
+              WHERE card_id = ${payload:card_id} ORDER BY updated_at DESC LIMIT 1
+```
+
 ### `random_panic`
 
 Deliberate fault injection for testing recovery paths. Input and output.
@@ -1145,7 +1332,7 @@ http_echo:
 Takes no options. Requires an input that carries a reply channel (`http`, `websocket`, `grpc`,
 or a request/reply `nats`/`mongodb`/`memory`). With an `http` or `websocket` input and no
 middleware, `response` (and `static`) enables an inline fast path that skips the normal route
-pipeline. See [README.md](../README.md#patterns-request-response).
+pipeline. See [Request / reply](https://marcomq.github.io/mq-bridge/tutorials/request-reply.html).
 
 ### `reader`
 

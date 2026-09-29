@@ -40,9 +40,10 @@ From the `copy` CLI, object/array fields take a JSON literal:
 An incomplete group is either emitted partially (`on_timeout: fire`, the default) or dropped
 (`on_timeout: discard`).
 
-> **Durability caveat.** Messages are acknowledged on receipt, so a crash before the group
-> completes **loses the buffered members** — `weak_join` correlates in memory and is not a
-> durable join. For correlation that must survive a restart, land the fragments in a store and
-> join there.
+> **Acknowledgement.** By default (`ack: on_join`) a buffered message is acknowledged only
+> once the joined message is committed, so a crash before the group completes redelivers its
+> members. The source must allow that many unacknowledged messages: with a prefetch limit
+> (e.g. AMQP `prefetch_count`) a group can stall until its timeout. `ack: on_receive`
+> acknowledges on receipt instead and **loses the buffered members** on a crash.
 
 Full field list in the [middleware reference → `weak_join`](../engine/reference.md#weak_join).

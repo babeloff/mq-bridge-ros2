@@ -19,7 +19,7 @@ mod pgoutput;
 pub(crate) mod replication;
 mod state;
 
-use crate::canonical_message::CanonicalMessage;
+use crate::canonical_message::{hashed_id, CanonicalMessage, IdHash};
 use crate::checkpoint::{checkpoint_key, CheckpointStore, FileCheckpointStore};
 use crate::errors::ConsumerError;
 use crate::models::PostgresCdcConfig;
@@ -71,6 +71,7 @@ pub struct PostgresCdcConsumer {
     exit_on_empty: bool,
     /// Resolved once at construction from endpoint config and the legacy fallback.
     source_metadata: bool,
+    id_hash: IdHash,
 }
 
 impl PostgresCdcConsumer {
@@ -111,6 +112,23 @@ impl PostgresCdcConsumer {
                 &config.tls,
             )
             .await?;
+        }
+        match replication::tables_without_replica_identity(
+            &config.url,
+            &config.publication,
+            &config.tls,
+        )
+        .await
+        {
+            Ok(tables) if !tables.is_empty() => warn!(
+                publication = %config.publication,
+                tables = %tables.join(", "),
+                "postgres_cdc: published tables have no primary key or replica identity, so \
+                 Postgres rejects UPDATE/DELETE on them; add a primary key or run \
+                 `ALTER TABLE <table> REPLICA IDENTITY FULL`"
+            ),
+            Ok(_) => {}
+            Err(e) => debug!(error = %e, "postgres_cdc: skipped the replica identity check"),
         }
 
         replication::ensure_slot(
@@ -191,6 +209,7 @@ impl PostgresCdcConsumer {
             teardown_done: AtomicBool::new(false),
             exit_on_empty: false,
             source_metadata,
+            id_hash: config.id_hash,
         })
     }
 
@@ -259,7 +278,7 @@ impl PostgresCdcConsumer {
                             .map_or("", |s| s.as_str());
                         // Include op + in-tx ordinal so multiple changes to the same key
                         // in one commit get distinct (still deterministic) ids.
-                        cdc_dedup_id(schema, table, key, lsn, operation, ordinal)
+                        cdc_dedup_id(self.id_hash, schema, table, key, lsn, operation, ordinal)
                     });
                     if let Some(id) = dedup_id {
                         msg.message_id = id;
@@ -387,12 +406,13 @@ fn recv_error(e: impl std::fmt::Display) -> ConsumerError {
     }
 }
 
-/// Deterministic dedup id for a change event: FNV-1a 128-bit over
+/// Deterministic dedup id for a change event: [`hashed_id`] over
 /// `schema.table\0key\0operation\0lsn\0ordinal`. A replayed change (same key, op and
 /// in-tx position at the same commit LSN) hashes identically so the dedup middleware /
 /// sink can drop it; distinct changes — including several to one key in one transaction —
 /// differ by op, LSN, or ordinal.
 fn cdc_dedup_id(
+    hash: IdHash,
     schema: &str,
     table: &str,
     key: &str,
@@ -400,31 +420,22 @@ fn cdc_dedup_id(
     operation: &str,
     ordinal: usize,
 ) -> u128 {
-    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013B;
-    let lsn_bytes = lsn.to_be_bytes();
-    let ordinal_bytes = (ordinal as u64).to_be_bytes();
-    let parts: [&[u8]; 11] = [
-        schema.as_bytes(),
-        b".",
-        table.as_bytes(),
-        b"\0",
-        key.as_bytes(),
-        b"\0",
-        operation.as_bytes(),
-        b"\0",
-        &lsn_bytes,
-        b"\0",
-        &ordinal_bytes,
-    ];
-    let mut h = OFFSET;
-    for part in parts {
-        for &b in part {
-            h ^= b as u128;
-            h = h.wrapping_mul(PRIME);
-        }
-    }
-    h
+    hashed_id(
+        hash,
+        &[
+            schema.as_bytes(),
+            b".",
+            table.as_bytes(),
+            b"\0",
+            key.as_bytes(),
+            b"\0",
+            operation.as_bytes(),
+            b"\0",
+            &lsn.to_be_bytes(),
+            b"\0",
+            &(ordinal as u64).to_be_bytes(),
+        ],
+    )
 }
 
 fn add_source_metadata(message: &mut CanonicalMessage, slot: &str, lsn: u64, ordinal: usize) {
@@ -714,17 +725,35 @@ mod cdc_id_tests {
     #[test]
     fn dedup_id_is_stable_and_lsn_sensitive() {
         // Same change (key + op + lsn + ordinal) → identical id (a replay deduplicates).
-        let a = cdc_dedup_id("public", "orders", "42", 100, "insert", 0);
-        let b = cdc_dedup_id("public", "orders", "42", 100, "insert", 0);
+        let a = cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 100, "insert", 0);
+        let b = cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 100, "insert", 0);
         assert_eq!(a, b);
         // Different lsn → different id (distinct updates are not collapsed).
-        assert_ne!(a, cdc_dedup_id("public", "orders", "42", 101, "insert", 0));
+        assert_ne!(
+            a,
+            cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 101, "insert", 0)
+        );
         // Different key → different id.
-        assert_ne!(a, cdc_dedup_id("public", "orders", "43", 100, "insert", 0));
+        assert_ne!(
+            a,
+            cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "43", 100, "insert", 0)
+        );
         // Different operation on the same key/lsn → different id.
-        assert_ne!(a, cdc_dedup_id("public", "orders", "42", 100, "update", 0));
+        assert_ne!(
+            a,
+            cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 100, "update", 0)
+        );
         // Different in-transaction ordinal → different id (same key twice in one commit).
-        assert_ne!(a, cdc_dedup_id("public", "orders", "42", 100, "insert", 1));
+        assert_ne!(
+            a,
+            cdc_dedup_id(IdHash::Fnv1a, "public", "orders", "42", 100, "insert", 1)
+        );
+        // Pinned: fnv1a is what 0.4.15 produced; sha256 is the opt-in.
+        assert_eq!(a, 0x6e3f9e1daba2f7071c7118f5d9c51194);
+        assert_eq!(
+            cdc_dedup_id(IdHash::Sha256, "public", "orders", "42", 100, "insert", 0),
+            0x3423eaf7bbc7dfd6a251a14676a7e092
+        );
     }
 
     #[test]

@@ -17,6 +17,18 @@ connection string; `table` (and any other recognised field below) is pulled
 out of the query string into config. For SQLite, `host`/`database` are
 replaced by a file path, e.g. `sqlite:///var/data/app.db?table=orders`.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `sqlx:`.
+
+```yaml
+input:
+  sqlx: { url: "postgres://user:pass@localhost/app", table: "orders", cursor_column: "id" }
+```
+
+The config key is `sqlx` for PostgreSQL, MySQL/MariaDB, and SQLite; the connection string is the `url`.
+
 ## Examples
 
 **Full-table read (source), one-shot:**
@@ -83,6 +95,13 @@ it is a plain Postgres URL.
 
 ```text
 postgres-cdc://[user:pass@]host[:port]/database?publication=<name>&slot_name=<name>
+```
+
+In config, the key is `postgres_cdc`:
+
+```yaml
+input:
+  postgres_cdc: { url: "postgres://user:pass@localhost:5432/app", publication: "orders_pub", slot_name: "mqb_orders" }
 ```
 
 **Stream changes from a publication into Kafka, continuous:**

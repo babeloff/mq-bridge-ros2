@@ -3,7 +3,7 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-use super::coerce::{Crumb, Ty};
+use super::coerce::{render_path, Crumb, Ty};
 use super::error::{ErrorKind, TransformError};
 use super::path::{insert_at, paths_are_disjoint, CompiledPath, CompiledRule, Seg};
 use super::schema::CompiledSchema;
@@ -338,7 +338,7 @@ impl Compiled {
                         Ok(text) => text,
                         Err(e) => {
                             return Some(Err(TransformError::new(
-                                format!("$.{key}"),
+                                render_path(&[Crumb::Key(key)]),
                                 ErrorKind::Parse,
                                 format!("field is not valid JSON: {e}"),
                             )))
@@ -348,7 +348,7 @@ impl Compiled {
                         Ok(document) => out.extend_from_slice(document.get().as_bytes()),
                         Err(e) => {
                             return Some(Err(TransformError::new(
-                                format!("$.{key}"),
+                                render_path(&[Crumb::Key(key)]),
                                 ErrorKind::Content,
                                 format!(
                                     "contentMediaType is JSON but the string does not parse: {e}"
@@ -370,7 +370,7 @@ impl Compiled {
                         Ok(value) => value,
                         Err(e) => {
                             return Some(Err(TransformError::new(
-                                format!("$.{key}"),
+                                render_path(&[Crumb::Key(key)]),
                                 ErrorKind::Parse,
                                 format!("field is not valid JSON: {e}"),
                             )))
@@ -382,7 +382,7 @@ impl Compiled {
                     }
                     if let Err(e) = serde_json::to_writer(&mut out, &value) {
                         return Some(Err(TransformError::new(
-                            format!("$.{key}"),
+                            render_path(&[Crumb::Key(key)]),
                             ErrorKind::Parse,
                             format!("transformed value could not be serialized: {e}"),
                         )));

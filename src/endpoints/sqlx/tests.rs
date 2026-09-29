@@ -1314,6 +1314,71 @@ async fn sql_dedup_store_reserve_mark_and_expire() {
 }
 
 #[cfg(feature = "dedup")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sql_dedup_store_batches_match_the_per_key_states() {
+    use crate::middleware::deduplication::Reservation::{Claimed, InFlight, Processed};
+    sqlx::any::install_default_drivers();
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("dedup_batch.db");
+    drop(tokio::fs::File::create(&path).await.unwrap());
+    let store = build_sql_dedup_store(&sqlite_url(&path), None, 60, "batch_route", false)
+        .await
+        .unwrap();
+    let now = 1_000u64;
+    let keys = |names: &[&str]| {
+        names
+            .iter()
+            .map(|n| n.as_bytes().to_vec())
+            .collect::<Vec<_>>()
+    };
+
+    store.reserve(b"held", now).await.unwrap();
+    store.reserve(b"done", now).await.unwrap();
+    store.mark_processed(b"done", now).await;
+    store.reserve(b"old", now - 100).await.unwrap();
+    store.mark_processed(b"old", now - 100).await;
+
+    let batch = keys(&["new1", "held", "done", "old", "new2"]);
+    assert_eq!(
+        store.reserve_many(&batch, now).await.unwrap(),
+        vec![Claimed, InFlight, Processed, Claimed, Claimed]
+    );
+
+    // Release drops only claims; a missing row on commit is inserted instead.
+    store.release_many(&keys(&["new1", "done", "new2"])).await;
+    assert_eq!(
+        store
+            .reserve_many(&keys(&["new1", "done"]), now)
+            .await
+            .unwrap(),
+        vec![Claimed, Processed]
+    );
+    store
+        .mark_processed_many(&keys(&["new1", "new2"]), now)
+        .await;
+    assert_eq!(
+        store
+            .reserve_many(&keys(&["new1", "new2"]), now)
+            .await
+            .unwrap(),
+        vec![Processed, Processed]
+    );
+
+    // Two instances racing on one batch: every key is claimed exactly once.
+    let contested: Vec<Vec<u8>> = (0..200).map(|i| format!("race{i}").into_bytes()).collect();
+    let (a, b) = tokio::join!(
+        store.reserve_many(&contested, now),
+        store.reserve_many(&contested, now)
+    );
+    for (a, b) in a.unwrap().into_iter().zip(b.unwrap()) {
+        assert!(
+            matches!((a, b), (Claimed, InFlight) | (InFlight, Claimed)),
+            "{a:?} / {b:?}"
+        );
+    }
+}
+
+#[cfg(feature = "dedup")]
 #[tokio::test]
 async fn sql_dedup_store_keeps_replies_and_migrates_an_existing_table() {
     sqlx::any::install_default_drivers();
@@ -1548,4 +1613,137 @@ async fn test_sqlx_cursor_reader_rejects_text_cursor_for_source_metadata() {
         "expected ConsumerError::Permanent, got {err:?}"
     );
     assert!(err.to_string().contains("integer"), "got: {err}");
+}
+
+#[tokio::test]
+async fn lookup_query_answers_with_the_first_row() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE users (id TEXT, name TEXT, age INTEGER)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users VALUES ('u1', 'Ada', 36)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let config = SqlxConfig {
+        url: url.clone(),
+        table: "users".to_string(),
+        lookup_query: Some("SELECT name, age FROM users WHERE id = ${payload:user_id}".into()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    let ask =
+        |id: &str| CanonicalMessage::new(format!(r#"{{"user_id":"{id}"}}"#).into_bytes(), None);
+
+    let result = publisher
+        .send_batch(vec![ask("u1"), ask("nobody")])
+        .await
+        .unwrap();
+    let SentBatch::Partial { responses, failed } = result else {
+        panic!("lookup_query must answer with responses");
+    };
+    assert!(failed.is_empty());
+    let responses = responses.unwrap();
+    let hit: serde_json::Value = serde_json::from_slice(&responses[0].payload).unwrap();
+    assert_eq!(hit, serde_json::json!({"name": "Ada", "age": 36}));
+    assert_eq!(
+        responses[0].metadata.get("sqlx.found").map(String::as_str),
+        Some("true")
+    );
+    assert!(responses[1].payload.is_empty());
+    assert_eq!(
+        responses[1].metadata.get("sqlx.found").map(String::as_str),
+        Some("false")
+    );
+
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "a lookup must write nothing");
+}
+
+#[tokio::test]
+async fn an_in_lookup_query_answers_a_batch_in_one_query() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE users (id INTEGER, name TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO users VALUES (1, 'Ada'), (2, 'Bob')")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let config = SqlxConfig {
+        url,
+        table: "users".to_string(),
+        lookup_query: Some(
+            "SELECT u.id, name FROM users u WHERE u.id IN (${payload:user_id})".into(),
+        ),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    let ask = |id: serde_json::Value| {
+        CanonicalMessage::new(
+            serde_json::json!({ "user_id": id })
+                .to_string()
+                .into_bytes(),
+            None,
+        )
+    };
+    let answers = publisher
+        .lookup_batch(&[
+            ask(2.into()),
+            ask(9.into()),
+            ask(1.into()),
+            ask(2.into()),
+            ask(serde_json::Value::Null),
+        ])
+        .await
+        .expect("an IN query batches")
+        .unwrap();
+    let name = |i: usize| answers[i].as_ref().map(|r| r["name"].clone());
+    assert_eq!(name(0), Some("Bob".into()));
+    assert_eq!(name(1), None);
+    assert_eq!(name(2), Some("Ada".into()));
+    assert_eq!(name(3), Some("Bob".into()));
+    assert_eq!(name(4), None);
+
+    let single = publisher.send(ask(1.into())).await.unwrap();
+    let Sent::Response(single) = single else {
+        panic!("a lookup answers with a response");
+    };
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&single.payload).unwrap(),
+        serde_json::json!({"id": 1, "name": "Ada"})
+    );
+    assert_eq!(
+        single.metadata.get("sqlx.found").map(String::as_str),
+        Some("true")
+    );
+}
+
+#[test]
+fn lookup_writes_detects_modifying_statements() {
+    assert!(lookup_writes(
+        "INSERT INTO v (k) VALUES (${payload:k}) ON CONFLICT (k) DO UPDATE SET c = v.c + 1 RETURNING c"
+    ));
+    assert!(lookup_writes(
+        "with d as (delete from t returning *) select * from d"
+    ));
+    assert!(!lookup_writes(
+        "SELECT name, updated_at FROM users WHERE id = ${payload:user_id}"
+    ));
+    assert!(lookup_writes(
+        "REPLACE INTO v (k, c) VALUES (${payload:k}, 1)"
+    ));
+    assert!(lookup_writes("replace v values (${payload:k}, 1)"));
+    assert!(!lookup_writes(
+        "SELECT replace(name, '-', '') AS name FROM users WHERE id = ${payload:user_id}"
+    ));
 }

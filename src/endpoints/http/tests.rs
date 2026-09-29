@@ -1636,10 +1636,8 @@ async fn test_http_reply_with_custom_status_code() {
     use crate::traits::Handled;
     init_crypto();
 
-    let port = get_free_port();
-    let addr = format!("127.0.0.1:{}", port);
     let http_config = HttpConfig {
-        url: addr.clone(),
+        url: "127.0.0.1:0".to_string(),
         ..Default::default()
     };
     let mut consumer = HttpConsumer::new(&http_config).await.unwrap();

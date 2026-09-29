@@ -15,6 +15,18 @@ frames; as a publisher it sends them.
 the listen address (e.g. `ws://0.0.0.0:9000`); for a publisher it is the target
 server URL.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `websocket:`.
+
+```yaml
+input:
+  websocket: { url: "0.0.0.0:9000" }                # listen address
+output:
+  websocket: { url: "ws://localhost:9000/events" }  # target server
+```
+
 ## Examples
 
 **Listen for WebSocket frames and forward them to Kafka, continuous:**

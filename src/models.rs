@@ -424,6 +424,10 @@ pub enum Middleware {
     Id(String),
     Deduplication(DeduplicationMiddleware),
     Metrics(MetricsMiddleware),
+    /// Per-message OpenTelemetry spans, continuing the `traceparent` metadata. Input and output.
+    Otel(OtelMiddleware),
+    /// Asks other endpoints per message and writes their responses into the payload. Input and output.
+    Lookup(Box<LookupMiddleware>),
     Dlq(Box<DeadLetterQueueMiddleware>),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
@@ -459,13 +463,13 @@ pub enum Middleware {
 
 /// Deduplication middleware configuration.
 ///
-/// Prevents duplicate messages from being processed using a sled, MongoDB, or SQL backend.
+/// Prevents duplicate messages from being processed using a sled, in-memory, MongoDB, or SQL backend.
 /// Messages are identified by their deduplication key and removed after the TTL expires.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DeduplicationMiddleware {
-    /// Store URL: `sled:///path` (local), `mongodb://host/db[/collection]`, or `postgres|mysql|mariadb|sqlite://…[/table]` (shared).
+    /// Store URL: `sled:///path` or `memory://[name]` (local), `mongodb://host/db[/collection]`, or `postgres|mysql|mariadb|sqlite://…[/table]` (shared).
     #[serde(default)]
     pub store: Option<String>,
     /// Local Sled directory (legacy). Prefer `store`.
@@ -492,6 +496,66 @@ pub struct DeduplicationMiddleware {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MetricsMiddleware {}
+
+/// OpenTelemetry middleware configuration.
+///
+/// Opens a span per message and carries the W3C `traceparent` in metadata. Inactive unless
+/// the host installed an OpenTelemetry tracer provider before the route started.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct OtelMiddleware {}
+
+/// Lookup (enrich) middleware configuration.
+///
+/// Asks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`,
+/// SQLx/ClickHouse `lookup_query`) about each message and writes the response into the
+/// payload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other
+/// endpoints get one request per message. Several `entries` run in parallel.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LookupMiddleware {
+    /// The endpoint to ask; it must answer with a response. Use `entries` for several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Endpoint>,
+    /// Request metadata templates, e.g. `http_path: "/users/${payload:user_id}"`.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    /// Request payload template. Defaults to the message's own payload and metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// Dotted payload path the response is written to, e.g. `customer.profile`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    /// Further lookups, run in parallel with `from`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<LookupEntry>,
+    /// Requests in flight per entry when the endpoint cannot answer a batch at once.
+    #[serde(default = "default_lookup_concurrency")]
+    pub concurrency: usize,
+}
+
+/// One lookup of a `lookup` middleware.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LookupEntry {
+    /// The endpoint to ask; it must answer with a response.
+    pub from: Endpoint,
+    /// Request metadata templates, e.g. `http_path: "/users/${payload:user_id}"`.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    /// Request payload template. Defaults to the message's own payload and metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<String>,
+    /// Dotted payload path the response is written to, e.g. `customer.profile`.
+    pub into: String,
+}
+
+fn default_lookup_concurrency() -> usize {
+    16
+}
 
 /// Dead-Letter Queue (DLQ) middleware configuration.
 ///
@@ -646,6 +710,22 @@ pub struct WeakJoinMiddleware {
     /// What to do with an incomplete group when the timeout expires.
     #[serde(default)]
     pub on_timeout: WeakJoinTimeout,
+    /// When source messages are acknowledged: after the joined message is committed (default) or on receipt.
+    #[serde(default)]
+    pub ack: WeakJoinAck,
+}
+
+/// When a weak join acknowledges the source messages it buffers.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WeakJoinAck {
+    /// Ack members once their joined message is committed; a crash redelivers open groups.
+    #[default]
+    OnJoin,
+    /// Ack on receipt; open groups are lost on a crash. For sources whose prefetch limit is
+    /// smaller than the messages held in open groups.
+    OnReceive,
 }
 
 /// Action taken on an incomplete weak-join group when its timeout expires.
@@ -1718,6 +1798,15 @@ pub struct MongoDbConfig {
     /// (dup-key) so a `request`+`switch` can branch. Sink collections only; pair with `id_field`.
     #[serde(default)]
     pub report_outcome: bool,
+    /// (Publisher only) Extended-JSON filter template for `lookup`, e.g. `{"_id": "${payload:id}"}`.
+    /// Answers with the first match. `{"_id": {"$in": ["${payload:id}"]}}` answers a batch at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub find: Option<String>,
+    /// Internal: Extended-JSON update (document or pipeline) upserted on the `find` match;
+    /// the lookup then answers with the updated document. Opt-in write for keyed counters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub update: Option<String>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
     pub cursor_id: Option<String>,
     /// (Optional) Collection to store sequence counters and cursor positions. Defaults to the message collection if not set.
@@ -2392,6 +2481,18 @@ pub enum PostgresConsume {
     Snapshot,
 }
 
+/// Hash that folds a key into a deterministic 128-bit `message_id`.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum IdHash {
+    /// FNV-1a, 128-bit. Default: the ids earlier releases produced, so existing dedup state keeps matching.
+    #[default]
+    Fnv1a,
+    /// First 128 bits of SHA-256. Collision-resistant, but every id changes, so dedup state from `fnv1a` no longer matches.
+    Sha256,
+}
+
 /// Postgres logical-replication CDC source (pgoutput). Source-only.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -2425,9 +2526,9 @@ pub struct PostgresCdcConfig {
     /// Ephemeral run: drop the slot when the route stops. Not restart-safe; a hard crash leaks it.
     #[serde(default)]
     pub temporary_slot: bool,
-    /// Checkpoint key for persisting the confirmed LSN across restarts (optional; the slot is authoritative).
+    /// Checkpoint key for the confirmed LSN and backfill progress; defaults to `slot_name`.
     pub cursor_id: Option<String>,
-    /// Checkpoint store spec (e.g. `file:///path`, `s3://bucket/prefix`); defaults to the source database.
+    /// Local file (path or `file://`) for resume state; unset, the slot alone tracks the stream.
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     pub checkpoint_store: Option<String>,
     /// Standby-status-update interval in ms; must be shorter than the server's `wal_sender_timeout`.
@@ -2436,6 +2537,9 @@ pub struct PostgresCdcConfig {
     /// TLS configuration for the replication connection.
     #[serde(default)]
     pub tls: TlsConfig,
+    /// Hash for change `message_id`s: `fnv1a` (default, keeps existing dedup state) or `sha256`.
+    #[serde(default)]
+    pub id_hash: IdHash,
 }
 
 // --- SQLx Specific Configuration ---
@@ -2474,6 +2578,10 @@ pub struct SqlxConfig {
     /// Add an explicit cast next to the token — it is preserved verbatim in the SQL:
     /// `VALUES (${payload:amount}::numeric, ${payload:created_at}::timestamptz)`.
     pub insert_query: Option<String>,
+    /// (Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN
+    /// (${payload:id})` to answer a whole batch in one query, matching rows by `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup_query: Option<String>,
     /// (Consumer only) Optional. A custom SQL SELECT query to fetch messages. This is only supported for PostgreSQL and Microsoft SQL Server.
     /// The query must include a placeholder for the batch size (`$1` for PostgreSQL, `@p1` for SQL Server).
     /// The bridge will bind the route's `batch_size` to this placeholder.
@@ -2589,6 +2697,10 @@ pub struct ClickHouseConfig {
     /// true (durable). False = fire-and-forget: faster, but a crash before flush can drop the batch.
     #[serde(default)]
     pub wait_for_async_insert: Option<bool>,
+    /// (Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN
+    /// (${payload:id})` to answer a whole batch in one query, matching rows by `id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lookup_query: Option<String>,
     /// (Consumer only) Read an existing table **non-destructively** and resumably, paging by this
     /// monotonic column (`SELECT … WHERE {cursor_column} > {last} ORDER BY {cursor_column} ASC LIMIT n`)
     /// and persisting the last read value under `cursor_id`.

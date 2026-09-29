@@ -19,6 +19,8 @@ pub mod connection_registry;
 pub mod crypto;
 pub(crate) mod crypto_envelope;
 pub mod interpolation;
+#[cfg(any(feature = "sqlx", feature = "clickhouse", feature = "mongodb"))]
+pub(crate) mod lookup_batch;
 pub(crate) mod pack;
 pub(crate) mod parallel;
 #[cfg(feature = "parquet")]

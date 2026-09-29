@@ -4,7 +4,9 @@
 use mq_bridge::endpoints::clickhouse::{ClickHouseCursorReader, ClickHousePublisher};
 use mq_bridge::models::ClickHouseConfig;
 use mq_bridge::test_utils::{run_test_with_docker, setup_logging};
-use mq_bridge::traits::{MessageConsumer, MessageDisposition, MessagePublisher};
+use mq_bridge::traits::{
+    MessageConsumer, MessageDisposition, MessagePublisher, PublisherError, Sent,
+};
 use mq_bridge::CanonicalMessage;
 
 const DOCKER_COMPOSE_FILE: &str = "tests/integration/docker-compose/clickhouse.yml";
@@ -128,7 +130,72 @@ pub async fn test_clickhouse_roundtrip() {
             "mapped row mismatch: {got}"
         );
 
-        println!("[ClickHouse] round-trip + cursor + column-mapping OK");
+        // --- lookup_query: read-by-key for `lookup` ---
+        let sel_cfg = ClickHouseConfig {
+            table: "ch_events".into(),
+            lookup_query: Some(
+                "SELECT id, name FROM ch_events WHERE id = ${payload:id} AND name = ${payload:name} LIMIT 1"
+                    .into(),
+            ),
+            ..base_config()
+        };
+        let sel_pub = ClickHousePublisher::new(&sel_cfg).await.unwrap();
+        let hit = sel_pub
+            .send(CanonicalMessage::new(br#"{"id":7,"name":"msg-7"}"#.to_vec(), None))
+            .await
+            .unwrap();
+        let Sent::Response(hit) = hit else {
+            panic!("lookup_query must answer with a response")
+        };
+        let row: serde_json::Value = serde_json::from_slice(&hit.payload).unwrap();
+        assert_eq!(row, serde_json::json!({"id": 7, "name": "msg-7"}));
+        assert_eq!(hit.metadata.get("clickhouse.found").unwrap(), "true");
+
+        let miss = sel_pub
+            .send(CanonicalMessage::new(br#"{"id":999,"name":"it's\n\\x"}"#.to_vec(), None))
+            .await
+            .unwrap();
+        let Sent::Response(miss) = miss else {
+            panic!("lookup_query must answer with a response")
+        };
+        assert!(miss.payload.is_empty());
+        assert_eq!(miss.metadata.get("clickhouse.found").unwrap(), "false");
+
+        let in_cfg = ClickHouseConfig {
+            lookup_query: Some("SELECT id, name FROM ch_events WHERE id IN (${payload:id})".into()),
+            ..sel_cfg.clone()
+        };
+        let in_pub = ClickHousePublisher::new(&in_cfg).await.unwrap();
+        let ask = |id: i64| CanonicalMessage::new(format!(r#"{{"id":{id}}}"#).into_bytes(), None);
+        let answers = in_pub
+            .lookup_batch(&[ask(7), ask(999), ask(3), ask(7)])
+            .await
+            .expect("an IN query batches")
+            .unwrap();
+        let names: Vec<_> = answers
+            .iter()
+            .map(|a| a.as_ref().map(|r| r["name"].clone()))
+            .collect();
+        assert_eq!(
+            names,
+            vec![Some("msg-7".into()), None, Some("msg-3".into()), Some("msg-7".into())]
+        );
+
+        let bad_cfg = ClickHouseConfig {
+            lookup_query: Some("SELECT nope FROM ch_events WHERE id = ${payload:id}".into()),
+            ..sel_cfg
+        };
+        let bad = ClickHousePublisher::new(&bad_cfg)
+            .await
+            .unwrap()
+            .send(CanonicalMessage::new(br#"{"id":1}"#.to_vec(), None))
+            .await;
+        assert!(
+            matches!(bad, Err(PublisherError::NonRetryable(_))),
+            "a query error must not be retried: {bad:?}"
+        );
+
+        println!("[ClickHouse] round-trip + cursor + column-mapping + lookup OK");
     })
     .await;
 }

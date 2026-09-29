@@ -192,17 +192,30 @@ fn classify_put_error(error: ObjectStoreError, context: String) -> PublisherErro
 }
 
 /// Splits a fetched object into record slices on `delimiter`, dropping a trailing empty
-/// remainder and a stray `\r` before a `\n` delimiter (mirrors the file reader).
-fn split_records<'a>(data: &'a [u8], delimiter: &[u8]) -> Vec<&'a [u8]> {
+/// remainder and a stray `\r` before a `\n` delimiter (mirrors the file reader). With
+/// `csv`, a delimiter inside a quoted field is data, as it is for the file reader.
+fn split_records<'a>(data: &'a [u8], delimiter: &[u8], csv: bool) -> Vec<&'a [u8]> {
     let mut records = Vec::new();
     if delimiter.is_empty() {
         return records;
     }
     let newline = delimiter.len() == 1 && delimiter[0] == b'\n';
+    let mut quotes = crate::endpoints::file::CsvQuoteState::default();
+    let mut scanned = 0;
     let mut start = 0;
     let mut i = 0;
     while i + delimiter.len() <= data.len() {
         if &data[i..i + delimiter.len()] == delimiter {
+            if csv {
+                quotes.feed(&data[scanned..i]);
+                scanned = i;
+                if quotes.in_quotes() {
+                    i += 1;
+                    continue;
+                }
+                quotes = Default::default();
+                scanned = i + delimiter.len();
+            }
             let mut end = i;
             if newline && end > start && data[end - 1] == b'\r' {
                 end -= 1;
@@ -226,7 +239,8 @@ fn split_records<'a>(data: &'a [u8], delimiter: &[u8]) -> Vec<&'a [u8]> {
 fn split_and_parse(data: &[u8], delimiter: &[u8], format: &FileFormat) -> Vec<CanonicalMessage> {
     let mut out = Vec::new();
     let mut csv_header: Option<crate::endpoints::file::CsvHeader> = None;
-    for record in split_records(data, delimiter) {
+    let csv = matches!(format, FileFormat::Csv);
+    for record in split_records(data, delimiter, csv) {
         if let Some(msg) = parse_message(record, format, &mut csv_header) {
             out.push(msg);
         }
@@ -254,7 +268,8 @@ impl ObjectBody {
                 .push(crate::support::parquet::parse_row(&msg.payload)?);
             return Ok(());
         }
-        self.bytes.extend_from_slice(&encode_record(msg, format)?);
+        self.bytes
+            .extend_from_slice(&encode_record(msg, format, delimiter)?);
         self.bytes.extend_from_slice(delimiter);
         Ok(())
     }
@@ -318,7 +333,7 @@ impl ObjectStorePublisher {
         validate_object_settings(config)?;
         let (store, base) = build_store(&config.url)?;
         let store: Arc<dyn ObjectStore> = Arc::from(store);
-        let delimiter = parse_delimiter(config.delimiter.as_deref())?;
+        let delimiter = parse_delimiter(config.delimiter.as_deref(), &config.format)?;
         let extension = config.extension.clone().unwrap_or_else(|| {
             extension_for(
                 &config.format,
@@ -700,7 +715,7 @@ impl ObjectStoreConsumer {
     ) -> anyhow::Result<Self> {
         validate_object_settings(config)?;
         let (store, base) = build_store(&config.url)?;
-        let delimiter = parse_delimiter(config.delimiter.as_deref())?;
+        let delimiter = parse_delimiter(config.delimiter.as_deref(), &config.format)?;
 
         // Durable resume needs an external checkpoint store: an object store has no cheap
         // per-key cursor row, so the source-datastore backend is rejected here.
@@ -1641,7 +1656,7 @@ mod tests {
         let mut replayed = Vec::new();
         for name in &names {
             let bytes = store.get(name).await.unwrap().bytes().await.unwrap();
-            for record in split_records(&bytes, b"\n") {
+            for record in split_records(&bytes, b"\n", false) {
                 let value: serde_json::Value = serde_json::from_slice(record).unwrap();
                 replayed.push(value["offset"].as_i64().unwrap());
             }
@@ -1950,7 +1965,7 @@ mod tests {
         let stored = store.get(&key).await.unwrap().bytes().await.unwrap();
         let plain =
             crate::support::compression::decompress_all(Compression::Gzip, &stored, None).unwrap();
-        assert_eq!(split_records(&plain, b"\n").len(), 2);
+        assert_eq!(split_records(&plain, b"\n", false).len(), 2);
 
         // A restart parses the longer extension back out, so covered offsets are not rewritten.
         let recovered =
@@ -2240,6 +2255,55 @@ mod tests {
         (batch.commit)(vec![MessageDisposition::Ack; 2])
             .await
             .unwrap();
+    }
+
+    /// RFC 4180 lets a quoted field carry the record separator; the object splitter must
+    /// frame records the way the file reader does, CRLF included.
+    #[tokio::test]
+    async fn csv_drop_file_keeps_quoted_newlines_in_one_record() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("notes.csv"),
+            b"id,note\r\n1,\"Line1\r\nLine2\"\r\n2,\"a,\"\"b\"\"\"\r\n",
+        )
+        .unwrap();
+        let config = ObjectStoreConfig {
+            url: format!("file://{}", dir.path().display()),
+            format: FileFormat::Csv,
+            polling_interval_ms: Some(1),
+            ..Default::default()
+        };
+
+        let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
+        let batch = consumer.receive_batch(10).await.unwrap();
+        let rows: Vec<serde_json::Value> = batch
+            .messages
+            .iter()
+            .map(|m| serde_json::from_slice(&m.payload).unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                serde_json::json!({"id": "1", "note": "Line1\r\nLine2"}),
+                serde_json::json!({"id": "2", "note": "a,\"b\""}),
+            ]
+        );
+        (batch.commit)(vec![MessageDisposition::Ack; 2])
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn split_records_is_quote_aware_only_for_csv() {
+        let data = b"a,\"x\ny\"\nb\n";
+        assert_eq!(
+            split_records(data, b"\n", true),
+            vec![&b"a,\"x\ny\""[..], b"b"]
+        );
+        assert_eq!(
+            split_records(data, b"\n", false),
+            vec![&b"a,\"x"[..], b"y\"", b"b"]
+        );
     }
 
     #[tokio::test]

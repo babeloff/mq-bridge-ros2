@@ -17,6 +17,20 @@ grpc://host[:port]?topic=<topic>
 is the remote server (e.g. `grpc://localhost:50051`); in server mode it is the
 bind address (e.g. `grpc://0.0.0.0:50051`).
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `grpc:`.
+
+```yaml
+input:
+  grpc: { url: "0.0.0.0:50051", server_mode: true }
+output:
+  grpc: { url: "http://localhost:50051", topic: "orders" }
+```
+
+`grpc://` / `grpcs://` are CLI-only; in config the client `url` is `http://` / `https://`.
+
 ## Examples
 
 **Forward a Kafka topic to a remote gRPC service, continuous:**

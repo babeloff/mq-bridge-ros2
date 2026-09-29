@@ -57,6 +57,7 @@ mimalloc = { version = "0.1", default-features = false, optional = true }
 rustls = { version = "0.23.43", optional = true }
 # Reads the `CONSUMER` pid lock so `server_info` can tell a live agent listener
 # from one that crashed and left its lock behind. Same version dir_spool uses.
+percent-encoding = "2.3.2"
 pidlock = "0.2.2"
 schemars = "1.2.2"
 serde = { workspace = true, features = ["derive"] }
@@ -89,9 +90,10 @@ arm64-cross-compile = ["mq_bridge_app/arm64-cross-compile"]
 # The extension features are named again rather than left to `mq_bridge_app/full`:
 # that enables them on the core crate, but this crate's own `cfg` — the scheme
 # list in an unsupported-scheme error — reads the flags declared here.
-full = ["mq_bridge_app/full", "mimalloc", "rustls-aws-lc", "pulsar", "meilisearch"]
-full-dynamic = ["mq_bridge_app/full-dynamic", "mimalloc", "rustls-aws-lc", "pulsar", "meilisearch"]
+full = ["mq_bridge_app/full", "otel", "mimalloc", "rustls-aws-lc", "pulsar", "meilisearch"]
+full-dynamic = ["mq_bridge_app/full-dynamic", "otel", "mimalloc", "rustls-aws-lc", "pulsar", "meilisearch"]
 middleware = ["mq_bridge_app/middleware"]
+otel = ["mq_bridge_app/otel"]
 compression = ["mq_bridge_app/compression"]
 encryption = ["mq_bridge_app/encryption"]
 sqlx = ["mq_bridge_app/sqlx"]

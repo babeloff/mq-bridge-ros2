@@ -1,6 +1,6 @@
 # The three ways to run it
 
-`mq-bridge-app` is one engine with one config format, exposed three ways. Build and test a
+mq-bridge is one engine with one config format, exposed three ways: the library and the two forms of `mq-bridge-app`. Build and test a
 route in the UI, export the JSON/YAML, then run that config in a config-mode service or from
 library code. The `copy` CLI takes the same settings, but expressed as endpoint URIs and flags
 rather than a config file.
@@ -104,7 +104,7 @@ consume messages with a unified API — no broker-specific SDK, one config forma
 three bindings:
 
 - **Rust** — [`mq-bridge`](https://crates.io/crates/mq-bridge) (`cargo add mq-bridge`)
-- **Python** — [`pip install mq-bridge-py`](https://pypi.org/project/mq-bridge-py/)
+- **Python** — [`pip install mq-bridge`](https://pypi.org/project/mq-bridge/)
 - **Node.js** — [`npm install mq-bridge`](https://www.npmjs.com/package/mq-bridge)
 
 The core of the library are the `MessageConsumer` and `MessagePublisher` traits in

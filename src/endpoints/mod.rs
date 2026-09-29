@@ -798,6 +798,7 @@ async fn postgres_backfill_sequence(
         .await
         .map_err(|e| anyhow!("[route:{route_name}] {e}"))?;
 
+    let cursor_id = backfill_cursor_id(cfg);
     let mut endpoints = Vec::with_capacity(tables.len() + 1);
     for table in &tables {
         if source_metadata && !table.key_is_integer {
@@ -815,8 +816,7 @@ async fn postgres_backfill_sequence(
                 table: table.qualified(),
                 cursor_column: Some(table.key.clone()),
                 // Per table, so each backfill phase resumes on its own.
-                cursor_id: cfg
-                    .cursor_id
+                cursor_id: cursor_id
                     .as_ref()
                     .map(|id| format!("{id}_{}_{}", table.schema, table.table)),
                 checkpoint_store: cfg.checkpoint_store.clone(),
@@ -836,8 +836,8 @@ async fn postgres_backfill_sequence(
 
     // `sequence` wants both halves of the marker or neither; `postgres_cdc` allows a
     // cursor_id on its own, so only pass them through as a pair.
-    let (cursor_id, checkpoint_store) = match (&cfg.cursor_id, &cfg.checkpoint_store) {
-        (Some(id), Some(store)) => (Some(id.clone()), Some(store.clone())),
+    let (cursor_id, checkpoint_store) = match (cursor_id, &cfg.checkpoint_store) {
+        (Some(id), Some(store)) => (Some(id), Some(store.clone())),
         _ => (None, None),
     };
     Ok(SequenceConfig {
@@ -845,6 +845,15 @@ async fn postgres_backfill_sequence(
         cursor_id,
         checkpoint_store,
     })
+}
+
+/// The backfill's cursor id: with a `checkpoint_store` but no `cursor_id`, the slot name,
+/// as the CDC stream itself uses. Otherwise that store alone would persist nothing.
+#[cfg(all(feature = "postgres-cdc", feature = "sqlx"))]
+fn backfill_cursor_id(cfg: &crate::models::PostgresCdcConfig) -> Option<String> {
+    cfg.cursor_id
+        .clone()
+        .or_else(|| cfg.checkpoint_store.as_ref().map(|_| cfg.slot_name.clone()))
 }
 
 #[cfg(all(feature = "postgres-cdc", not(feature = "sqlx")))]
@@ -901,6 +910,7 @@ fn sqlx_cfg_to_cdc(
         checkpoint_store: cfg.checkpoint_store.clone(),
         status_interval_ms: 10_000,
         tls: cfg.tls.clone(),
+        id_hash: Default::default(),
     })
 }
 
@@ -2674,6 +2684,22 @@ mod tests {
         Endpoint::new(EndpointType::File(config))
     }
 
+    #[cfg(all(feature = "postgres-cdc", feature = "sqlx"))]
+    #[test]
+    fn a_backfill_checkpoint_store_alone_is_keyed_by_the_slot() {
+        let mut cfg = crate::models::PostgresCdcConfig {
+            slot_name: "mqb_meili".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(backfill_cursor_id(&cfg), None);
+
+        cfg.checkpoint_store = Some("file:///tmp/phase.json".to_string());
+        assert_eq!(backfill_cursor_id(&cfg).as_deref(), Some("mqb_meili"));
+
+        cfg.cursor_id = Some("movies".to_string());
+        assert_eq!(backfill_cursor_id(&cfg).as_deref(), Some("movies"));
+    }
+
     #[test]
     fn source_position_output_requires_source_metadata_through_fanout_and_switch() {
         let ordinary = Endpoint::new_memory("ordinary", 1);
@@ -3187,6 +3213,7 @@ mod tests {
                 branch_by: None,
                 required: Vec::new(),
                 on_timeout: Default::default(),
+                ack: Default::default(),
             });
 
             for middleware in [deduplication(), weak_join, rejecting_transform()] {

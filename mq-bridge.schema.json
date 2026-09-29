@@ -282,6 +282,13 @@
             "null"
           ]
         },
+        "lookup_query": {
+          "description": "(Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN\n(${payload:id})` to answer a whole batch in one query, matching rows by `id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "max_polling_interval_ms": {
           "description": "(Consumer only) If set, the poll interval backs off exponentially from `polling_interval_ms`\nup to this value while drained, resetting on new rows. Unset = constant interval.",
           "type": [
@@ -502,7 +509,7 @@
       ]
     },
     "DeduplicationMiddleware": {
-      "description": "Deduplication middleware configuration.\n\nPrevents duplicate messages from being processed using a sled, MongoDB, or SQL backend.\nMessages are identified by their deduplication key and removed after the TTL expires.",
+      "description": "Deduplication middleware configuration.\n\nPrevents duplicate messages from being processed using a sled, in-memory, MongoDB, or SQL backend.\nMessages are identified by their deduplication key and removed after the TTL expires.",
       "type": "object",
       "properties": {
         "key": {
@@ -526,7 +533,7 @@
           "default": null
         },
         "store": {
-          "description": "Store URL: `sled:///path` (local), `mongodb://host/db[/collection]`, or `postgres|mysql|mariadb|sqlite://…[/table]` (shared).",
+          "description": "Store URL: `sled:///path` or `memory://[name]` (local), `mongodb://host/db[/collection]`, or `postgres|mysql|mariadb|sqlite://…[/table]` (shared).",
           "type": [
             "string",
             "null"
@@ -1953,6 +1960,21 @@
       },
       "additionalProperties": false
     },
+    "IdHash": {
+      "description": "Hash that folds a key into a deterministic 128-bit `message_id`.",
+      "oneOf": [
+        {
+          "description": "FNV-1a, 128-bit. Default: the ids earlier releases produced, so existing dedup state keeps matching.",
+          "type": "string",
+          "const": "fnv1a"
+        },
+        {
+          "description": "First 128 bits of SHA-256. Collision-resistant, but every id changes, so dedup state from `fnv1a` no longer matches.",
+          "type": "string",
+          "const": "sha256"
+        }
+      ]
+    },
     "KafkaConfig": {
       "description": "General Kafka connection configuration.",
       "type": "object",
@@ -2102,6 +2124,94 @@
         "messages_per_second"
       ]
     },
+    "LookupEntry": {
+      "description": "One lookup of a `lookup` middleware.",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "The endpoint to ask; it must answer with a response.",
+          "$ref": "#/$defs/Endpoint"
+        },
+        "into": {
+          "description": "Dotted payload path the response is written to, e.g. `customer.profile`.",
+          "type": "string"
+        },
+        "metadata": {
+          "description": "Request metadata templates, e.g. `http_path: \"/users/${payload:user_id}\"`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "payload": {
+          "description": "Request payload template. Defaults to the message's own payload and metadata.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "into"
+      ]
+    },
+    "LookupMiddleware": {
+      "description": "Lookup (enrich) middleware configuration.\n\nAsks a request-capable endpoint (HTTP, NATS/Memory `request_reply`, MongoDB `find`,\nSQLx/ClickHouse `lookup_query`) about each message and writes the response into the\npayload. A query keyed with `IN (…)` / `$in` answers a whole batch at once; other\nendpoints get one request per message. Several `entries` run in parallel.",
+      "type": "object",
+      "properties": {
+        "concurrency": {
+          "description": "Requests in flight per entry when the endpoint cannot answer a batch at once.",
+          "type": "integer",
+          "format": "uint",
+          "default": 16,
+          "minimum": 0
+        },
+        "entries": {
+          "description": "Further lookups, run in parallel with `from`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/LookupEntry"
+          }
+        },
+        "from": {
+          "description": "The endpoint to ask; it must answer with a response. Use `entries` for several.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Endpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "into": {
+          "description": "Dotted payload path the response is written to, e.g. `customer.profile`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "metadata": {
+          "description": "Request metadata templates, e.g. `http_path: \"/users/${payload:user_id}\"`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "payload": {
+          "description": "Request payload template. Defaults to the message's own payload and metadata.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "MappingRule": {
       "description": "How one output field is produced from the input document.\n\nEither a bare path string (`\"$.first_name\"`) or an object with a `path` plus an\noptional `default` and `required` flag.",
       "anyOf": [
@@ -2219,6 +2329,32 @@
           "additionalProperties": false,
           "required": [
             "metrics"
+          ]
+        },
+        {
+          "description": "Per-message OpenTelemetry spans, continuing the `traceparent` metadata. Input and output.",
+          "type": "object",
+          "properties": {
+            "otel": {
+              "$ref": "#/$defs/OtelMiddleware"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "otel"
+          ]
+        },
+        {
+          "description": "Asks other endpoints per message and writes their responses into the payload. Input and output.",
+          "type": "object",
+          "properties": {
+            "lookup": {
+              "$ref": "#/$defs/LookupMiddleware"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "lookup"
           ]
         },
         {
@@ -2507,6 +2643,13 @@
         "database": {
           "description": "The database name.",
           "type": "string"
+        },
+        "find": {
+          "description": "(Publisher only) Extended-JSON filter template for `lookup`, e.g. `{\"_id\": \"${payload:id}\"}`.\nAnswers with the first match. `{\"_id\": {\"$in\": [\"${payload:id}\"]}}` answers a batch at once.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "format": {
           "description": "Format for storing messages. Defaults to Normal.",
@@ -3050,6 +3193,11 @@
         "url"
       ]
     },
+    "OtelMiddleware": {
+      "description": "OpenTelemetry middleware configuration.\n\nOpens a span per message and carries the W3C `traceparent` in metadata. Inactive unless\nthe host installed an OpenTelemetry tracer provider before the route started.",
+      "type": "object",
+      "additionalProperties": false
+    },
     "PackFormat": {
       "description": "Batch envelope used by the `pack` / `unpack` middlewares.",
       "oneOf": [
@@ -3101,7 +3249,7 @@
       "type": "object",
       "properties": {
         "checkpoint_store": {
-          "description": "Checkpoint store spec (e.g. `file:///path`, `s3://bucket/prefix`); defaults to the source database.",
+          "description": "Local file (path or `file://`) for resume state; unset, the slot alone tracks the stream.",
           "type": [
             "string",
             "null"
@@ -3130,11 +3278,16 @@
           "default": true
         },
         "cursor_id": {
-          "description": "Checkpoint key for persisting the confirmed LSN across restarts (optional; the slot is authoritative).",
+          "description": "Checkpoint key for the confirmed LSN and backfill progress; defaults to `slot_name`.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "id_hash": {
+          "description": "Hash for change `message_id`s: `fnv1a` (default, keeps existing dedup state) or `sha256`.",
+          "$ref": "#/$defs/IdHash",
+          "default": "fnv1a"
         },
         "publication": {
           "description": "Publication name (must already exist; defines which tables are captured).",
@@ -3695,6 +3848,13 @@
             "null"
           ]
         },
+        "lookup_query": {
+          "description": "(Publisher only) SELECT for `lookup`, answering with the first row. Write `WHERE id IN\n(${payload:id})` to answer a whole batch in one query, matching rows by `id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "max_connections": {
           "description": "Maximum number of connections in the pool. Defaults to 10.",
           "type": [
@@ -4117,10 +4277,30 @@
       },
       "additionalProperties": false
     },
+    "WeakJoinAck": {
+      "description": "When a weak join acknowledges the source messages it buffers.",
+      "oneOf": [
+        {
+          "description": "Ack members once their joined message is committed; a crash redelivers open groups.",
+          "type": "string",
+          "const": "on_join"
+        },
+        {
+          "description": "Ack on receipt; open groups are lost on a crash. For sources whose prefetch limit is\nsmaller than the messages held in open groups.",
+          "type": "string",
+          "const": "on_receive"
+        }
+      ]
+    },
     "WeakJoinMiddleware": {
       "description": "Weak Join middleware configuration.\n\nCorrelates messages by a metadata key and joins them within a timeout window.\nCount mode (default) waits for `expected_count` messages and emits a JSON array.\nBranch mode (set `branch_by`) waits for named branches and emits a branch-keyed object.",
       "type": "object",
       "properties": {
+        "ack": {
+          "description": "When source messages are acknowledged: after the joined message is committed (default) or on receipt.",
+          "$ref": "#/$defs/WeakJoinAck",
+          "default": "on_join"
+        },
         "branch_by": {
           "description": "Metadata key naming each message's branch; enables branch mode when set.",
           "type": [

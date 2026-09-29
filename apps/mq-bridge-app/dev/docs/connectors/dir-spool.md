@@ -18,6 +18,18 @@ dir-spool:///absolute/path/to/spool?<option>=<value>
 The aliases `spool://` and `dirspool://` are also accepted. The directory path
 comes from the URI path, not a `path` query parameter.
 
+## Config (YAML / library)
+
+The same settings as a route endpoint in a config file, or in `Route.from_config` /
+`fromConfig`. Every URL query parameter is a field of the same name under `dir_spool:`.
+
+```yaml
+output:
+  dir_spool: { path: "/var/spool/orders" }
+```
+
+The URL path becomes the `path` field.
+
 ## Source, target, and on-disk layout
 
 As a **target** (sink), the connector writes each incoming message as one chunk:

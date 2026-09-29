@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tracing::{error, info, instrument, trace, warn};
 
+mod memory;
+
 /// Short TTL for a reservation held while a message is in flight. Kept small so a crash between
 /// reserve and commit frees the key quickly for at-least-once redelivery.
 pub(crate) const PENDING_TTL_SECS: u64 = 5;
@@ -107,6 +109,8 @@ pub(crate) trait DedupStore: Send + Sync {
 pub(crate) enum DedupBackend {
     /// Local single-instance Sled directory.
     Sled { path: String },
+    /// In-process exact-key store (`memory://[name][?max_keys=N]`); an empty name is the route's.
+    Memory { name: String, max_keys: usize },
     /// Shared MongoDB collection (`mongodb://host/db[/collection]`).
     #[cfg(feature = "mongodb")]
     Mongo {
@@ -137,6 +141,10 @@ pub(crate) fn parse_dedup_store(spec: &str) -> anyhow::Result<DedupBackend> {
         });
     }
     match scheme.as_str() {
+        "memory" => {
+            let (name, max_keys) = memory::parse_memory_store(spec)?;
+            Ok(DedupBackend::Memory { name, max_keys })
+        }
         "sled" => {
             let path = spec
                 .strip_prefix("sled://")
@@ -192,9 +200,11 @@ async fn build_store(
     route_name: &str,
     replay_response: bool,
 ) -> anyhow::Result<Arc<dyn DedupStore>> {
-    #[cfg(not(any(feature = "mongodb", feature = "sqlx")))]
-    let _ = route_name;
     match backend {
+        DedupBackend::Memory { name, max_keys } => {
+            let name = if name.is_empty() { route_name } else { &name };
+            Ok(memory::memory_dedup_store(name, ttl_seconds, max_keys))
+        }
         DedupBackend::Sled { path } => Ok(Arc::new(SledDedupStore::new(
             &path,
             ttl_seconds,

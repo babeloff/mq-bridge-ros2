@@ -6,36 +6,94 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Fixed
 
+- **`postgres_cdc` `capture_all`/`snapshot`: a `checkpoint_store` without a `cursor_id` now
+  resumes.** It used to persist nothing, so every restart re-ran the whole backfill. The
+  cursor id now defaults to `slot_name`, as it already did for the change stream. A recurring
+  `snapshot` job that sets only `checkpoint_store` therefore no longer re-exports every run;
+  drop `checkpoint_store` to keep that.
+- **`weak_join` no longer loses buffered messages.** Source messages used to be acked on
+  receipt, so a crash with open groups dropped them. They are now acked once the joined
+  message is committed, and nacked with it (`ack: on_join`, the default); ordered sources
+  still commit in source order. `ack: on_receive` keeps the old behaviour for sources whose
+  prefetch limit would stall on unacked messages. When one due commit fails on an
+  unordered source, the others still run.
+- **`lookup`: an incoming message no longer steers an `http` lookup.** Without a `payload`
+  template the request copied the message's metadata, so its `http_method`, `http_path` and
+  `http_query` chose the lookup's method and path. Those keys are now only set by the
+  entry's `metadata`.
+- **CSV files: quoting, framing and headers.** The `object_store` source no longer splits a
+  quoted field that contains a line break into two rows. Values containing the record
+  `delimiter` are quoted. A string with no UTF-8 spelling (a lone `\ud800`) fails its message
+  instead of being written as an empty cell. Payloads whose keys carry JSON escapes keep their
+  number spelling (`1e3` was rewritten as `1000.0`). A leading UTF-8 BOM (Excel's "CSV UTF-8")
+  is stripped. Blank lines are skipped instead of read as rows of empty strings; a one-column
+  row with an empty value is written as `""` to stay distinct from them. Appending to a
+  non-empty file follows that file's header instead of the payload's sorted keys (plain,
+  compressed and encrypted files). Long multi-line quoted fields are no longer re-scanned
+  from the start on every line.
+- **CSV: repeated header names get unique keys.** `a,a` used to produce a JSON object with
+  the key `a` twice, which readers collapse to one value. Repeats are now named `a_2`,
+  `a_3`, … (never colliding with a real column), and a warning is logged once.
+- **JSON-lines files keep one message per record.** With `format: json`, a pretty-printed
+  payload's line breaks are dropped (they are insignificant JSON whitespace). With a custom
+  `delimiter`, `json`, `normal` and `text` records escape any occurrence of it inside a
+  string as `\uXXXX`; a delimiter that would occur in JSON syntax itself (e.g. `,`) fails
+  the message instead of writing a record the reader splits. `raw` is still written as is.
+- **`transform`: `number` coercion keeps integers exact.** `"9007199254740993"` was rounded
+  through f64; integral text now becomes an exact integer, so `"42"` gives `42` instead of
+  `42.0`. Fractional text still goes through f64 (~17 significant digits). Error paths
+  write keys containing `.`, `[`, `]` or quotes as `$['a.b']`.
+
+### Changed
+
+- **`postgres_cdc`: slot creation errors name the fix.** A missing `wal_level = logical`,
+  missing replication rights or exhausted `max_replication_slots` now come with the command
+  that resolves them (and the RDS equivalent).
+- **`postgres_cdc` warns about published tables without a replica identity.** Postgres
+  rejects `UPDATE`/`DELETE` on a published table with no primary key (or `REPLICA IDENTITY
+  NOTHING`, or `USING INDEX` on a dropped index), which breaks the application's writes; the warning names those tables at startup.
+- **The Python package is now `mq-bridge` on PyPI** (`pip install mq-bridge`), matching the
+  crate and the npm package; `mq-bridge-py-basic` is now `mq-bridge-basic`. The import is
+  still `mq_bridge`. A final `mq-bridge-py` release depends on `mq-bridge`, so existing pins
+  keep working.
+- **A CSV record `delimiter` may not contain `,` or `"`.** It separates rows, and those
+  characters are CSV field syntax, so such a file could not be read back. It is now
+  rejected when the endpoint is created. The field separator is always `,`.
+
+### Added
+
+- **Opt-in SHA-256 for derived message ids.** A string `message_id` that is not a UUID or
+  number, and the `postgres_cdc` change id, are hashed into a `u128`. That hash is still
+  FNV-1a by default, so ids match earlier releases and existing dedup state keeps working
+  after an update. Set `id_hash: sha256` on `postgres_cdc`, and `set_string_id_hash(IdHash::Sha256)`
+  or `MQB_ID_HASH=sha256` for string ids, to get collision-resistant ids. Switching changes
+  every such id: a dedup store or unique-keyed sink filled under `fnv1a` then treats replays
+  as new, so switch only with fresh dedup state.
+- **`otel` middleware: OpenTelemetry spans per message.** Continues the W3C `traceparent` in
+  metadata, on input and output. It activates itself when the host has installed a tracer
+  provider and otherwise stays out of the chain. `mq-bridge-app` exports to OTLP when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is set.
+- **`lookup` middleware: enrich a message from another endpoint.** Per message, it sends a
+  request built from templates to any request-capable endpoint (e.g. HTTP) and writes the
+  response at a payload path, with `lookup.found` in metadata. Several `entries` run in
+  parallel per message. On an input the handler sees the enriched message; a retryable
+  failure nacks the batch for redelivery, a non-retryable one drops only its message.
+- **Read-by-key on MongoDB, SQLx and ClickHouse publishers**, for `lookup`: `mongodb.find`
+  (a filter template) and `sqlx.lookup_query` / `clickhouse.lookup_query` answer each send
+  with the first match and write nothing. ClickHouse sends `${payload:…}` / `${metadata:…}`
+  tokens as typed query parameters.
+- **Batched lookups.** With the token inside `id IN (…)` (or MongoDB `$in: […]`), one query
+  answers a whole batch and rows are matched back by that column, instead of one query per
+  message.
+
+## 0.4.15
+
+### Fixed
+
 - **Plugin SDK: an endpoint is dropped inside the plugin's runtime.** Freeing a consumer,
   publisher, batch or middleware ran its `Drop` outside that runtime, so a `Drop` that spawns
   — the Pulsar client closing its producer — panicked and skipped its cleanup. Rebuild a
   plugin against this version to get the fix.
-- **`deduplication` no longer loses a message that failed and came straight back.** A nacked
-  key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
-  JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
-  duplicate, and the message was gone. A failed delivery now releases its key, and a copy that
-  arrives while another is still in flight waits for it instead of being acked on its
-  strength.
-- **`deduplication` writes its marker before acking the source**, not after. A crash between
-  the two now replays a message that is already recognised.
-- **`deduplication` on MongoDB no longer fails the route on every contested key.** The upsert
-  reports a duplicate key as a command error, which was not recognised; the route reconnected
-  and the batch it held was dropped. A store error now also hands the batch back to the source
-  instead of dropping it.
-- **A nacked Kafka batch is redelivered.** Kafka commits are cumulative, so the next batch's
-  commit used to cover the nacked offsets and they were never read again. After a nack the
-  consumer stops committing and reconnects, resuming from the last committed offset.
-- **AMQP carries message identity.** The publisher now sets the `message_id` property, and the
-  consumer accepts any string id (hashing a non-UUID one) and no longer falls back to the
-  delivery tag, which restarts at 1 on every channel and gave fresh messages the ids of
-  processed ones.
-- **Python: Ctrl+C now stops a route blocked in `run()` or `join()`.** Signal handlers used
-  to wait until the route ended by itself. Now a `KeyboardInterrupt`, or any exception a
-  handler raises, stops the route cleanly and is re-raised.
-- **`mq-bridge-app`: switching publishers, consumers and tabs is fast again.** Every switch
-  re-parsed and re-compiled the whole config schema, which took 1–2 s per click and grew to
-  several seconds in the desktop app. A parsed form is now reused per schema and only its data
-  is swapped; only the first visit to each tab still builds its form.
 
 ### Added
 
@@ -84,6 +142,46 @@ All notable changes to `mq-bridge`. Newest first.
   and must not be world-writable (sticky directories like `/tmp` are fine). As root, only
   root-owned libraries pass. Each discovered load is logged with its path and SHA-256. A
   library loaded by path is not checked. See "Which files discovery trusts" in PLUGINS.md.
+
+### Changed
+
+- A plugin endpoint that fails to start is now retried like a linked one, not stopped: only
+  an error wrapped in `InvalidConfig` (or a permanent error class) stops the route. A broker
+  that is down at startup used to stop a plugin route for good.
+
+## 0.4.14
+
+### Fixed
+
+- **`deduplication` no longer loses a message that failed and came straight back.** A nacked
+  key stayed reserved for five seconds, so a broker that redelivers at once (AMQP requeue,
+  JetStream `Nak`) — or another instance on a shared store — had the redelivery acked as a
+  duplicate, and the message was gone. A failed delivery now releases its key, and a copy that
+  arrives while another is still in flight waits for it instead of being acked as a
+  duplicate before the first one has succeeded.
+- **`deduplication` writes its marker before acking the source**, not after. A crash between
+  the two now replays a message that is already recognised.
+- **`deduplication` on MongoDB no longer fails the route on every contested key.** The upsert
+  reports a duplicate key as a command error, which was not recognised; the route reconnected
+  and the batch it held was dropped. A store error now also hands the batch back to the source
+  instead of dropping it.
+- **A nacked Kafka batch is redelivered.** Kafka commits are cumulative, so the next batch's
+  commit used to cover the nacked offsets and they were never read again. After a nack the
+  consumer stops committing and reconnects, resuming from the last committed offset.
+- **AMQP carries message identity.** The publisher now sets the `message_id` property, and the
+  consumer accepts any string id (hashing a non-UUID one) and no longer falls back to the
+  delivery tag, which restarts at 1 on every channel and gave fresh messages the ids of
+  processed ones.
+- **Python: Ctrl+C now stops a route blocked in `run()` or `join()`.** Signal handlers used
+  to wait until the route ended by itself. Now a `KeyboardInterrupt`, or any exception a
+  handler raises, stops the route cleanly and is re-raised.
+- **`mq-bridge-app`: switching publishers, consumers and tabs is fast again.** Every switch
+  re-parsed and re-compiled the whole config schema, which took 1–2 s per click and grew to
+  several seconds in the desktop app. A parsed form is now reused per schema and only its data
+  is swapped; only the first visit to each tab still builds its form.
+
+### Added
+
 - **`DeliveryGuarantee` and `required_delivery`.** Each route's inferred guarantee —
   `at-most-once`, `at-least-once` or `effectively-once` — is logged at startup and available as
   `Route::delivery_guarantee()`. Setting `required_delivery` on a route fails it at startup when
@@ -117,9 +215,6 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Changed
 
-- A plugin endpoint that fails to start is now retried like a linked one, not stopped: only
-  an error wrapped in `InvalidConfig` (or a permanent error class) stops the route. A broker
-  that is down at startup used to stop a plugin route for good.
 - The startup inference no longer reports `effectively-once` for a sink keyed on `mqb.src.*`
   over an input that has no replay position.
 - `DeduplicationMiddleware` has a new `replay_response` field; code building it as a struct

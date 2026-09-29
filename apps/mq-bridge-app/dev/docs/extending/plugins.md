@@ -11,7 +11,7 @@ connector.
 > `libmq_bridge_pulsar.{so,dylib}` to `--plugin` or `plugins:` fails at startup with
 > `` `pulsar` ... is already registered by another factory `` — that rejection is
 > deliberate, since a second factory under a live name would silently reroute traffic.
-> Other hosts that did *not* compile it in, such as `mq-bridge-py`, do load it as a plugin.
+> Other hosts that did *not* compile it in, such as the Python binding (`mq-bridge` on PyPI), do load it as a plugin.
 
 This is the runtime counterpart to [custom endpoints](custom-endpoints.md): a custom
 endpoint is registered programmatically by code you compile in, a plugin is loaded from
