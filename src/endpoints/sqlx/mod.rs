@@ -484,8 +484,11 @@ struct PgBatchLookup {
     /// Set once the query turns out not to run inside a function; it then runs per message.
     disabled: std::sync::atomic::AtomicBool,
     /// `CREATE` and name per token-type combination, built once.
-    functions: Mutex<std::collections::HashMap<Vec<&'static str>, Arc<(String, String)>>>,
+    functions: Mutex<PgFunctions>,
 }
+
+/// `CREATE` and name of a batch function, keyed by its token types.
+type PgFunctions = std::collections::HashMap<Vec<&'static str>, Arc<(String, String)>>;
 
 /// Metadata key telling whether a `lookup_query` returned a row.
 const FOUND_KEY: &str = "sqlx.found";
@@ -593,7 +596,6 @@ fn pg_batch_args(
 /// `CREATE` for a `pg_temp` function that runs `template` once per element of a `jsonb`
 /// batch, in order, returning each element's rows as `(index, json)`; and its name.
 fn pg_batch_function(template: &str, types: &[&str]) -> anyhow::Result<(String, String)> {
-    use std::hash::{Hash, Hasher};
     // A token null across the batch stays an untyped NULL, as an unbound parameter would.
     let (body, _) = parse_template_with(template, |i| match types[i - 1] {
         "null" => "NULL".to_string(),
@@ -604,30 +606,37 @@ fn pg_batch_function(template: &str, types: &[&str]) -> anyhow::Result<(String, 
         .map(|n| format!("$mqb{n}$"))
         .find(|tag| !body.contains(tag.as_str()))
         .expect("an unused dollar-quote tag");
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    template.hash(&mut hasher);
     let definition = format!(
         "(mqb_args jsonb) RETURNS TABLE(mqb_idx int, mqb_row json) LANGUAGE plpgsql AS {tag} \
          BEGIN PERFORM pg_advisory_xact_lock({PG_BATCH_LOCK_CLASS}, {}); \
          FOR mqb_i IN 1..jsonb_array_length(mqb_args) LOOP \
          RETURN QUERY WITH mqb_q AS ({body}) SELECT mqb_i, to_json(mqb_q) FROM mqb_q; \
          END LOOP; END {tag}",
-        hasher.finish() as i32
+        stable_hash(template) as i32
     );
-    definition.hash(&mut hasher);
-    let name = format!("mqb_lookup_{:016x}", hasher.finish());
+    let name = format!("mqb_lookup_{:016x}", stable_hash(&definition));
     Ok((
         format!("CREATE OR REPLACE FUNCTION pg_temp.{name}{definition}"),
         name,
     ))
 }
 
-/// SQLSTATE `42883` (undefined function) or `3F000` (no `pg_temp` schema yet): a connection
-/// that has not created the batch function.
-fn pg_function_missing(e: &sqlx::Error) -> bool {
+/// FNV-1a: the lock key must match across builds, which `DefaultHasher` does not promise.
+fn stable_hash(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// SQLSTATE `3F000` (no `pg_temp` schema yet), or `42883` naming the batch function itself: a
+/// connection that has not created it. A `42883` from inside the query is the message's error.
+fn pg_function_missing(e: &sqlx::Error, name: &str) -> bool {
     e.as_database_error()
-        .and_then(|d| d.code())
-        .is_some_and(|c| c == "42883" || c == "3F000")
+        .is_some_and(|d| match d.code().as_deref() {
+            Some("3F000") => true,
+            Some("42883") => d.message().contains(name),
+            _ => false,
+        })
 }
 
 enum PgBatchError {
@@ -642,7 +651,7 @@ enum PgVerdict {
     /// Use the per-key transactions from now on.
     Disable(String),
     /// A message was rejected: redo the batch one message at a time.
-    PerMessage(String),
+    PerMessage,
     Fail(PublisherError),
 }
 
@@ -658,7 +667,7 @@ fn pg_verdict(e: PgBatchError) -> PgVerdict {
                 return PgVerdict::Disable(e.to_string());
             }
             match lookup_error(e) {
-                PublisherError::NonRetryable(e) => PgVerdict::PerMessage(e.to_string()),
+                PublisherError::NonRetryable(_) => PgVerdict::PerMessage,
                 other => PgVerdict::Fail(other),
             }
         }
@@ -1218,7 +1227,7 @@ impl SqlxPublisher {
                         disable(e);
                         return Ok(None);
                     }
-                    PgVerdict::PerMessage(_) => {}
+                    PgVerdict::PerMessage => {}
                     PgVerdict::Fail(e) => return Err(e),
                 },
             }
@@ -1237,7 +1246,7 @@ impl SqlxPublisher {
                             disable(e);
                             None
                         }
-                        PgVerdict::PerMessage(_) => None,
+                        PgVerdict::PerMessage => None,
                     },
                 }
             };
@@ -1288,7 +1297,7 @@ impl SqlxPublisher {
             .fetch_all(&mut *conn)
             .await
         {
-            Err(e) if pg_function_missing(&e) => {
+            Err(e) if pg_function_missing(&e, name) => {
                 sqlx::raw_sql(AssertSqlSafe(create.as_str()))
                     .execute(&mut *conn)
                     .await
@@ -1302,7 +1311,7 @@ impl SqlxPublisher {
                     .fetch_all(&mut *conn)
                     .await
                 {
-                    Err(e) if pg_function_missing(&e) => {
+                    Err(e) if pg_function_missing(&e, name) => {
                         return Err(PgBatchError::Unsupported(anyhow!(e)))
                     }
                     rows => rows,

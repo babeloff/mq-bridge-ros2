@@ -281,19 +281,10 @@ impl MongoDbPublisher {
         let found = match &self.update {
             // A message without a key writes nothing: it would share one counter with all such.
             Some(update) => match template.render_resolved(Some(message)) {
+                // One message has nothing to fold: the plain update is faster.
                 Some(rendered) => {
-                    let filter = find_filter(&rendered)?;
-                    let folded = match &self.update_batch_field {
-                        Some(field) => self.update_folded(field, &filter, update, &[message]).await,
-                        None => None,
-                    };
-                    match folded {
-                        Some(Ok(mut docs)) => docs.pop().flatten(),
-                        None | Some(Err(PublisherError::NonRetryable(_))) => {
-                            self.find_and_update(filter, update, message).await?
-                        }
-                        Some(Err(e)) => return Err(e),
-                    }
+                    self.find_and_update(find_filter(&rendered)?, update, message)
+                        .await?
                 }
                 None => None,
             },
@@ -327,11 +318,19 @@ impl MongoDbPublisher {
             .upsert(true)
             .return_document(ReturnDocument::After)
             .build();
-        self.collection
+        let doc = self
+            .collection
             .find_one_and_update(filter, update)
             .with_options(options)
             .await
-            .map_err(update_error)
+            .map_err(update_error)?;
+        // Snapshots left by an earlier folded batch are not part of the answer.
+        Ok(doc.map(|mut doc| {
+            if let Some(field) = &self.update_batch_field {
+                doc.remove(field);
+            }
+            doc
+        }))
     }
 
     /// Answers every message with its updated document: distinct keys in parallel, the
@@ -373,7 +372,8 @@ impl MongoDbPublisher {
                     }
                 };
                 for chunk in indices.chunks(MAX_FOLDED_UPDATES) {
-                    if let Some(field) = &self.update_batch_field {
+                    let fold = self.update_batch_field.as_ref().filter(|_| chunk.len() > 1);
+                    if let Some(field) = fold {
                         let batch: Vec<&CanonicalMessage> =
                             chunk.iter().map(|&i| &messages[i]).collect();
                         match self.update_folded(field, &filter, update, &batch).await {

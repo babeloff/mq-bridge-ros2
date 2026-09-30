@@ -1912,6 +1912,20 @@ async fn writing_lookup_postgres_runs_a_batch_as_one_function_call() {
     assert_eq!(answers[1], None);
     assert_eq!((count(&answers[0]), count(&answers[2])), (4, 6));
 
+    // `abs(text)` does not exist: that message's own error, which leaves batching on.
+    let abs =
+        "UPDATE counters_pg SET c = c + abs(${payload:n}) WHERE k = ${payload:k} RETURNING k, c";
+    let typed = SqlxPublisher::new(&config(abs)).await.unwrap();
+    let mistyped = CanonicalMessage::new(br#"{"k":"a","n":"x"}"#.to_vec(), None);
+    let answers = typed
+        .lookup_batch(&[counter_msg("a", 1), mistyped])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(answers[1], None);
+    assert_eq!(count(&answers[0]), 5);
+    assert!(typed.pg_batch_active().is_some());
+
     // A single message takes the function too, on a connection that may not have it yet.
     let Sent::Response(one) = batched.send(counter_msg("c", 7)).await.unwrap() else {
         panic!("a lookup answers");
@@ -1937,7 +1951,7 @@ async fn writing_lookup_postgres_runs_a_batch_as_one_function_call() {
     };
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&one.payload).unwrap()["c"],
-        5
+        6
     );
 
     // Batches locking the same rows in opposite order would deadlock without the advisory lock.

@@ -859,57 +859,17 @@ async fn mongo_update_batch_field_rejected_message_fails_alone() {
     assert_eq!(answers[1], None);
     let counts: Vec<f64> = [0, 2, 3].map(|i| counter(answers[i].clone())).to_vec();
     assert_eq!(counts, vec![1.0, 3.0, 5.0]);
-}
 
-// TEMP bench: remove after measuring.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore]
-async fn tmp_bench_mongo_fold() {
-    let ema = r#"[{"$set": {
-        "ema": {"$add": [{"$multiply": [0.1, ${payload:x}]},
-                         {"$multiply": [0.9, {"$ifNull": ["$ema", ${payload:x}]}]}]},
-        "n": {"$add": [{"$ifNull": ["$n", 0]}, 1]}
-    }}]"#;
-    let inc = r#"{"$inc": {"c": 1, "sum": ${payload:x}}}"#;
-    for (name, update) in [("ema", ema), ("inc", inc)] {
-        let publisher = |folded: bool| async move {
-            let mut config = counter_config(
-                &format!("bench_{}", fast_uuid_v7::gen_id()),
-                r#"{"_id": "${payload:k}"}"#,
-                Some(update),
-            );
-            config.update_batch_field = folded.then(|| "_mqb".to_string());
-            MongoDbPublisher::new(&config).await.unwrap()
-        };
-        let pubs = [publisher(false).await, publisher(true).await];
-        for keys in [1usize, 16, 128] {
-            let batch: Vec<CanonicalMessage> = (0..128)
-                .map(|i| {
-                    CanonicalMessage::new(
-                        format!(r#"{{"k":"k{}","x":{}}}"#, i % keys, i).into_bytes(),
-                        None,
-                    )
-                })
-                .collect();
-            let mut rates = [0.0f64; 2];
-            for round in 0..6 {
-                for (mode, rate) in rates.iter_mut().enumerate() {
-                    let start = std::time::Instant::now();
-                    let batches = 30;
-                    for _ in 0..batches {
-                        pubs[mode].lookup_batch(&batch).await.unwrap().unwrap();
-                    }
-                    if round > 0 {
-                        *rate += (batches * 128) as f64 / start.elapsed().as_secs_f64() / 5.0;
-                    }
-                }
-            }
-            println!(
-                "{name} keys={keys:>3}: per message {:>8.0} msg/s, folded {:>8.0} msg/s, x{:.2}",
-                rates[0],
-                rates[1],
-                rates[1] / rates[0]
-            );
-        }
-    }
+    // A folded write leaves snapshots behind; the per-message redo must not answer with them.
+    publisher
+        .lookup_batch(&[msg("a", "1"), msg("a", "1")])
+        .await
+        .unwrap()
+        .unwrap();
+    let answers = publisher
+        .lookup_batch(&[msg("a", "1"), msg("a", "abc")])
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(answers[0].as_ref().unwrap().get("_mqb").is_none());
 }

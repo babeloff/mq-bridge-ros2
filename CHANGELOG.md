@@ -20,6 +20,15 @@ All notable changes to `mq-bridge`. Newest first.
   that keeps concurrent batches from deadlocking; SQLite uses `BEGIN IMMEDIATE`. A rejected
   message answers `null` and does not fail the rest. On PostgreSQL rows are then encoded by
   `to_json`. See [REFERENCE.md](docs/REFERENCE.md#lookup).
+- **Batched MongoDB `update` lookups.** A `mongodb` lookup with `find` and `update` (a keyed
+  counter or moving average) answers with the updated document; set `update_batch_field` to
+  a free top-level field name (e.g. `_mqb`) and all of a key's messages in a batch run as one
+  atomic `update` call, up to 64 at a time, each answered with its own intermediate document.
+  Distinct keys still run in parallel. `$set`, `$inc`, `$mul`, `$min`, `$max`, `$unset` on
+  top-level fields and `$set`/`$addFields`/`$unset` pipelines fold; anything else runs one
+  call per message. The field keeps the last batch's snapshots in the stored document (never
+  in answers). Folded `$inc`/`$mul` treat a `null` field as 0 and `$inc` adds to a date,
+  where a single update rejects both.
 
 ## 0.4.16
 

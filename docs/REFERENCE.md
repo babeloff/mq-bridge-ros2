@@ -1039,6 +1039,8 @@ each message seeing its predecessors' writes.
   batch writes the already committed messages again: at-least-once, as without batching.
 - On PostgreSQL the row is encoded by `to_json`: `NUMERIC` and timestamps need no `::text`
   cast, `bytea` reads `"\\x…"`, `real` keeps its `float4` digits and `NaN` is a string.
+  Where the function is not used (behind a pooler, or a query it cannot wrap), rows come from
+  the `Any` driver as in a per-message lookup, so those columns still need the `::text` cast.
 
 `from` and every entry in `entries` run **in parallel**, so a batch waits for the slowest
 lookup, not the sum of all. Each batched entry costs one query per batch; for a lookup that
