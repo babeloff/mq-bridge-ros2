@@ -1808,7 +1808,7 @@ pub struct MongoDbConfig {
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub update: Option<String>,
     /// Internal: top-level field that lets one `update` call serve all of a key's messages in a
-    /// batch; it keeps the changed fields' intermediate values until the next update.
+    /// batch. Must start with `_mqb`; it is cleared once the batch is answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub update_batch_field: Option<String>,

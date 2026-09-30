@@ -28,17 +28,35 @@ All notable changes to `mq-bridge`. Newest first.
   `to_json`. See [REFERENCE.md](docs/REFERENCE.md#lookup).
 - **Batched MongoDB `update` lookups.** A `mongodb` lookup with `find` and `update` (a keyed
   counter or moving average) answers with the updated document; set `update_batch_field` to
-  a free top-level field name (e.g. `_mqb`) and all of a key's messages in a batch run as one
+  a top-level field name starting with `_mqb` (e.g. `_mqb`) and all of a key's messages in a batch run as one
   atomic `update` call, up to 64 at a time, each answered with its own intermediate document.
   Distinct keys still run in parallel. `$set`, `$inc`, `$mul`, `$min`, `$max`, `$unset` on
   top-level fields and `$set`/`$addFields`/`$unset` pipelines fold; anything else runs one
-  call per message. The field keeps the last batch's snapshots in the stored document (never
-  in answers). Folded `$inc`/`$mul` treat a `null` field as 0 and `$inc` adds to a date,
+  call per message. The field holds the batch's snapshots only until the batch is answered
+  (never in answers). Folded `$inc`/`$mul` treat a `null` field as 0 and `$inc` adds to a date,
   where a single update rejects both.
 - **SQLite math functions.** The bundled SQLite in `mqb`, the Docker image and the Python and
   Node packages is built with `exp`, `ln`, `pow` and the other math functions, e.g. for a
   time-decayed average in a `lookup_query`. Rust users set
   `LIBSQLITE3_FLAGS=SQLITE_ENABLE_MATH_FUNCTIONS` in their own build.
+- **`mqb checkpoint show | reset | set`.** Inspect or edit a source's resume position without
+  touching the store by hand. Name it with `--route NAME` from the config, or with the
+  SOURCE, TARGET and `--filter` of a `copy --resume` job. `reset` prints the old value so
+  `set --value` can undo it. Works for SQL, ClickHouse and object-store cursor readers and
+  MongoDB change streams; Postgres CDC is refused, its slot is authoritative. See
+  [Checkpoints](apps/mq-bridge-app/dev/docs/cookbook/checkpoints.md#inspecting-and-editing-a-checkpoint).
+- **`CheckpointStore::clear`**, implemented for the file, SQL, MongoDB and object-store
+  backends. The default returns an error, so existing implementations still compile.
+
+### Changed
+
+- **Checkpoints record which source wrote them.** A position is now stored as
+  `{"mqb_checkpoint":1,"source":…,"value":…,"updated_at_ms":…}`, the source being e.g.
+  `sqlx:<table>:<cursor_column>`. A run refuses a position written by a different source,
+  e.g. after `cursor_column` changed under the same `cursor_id`, instead of resuming from a
+  value of another column. Plain values from 0.4.16 and older still load and are upgraded on
+  the next save. **Downgrading loses the position:** an older mq-bridge cannot read the new
+  format and starts from the beginning.
 
 ## 0.4.16
 

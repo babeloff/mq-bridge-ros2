@@ -116,8 +116,10 @@ impl MongoDbPublisher {
             if update.is_none() {
                 anyhow::bail!("MongoDB `update_batch_field` requires `update`");
             }
-            if field.is_empty() || field.contains('.') || field.starts_with('$') {
-                anyhow::bail!("MongoDB `update_batch_field` must be a top-level field name");
+            if !field.starts_with("_mqb") || field.contains('.') {
+                anyhow::bail!(
+                    "MongoDB `update_batch_field` must be a top-level field name starting with `_mqb`"
+                );
             }
         }
         let shared_client = create_shared_client(config).await?;
@@ -355,6 +357,7 @@ impl MongoDbPublisher {
             groups[group].1.push(i);
         }
         let failed = &std::sync::atomic::AtomicBool::new(false);
+        let folded_ids = &std::sync::Mutex::new(Vec::new());
         let mut answers = futures::stream::iter(groups)
             .map(|(rendered, indices)| async move {
                 // After a failure, keys not yet started stay unwritten for the retry.
@@ -378,6 +381,9 @@ impl MongoDbPublisher {
                             chunk.iter().map(|&i| &messages[i]).collect();
                         match self.update_folded(field, &filter, update, &batch).await {
                             Some(Ok(docs)) => {
+                                if let Some(id) = docs.last().and_then(|d| d.as_ref()?.get("_id")) {
+                                    folded_ids.lock().unwrap().push(id.clone());
+                                }
                                 out.extend(chunk.iter().copied().zip(
                                     docs.into_iter()
                                         .map(|d| d.map(|d| Bson::Document(d).into_relaxed_extjson())),
@@ -419,7 +425,28 @@ impl MongoDbPublisher {
                 }
             }
         }
+        drop(answers);
+        if let Some(field) = &self.update_batch_field {
+            let ids = std::mem::take(&mut *folded_ids.lock().unwrap());
+            self.clear_snapshots(field, ids).await;
+        }
         error.map_or(Ok(results), Err)
+    }
+
+    /// Removes the snapshots folded writes left, so no intermediate value outlives its batch.
+    /// Best effort: the next folded write of a key clears them too.
+    async fn clear_snapshots(&self, field: &str, ids: Vec<Bson>) {
+        if ids.is_empty() {
+            return;
+        }
+        let filter = doc! { "_id": { "$in": ids }, field: { "$exists": true } };
+        if let Err(e) = self
+            .collection
+            .update_many(filter, doc! { "$unset": { field: "" } })
+            .await
+        {
+            warn!(error = %e, field, "MongoDB `update` batch could not clear its snapshots");
+        }
     }
 
     /// Runs a key's messages, in order, as one atomic `update` call that records each one's

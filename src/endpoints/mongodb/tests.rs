@@ -767,7 +767,7 @@ async fn mongo_update_batch_field_is_validated() {
     let mut config = counter_config("unused", find, None);
     config.update_batch_field = Some("_mqb".to_string());
     assert!(MongoDbPublisher::new(&config).await.is_err());
-    for bad in ["", "a.b", "$x"] {
+    for bad in ["", "a.b", "$x", "total", "_mqb.x"] {
         let mut config = counter_config("unused", find, Some(r#"{"$inc": {"c": 1}}"#));
         config.update_batch_field = Some(bad.to_string());
         assert!(MongoDbPublisher::new(&config).await.is_err(), "{bad:?}");
@@ -800,10 +800,22 @@ async fn mongo_update_batch_field_answers_like_one_call_per_message() {
         vec![msg("a", 40)],
         (0..70).map(|i| msg("c", i % 7)).collect::<Vec<_>>(),
     ];
+    let db = mongodb::Client::with_uri_str("mongodb://localhost:27017")
+        .await
+        .unwrap()
+        .database("mq_bridge_test");
     for update in [ema, ops] {
+        let folded_name = format!("update_{}", fast_uuid_v7::gen_id());
+        let stored = db.collection::<mongodb::bson::Document>(&folded_name);
+        let folded_name = &folded_name;
         let publisher = |folded: bool| async move {
+            let name = if folded {
+                folded_name.clone()
+            } else {
+                format!("update_{}", fast_uuid_v7::gen_id())
+            };
             let mut config = counter_config(
-                &format!("update_{}", fast_uuid_v7::gen_id()),
+                &name,
                 r#"{"_id": "${payload:k}"}"#,
                 Some(update),
             );
@@ -818,6 +830,11 @@ async fn mongo_update_batch_field_answers_like_one_call_per_message() {
             assert!(answers
                 .iter()
                 .all(|a| a.as_ref().unwrap().get("_mqb").is_none()));
+            let leftover = stored
+                .count_documents(doc! { "_mqb": { "$exists": true } })
+                .await
+                .unwrap();
+            assert_eq!(leftover, 0, "snapshots must not outlive their batch");
         }
         let Sent::Response(single) = folded.send(msg("a", 50)).await.unwrap() else {
             panic!("update must answer with a response");

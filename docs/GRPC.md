@@ -270,6 +270,10 @@ An acknowledgement without a reply returns the default output message, a failed 
 `INTERNAL`, and a request that does not decode returns `INVALID_ARGUMENT`. Streaming methods, and a
 method name without a service name or descriptor, are rejected at construction.
 
+Any caller the listener admits can invoke the method; there is no per-call authorization. Incoming
+call metadata is not passed to the route, so it cannot carry a caller identity downstream. Restrict
+who may call with TLS client certificates on the listener.
+
 ## Generic server boundary
 
 Beyond one unary method per route, server mode does not register arbitrary RPC paths from
