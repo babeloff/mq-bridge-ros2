@@ -29,6 +29,10 @@ All notable changes to `mq-bridge`. Newest first.
   call per message. The field keeps the last batch's snapshots in the stored document (never
   in answers). Folded `$inc`/`$mul` treat a `null` field as 0 and `$inc` adds to a date,
   where a single update rejects both.
+- **SQLite math functions.** The bundled SQLite in `mqb`, the Docker image and the Python and
+  Node packages is built with `exp`, `ln`, `pow` and the other math functions, e.g. for a
+  time-decayed average in a `lookup_query`. Rust users set
+  `LIBSQLITE3_FLAGS=SQLITE_ENABLE_MATH_FUNCTIONS` in their own build.
 
 ## 0.4.16
 

@@ -9,6 +9,8 @@
 # refuses. rdkafka-sys is reachable from the engine's kafka feature and from
 # every app build, so this belongs at the root.
 CMAKE_ARGS = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+# Bundled SQLite (sqlx) with `exp`, `ln`, `pow` etc., e.g. for decaying averages in a lookup.
+LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
 
 # Pinned explicitly so a --manifest-path build of the app workspace still writes
 # here instead of defaulting to apps/mq-bridge-app/target. One target dir for the

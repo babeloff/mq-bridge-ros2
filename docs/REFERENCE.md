@@ -1041,6 +1041,40 @@ each message seeing its predecessors' writes.
   cast, `bytea` reads `"\\x…"`, `real` keeps its `float4` digits and `NaN` is a string.
   Where the function is not used (behind a pooler, or a query it cannot wrap), rows come from
   the `Any` driver as in a per-message lookup, so those columns still need the `::text` cast.
+- Order matters for a query that builds on the stored value. A batch is applied in order, but
+  at route `concurrency` above 1 batches run in parallel unless the sink keeps order (`file`
+  does), and the per-message fallback (MySQL, a pooler, a query the function cannot wrap,
+  `middlewares` on `from`) sends `concurrency` messages at once. Set `concurrency: 1` on the
+  `lookup` and the route, or write the query so order does not matter, as below.
+- SQLite math functions (`exp`, `ln`, `pow`) are built into `mqb` and the Python and Node
+  packages. A Rust project depending on `mq-bridge` builds its own SQLite and needs
+  `LIBSQLITE3_FLAGS=SQLITE_ENABLE_MATH_FUNCTIONS` set (e.g. in `.cargo/config.toml` `[env]`).
+
+A time-decayed sum per key (e.g. card velocity) that gives the same result in any order: a
+late event is added with its own decay instead of being dropped, so parallel routes and
+instances can share the table.
+
+```yaml middleware
+- lookup:
+    from:
+      sqlx:
+        url: "postgres://localhost/metrics"
+        table: "velocity"
+        lookup_query: >-
+          INSERT INTO velocity (k, v, ts)
+          VALUES (${payload:card}, ${payload:amount}::float8, ${payload:ts}::bigint)
+          ON CONFLICT (k) DO UPDATE SET
+            v = CASE WHEN excluded.ts > velocity.ts
+                THEN velocity.v * exp((velocity.ts - excluded.ts) / 60000.0) + excluded.v
+                ELSE velocity.v + excluded.v * exp((excluded.ts - velocity.ts) / 60000.0) END,
+            ts = GREATEST(velocity.ts, excluded.ts)
+          RETURNING k, v
+    into: velocity
+```
+
+`60000.0` is the decay time in the unit of `ts` (here one minute in milliseconds). A retried
+batch still adds its events again; key a [`deduplication`](#deduplication) on the event id
+to prevent that.
 
 `from` and every entry in `entries` run **in parallel**, so a batch waits for the slowest
 lookup, not the sum of all. Each batched entry costs one query per batch; for a lookup that

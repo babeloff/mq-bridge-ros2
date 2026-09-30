@@ -1,9 +1,10 @@
 # Path-scoped: cargo finds this only when the build is started from inside
 # apps/mq-bridge-app (npm run tauri, tauri-action's projectPath). Builds started
 # from the repository root use /.cargo/config.toml instead, which is why
-# CMAKE_ARGS is defined in both.
+# CMAKE_ARGS and LIBSQLITE3_FLAGS are defined in both.
 [env]
 CMAKE_ARGS = "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+LIBSQLITE3_FLAGS = "SQLITE_ENABLE_MATH_FUNCTIONS"
 
 # Share the engine's target dir. Relative to this config's parent directory,
 # so app-cwd builds write to <repo>/target rather than a second tree.
