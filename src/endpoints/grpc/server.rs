@@ -203,7 +203,7 @@ impl tonic::server::UnaryService<Vec<u8>> for DynamicUnaryService {
 
     fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
         let router = self.router.clone();
-        let path = std::mem::take(&mut self.path);
+        let path = self.path.clone();
         let method = self.method.clone();
         let commit_timeout = self.commit_timeout;
         Box::pin(async move {

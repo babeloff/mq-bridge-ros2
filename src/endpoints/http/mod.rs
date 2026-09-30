@@ -2036,6 +2036,10 @@ fn make_response(
             }
 
             if !trailers.is_empty() {
+                if let Some(req) = request_metadata.filter(|r| r.version != hyper::Version::HTTP_2)
+                {
+                    debug!(version = ?req.version, "Reply trailers on a non-HTTP/2 request may be dropped");
+                }
                 let frames = [Frame::data(payload_out), Frame::trailers(trailers)];
                 let stream = futures::stream::iter(frames.map(Ok::<_, anyhow::Error>));
                 builder

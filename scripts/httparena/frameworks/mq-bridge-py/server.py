@@ -435,6 +435,8 @@ def _crud_create(payload: bytes) -> tuple[bytes, dict]:
         body = _json.loads(payload)
     except ValueError:
         return BAD_REQUEST
+    if not isinstance(body, dict):
+        return BAD_REQUEST
     row = _fetch(
         f"INSERT INTO items ({ITEM_COLUMNS}) "
         "VALUES (%s, %s, %s, %s, %s, true, '[]'::jsonb, 0, 0) "
@@ -464,6 +466,8 @@ def _crud_update(item_id: int, payload: bytes) -> tuple[bytes, dict]:
     try:
         body = _json.loads(payload)
     except ValueError:
+        return BAD_REQUEST
+    if not isinstance(body, dict):
         return BAD_REQUEST
     row = _fetch(
         "UPDATE items SET name = COALESCE(%s::text, name), "

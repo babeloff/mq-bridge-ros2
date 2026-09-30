@@ -20,7 +20,9 @@ pub(crate) mod replication;
 mod state;
 
 use crate::canonical_message::{hashed_id, CanonicalMessage, IdHash};
-use crate::checkpoint::{checkpoint_key, CheckpointStore, FileCheckpointStore};
+use crate::checkpoint::{
+    checkpoint_key, CheckpointStore, FileCheckpointStore, VersionedCheckpoint,
+};
 use crate::errors::ConsumerError;
 use crate::models::PostgresCdcConfig;
 use crate::traits::{BatchCommitFunc, MessageConsumer, MessageDisposition};
@@ -162,9 +164,12 @@ impl PostgresCdcConsumer {
                 } else {
                     spec.to_string()
                 };
-                Some(Arc::new(FileCheckpointStore::new(
-                    path,
-                    checkpoint_key("postgres_cdc", &cid),
+                Some(Arc::new(VersionedCheckpoint::new(
+                    Arc::new(FileCheckpointStore::new(
+                        path,
+                        checkpoint_key("postgres_cdc", &cid),
+                    )),
+                    format!("postgres_cdc:{}", config.slot_name),
                 )))
             }
             None => None,

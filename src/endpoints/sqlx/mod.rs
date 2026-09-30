@@ -1061,9 +1061,8 @@ impl SqlxPublisher {
     /// Runs `lookup_query` and answers with its first row, or an empty payload.
     async fn lookup_one(&self, message: &CanonicalMessage) -> Result<Sent, PublisherError> {
         let mut payload = Vec::new();
-        let found = match &self.lookup {
-            Some(SqlLookup::Single(sql, sources)) if self.pg_batch_active().is_some() => {
-                let pg = self.pg_batch_active().expect("checked by the guard");
+        let found = match (&self.lookup, self.pg_batch_active()) {
+            (Some(SqlLookup::Single(sql, sources)), Some(pg)) => {
                 let rows = self.pg_batch_rows(pg, sql, sources, &[message]).await?;
                 let answer = match rows {
                     Some(mut rows) => rows.pop().flatten(),
@@ -1079,7 +1078,7 @@ impl SqlxPublisher {
                 }
                 answer.is_some()
             }
-            Some(SqlLookup::Single(sql, sources)) => {
+            (Some(SqlLookup::Single(sql, sources)), None) => {
                 let query = bind_message_sources(sqlx::query(audited_sql(sql)), message, sources)?;
                 let row = query
                     .fetch_optional(&self.pool)
@@ -1090,7 +1089,7 @@ impl SqlxPublisher {
                 }
                 row.is_some()
             }
-            Some(SqlLookup::List { query, source }) => {
+            (Some(SqlLookup::List { query, source }), _) => {
                 let answer = self
                     .lookup_list(query, source, std::slice::from_ref(message))
                     .await?
@@ -1102,7 +1101,7 @@ impl SqlxPublisher {
                 }
                 answer.is_some()
             }
-            None => unreachable!("lookup_one runs only for a lookup publisher"),
+            (None, _) => unreachable!("lookup_one runs only for a lookup publisher"),
         };
         let mut response = CanonicalMessage::new(payload, Some(message.message_id));
         response
@@ -1188,7 +1187,10 @@ impl SqlxPublisher {
         for message in messages {
             let query = bind_message_sources(sqlx::query(audited_sql(sql)), message, sources);
             let row = match query {
-                Ok(query) => query.fetch_optional(&self.pool).await.map_err(lookup_error),
+                Ok(query) => match query.fetch_optional(&self.pool).await {
+                    Err(e) if is_permanent_decode_error(&e) => return Err(lookup_error(e)),
+                    other => other.map_err(lookup_error),
+                },
                 Err(e) => Err(e),
             };
             answers.push(
@@ -2532,6 +2534,20 @@ impl crate::checkpoint::CheckpointStore for SqlTableCheckpointStore {
             })?;
         Ok(())
     }
+
+    async fn clear(&self) -> anyhow::Result<()> {
+        let (table, cursor_id, _) = self.idents();
+        let sql = format!(
+            "DELETE FROM {table} WHERE {cursor_id} = {}",
+            positional_placeholder(&self.driver_name, 1)
+        );
+        sqlx::query(audited_sql(&sql))
+            .bind(self.cursor_id.clone())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to clear cursor in '{}': {e}", self.meta_table))?;
+        Ok(())
+    }
 }
 
 /// Build a checkpoint store on an **external** SQL database (its own pool), creating the meta
@@ -2576,6 +2592,57 @@ async fn source_sql_checkpoint_store(
     };
     store.ensure_table().await?;
     Ok(Arc::new(store))
+}
+
+/// Opens a cursor reader's checkpoint, identified by table and cursor column. `source` is the
+/// reader's own pool and driver name; without it one is connected only if the store needs it.
+async fn open_cursor_checkpoint(
+    config: &SqlxConfig,
+    cursor_id: &str,
+    cursor_column: &str,
+    source: Option<(AnyPool, String)>,
+) -> anyhow::Result<Arc<crate::checkpoint::VersionedCheckpoint>> {
+    use crate::checkpoint::CheckpointBackend;
+    let backend = match &config.checkpoint_store {
+        // Absent: source datastore with an auto-unique meta table.
+        None => CheckpointBackend::Source {
+            name: crate::checkpoint::default_meta_name(&config.table),
+        },
+        Some(spec) => crate::checkpoint::parse_checkpoint_store(spec)?,
+    };
+    let store = match backend {
+        CheckpointBackend::Source { name } => {
+            let (pool, driver_name) = match source {
+                Some(source) => source,
+                None => {
+                    let pool = create_sqlx_pool(config).await?;
+                    let driver_name = pool.acquire().await?.backend_name().to_string();
+                    (pool, driver_name)
+                }
+            };
+            source_sql_checkpoint_store(pool, driver_name, name, &config.table, cursor_id).await?
+        }
+        external => {
+            crate::checkpoint::build_external_store(external, &config.table, cursor_id).await?
+        }
+    };
+    Ok(Arc::new(crate::checkpoint::VersionedCheckpoint::new(
+        store,
+        format!("sqlx:{}:{cursor_column}", config.table),
+    )))
+}
+
+/// The checkpoint of a `cursor_column` source, or `None` without a `cursor_id`.
+pub(crate) async fn cursor_checkpoint(
+    config: &SqlxConfig,
+) -> anyhow::Result<Option<Arc<crate::checkpoint::VersionedCheckpoint>>> {
+    let (Some(cursor_id), Some(cursor_column)) = (&config.cursor_id, &config.cursor_column) else {
+        return Ok(None);
+    };
+    sqlx::any::install_default_drivers();
+    open_cursor_checkpoint(config, cursor_id, cursor_column, None)
+        .await
+        .map(Some)
 }
 
 /// A non-destructive, resumable reader over an **arbitrary** SQL table. Pages by a
@@ -2663,30 +2730,15 @@ impl SqlxCursorReader {
         let checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>> = if no_resume {
             None
         } else if let Some(cid) = &config.cursor_id {
-            use crate::checkpoint::CheckpointBackend;
-            let backend = match &config.checkpoint_store {
-                // Absent: source datastore with an auto-unique meta table.
-                None => CheckpointBackend::Source {
-                    name: crate::checkpoint::default_meta_name(&config.table),
-                },
-                Some(spec) => crate::checkpoint::parse_checkpoint_store(spec)?,
-            };
-            let store = match backend {
-                CheckpointBackend::Source { name } => {
-                    source_sql_checkpoint_store(
-                        pool.clone(),
-                        driver_name.clone(),
-                        name,
-                        &config.table,
-                        cid,
-                    )
-                    .await?
-                }
-                external => {
-                    crate::checkpoint::build_external_store(external, &config.table, cid).await?
-                }
-            };
-            Some(store)
+            Some(
+                open_cursor_checkpoint(
+                    config,
+                    cid,
+                    &cursor_column,
+                    Some((pool.clone(), driver_name.clone())),
+                )
+                .await?,
+            )
         } else {
             warn!(
                 table = %config.table,

@@ -20,17 +20,20 @@ via `meta.json`.
 A single catch-all `http -> response` route dispatches on `http_method` /
 `http_path` / `http_query` metadata:
 
-| Route                          | Behaviour                                            | Profiles            |
-|--------------------------------|------------------------------------------------------|---------------------|
-| `GET  /pipeline`               | `ok`                                                 | baseline/pipelined/limited-conn |
-| `GET  /baseline11?a=&b=`       | `a+b`                                                | baseline            |
-| `POST /baseline11?a=&b=`+body  | `a+b+body`                                            | baseline            |
-| `GET  /baseline2?a=&b=`        | `a+b`                                                | baseline            |
-| `GET  /json/{count}?m=`        | processed dataset JSON, `total = price*quantity*m`   | json / json-comp    |
-| `POST /upload`+body            | received byte count                                  | upload              |
-| `GET  /async-db?min=&max=&limit=` | Postgres `items` rows as JSON                     | async-db            |
-| `GET  /static/{file}`          | file from `/data/static` (path-traversal-safe)       | static              |
-| `POST /benchmark.BenchmarkService/GetSum` | gRPC `SumReply{result=a+b}`, `grpc-status` trailer (Rust only) | unary-grpc, unary-grpc-tls |
+| Route                          | Behaviour                                            | Profiles            | Entries |
+|--------------------------------|------------------------------------------------------|---------------------|---------|
+| `GET  /pipeline`               | `ok`                                                 | baseline/pipelined/limited-conn | Rust, Python |
+| `GET  /baseline11?a=&b=`       | `a+b`                                                | baseline            | Rust, Python |
+| `POST /baseline11?a=&b=`+body  | `a+b+body`                                           | baseline            | Rust, Python |
+| `GET  /baseline2?a=&b=`        | `a+b`                                                | baseline            | Rust, Python |
+| `GET  /json/{count}?m=`        | processed dataset JSON, `total = price*quantity*m`   | json / json-comp    | Rust, Python |
+| `POST /echo`+body              | the request body, unchanged                          | 8gbit / in-out      | Rust, Python |
+| `GET  /delay/{ms}`             | `ms`, after waiting `ms` ms                          | async               | Rust, Python |
+| `GET  /async-db?min=&max=&limit=` | Postgres `items` rows as JSON                     | async-db            | Rust, Python |
+| `GET  /fortunes`               | rendered HTML table                                  | fortunes            | Rust, Python |
+| `GET/POST/PUT /crud/items[/{id}]` | paginated list, cached item, upsert, update       | crud                | Rust, Python |
+| `GET  /static/{file}`          | file from `/data/static` (path-traversal-safe)       | static              | Rust, Python |
+| `POST /benchmark.BenchmarkService/GetSum` | gRPC `SumReply{result=a+b}`, `grpc-status` trailer | unary-grpc, unary-grpc-tls | Rust only |
 
 Harness inputs: dataset from `/data/dataset.json` (`DATASET_PATH`), static assets
 from `/data/static` (`STATIC_DIR`), Postgres from `DATABASE_URL`. A missing DB is

@@ -17,7 +17,7 @@
 //! crate's `?`-as-bind-placeholder quirk that would corrupt JSON payloads containing `?`.
 
 use super::poll::PollBackoff;
-use crate::checkpoint::{self, CheckpointBackend, CheckpointStore};
+use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
 use crate::models::{ClickHouseConfig, Compression};
 use crate::support::lookup_batch::{self, ListQuery};
 use crate::traits::{
@@ -683,6 +683,41 @@ fn extract_cursor(row: &serde_json::Value, column: &str) -> Option<ChCursor> {
     }
 }
 
+/// Opens a cursor reader's external checkpoint, identified by table and cursor column.
+async fn open_checkpoint(
+    backend: CheckpointBackend,
+    config: &ClickHouseConfig,
+    cursor_id: &str,
+    cursor_column: &str,
+) -> anyhow::Result<Arc<VersionedCheckpoint>> {
+    let store = checkpoint::build_external_store(backend, &config.table, cursor_id).await?;
+    Ok(Arc::new(VersionedCheckpoint::new(
+        store,
+        format!("clickhouse:{}:{cursor_column}", config.table),
+    )))
+}
+
+/// The checkpoint of a cursor source, or `None` without both `cursor_id` and `checkpoint_store`.
+pub(crate) async fn cursor_checkpoint(
+    config: &ClickHouseConfig,
+) -> anyhow::Result<Option<Arc<VersionedCheckpoint>>> {
+    let (Some(cursor_id), Some(spec), Some(cursor_column)) = (
+        &config.cursor_id,
+        &config.checkpoint_store,
+        &config.cursor_column,
+    ) else {
+        return Ok(None);
+    };
+    match checkpoint::parse_checkpoint_store(spec)? {
+        CheckpointBackend::Source { .. } => Err(anyhow!(
+            "ClickHouse needs an external checkpoint_store (file://, postgres://, or mongodb://)"
+        )),
+        external => open_checkpoint(external, config, cursor_id, cursor_column)
+            .await
+            .map(Some),
+    }
+}
+
 pub struct ClickHouseCursorReader {
     client: ChClient,
     table: String,
@@ -740,9 +775,7 @@ impl ClickHouseCursorReader {
                             "ClickHouse cursor reader requires an external checkpoint_store (file://, postgres://, or mongodb://); a source-datastore checkpoint is not supported because ClickHouse cannot cheaply upsert cursor rows."
                         ));
                     }
-                    external => {
-                        Some(checkpoint::build_external_store(external, &config.table, cid).await?)
-                    }
+                    external => Some(open_checkpoint(external, config, cid, &cursor_column).await?),
                 },
             }
         } else {

@@ -42,7 +42,7 @@ pub use readers::{MongoDbChangeStreamReader, MongoDbIdReader};
 
 #[cfg(feature = "dedup")]
 pub(crate) use dedup::build_mongo_dedup_store;
-pub(crate) use readers::is_change_stream_unsupported;
+pub(crate) use readers::{change_stream_checkpoint, is_change_stream_unsupported};
 // Referenced only by the unit tests below.
 #[cfg(test)]
 pub(crate) use publisher::{tag_outcome, OUTCOME_EXISTED, OUTCOME_INSERTED, OUTCOME_KEY};
@@ -368,6 +368,13 @@ impl crate::checkpoint::CheckpointStore for MongoCollectionCheckpointStore {
                 doc! { "$set": { "last_value": value } },
             )
             .with_options(UpdateOptions::builder().upsert(true).build())
+            .await?;
+        Ok(())
+    }
+
+    async fn clear(&self) -> anyhow::Result<()> {
+        self.meta
+            .delete_one(doc! { "_id": self.doc_id.clone() })
             .await?;
         Ok(())
     }
