@@ -814,11 +814,7 @@ async fn mongo_update_batch_field_answers_like_one_call_per_message() {
             } else {
                 format!("update_{}", fast_uuid_v7::gen_id())
             };
-            let mut config = counter_config(
-                &name,
-                r#"{"_id": "${payload:k}"}"#,
-                Some(update),
-            );
+            let mut config = counter_config(&name, r#"{"_id": "${payload:k}"}"#, Some(update));
             config.update_batch_field = folded.then(|| "_mqb".to_string());
             MongoDbPublisher::new(&config).await.unwrap()
         };

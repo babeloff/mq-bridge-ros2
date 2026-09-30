@@ -252,7 +252,7 @@ def _build_json(qs: dict[str, list[str]], count: int) -> tuple[bytes, dict]:
     it per request when the client advertises an encoding, so `json` and
     `json-comp` both measure real serialization and compression work."""
     m = _query_int(qs, "m", 1)
-    count = min(count, len(DATASET))
+    count = max(0, min(count, len(DATASET)))
     items = [
         {
             "id": d["id"],

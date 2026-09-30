@@ -55,7 +55,7 @@ pub struct PostgresCdcConsumer {
     ready: VecDeque<(CanonicalMessage, u64)>,
     /// Highest durably-acknowledged LSN; fed back to the server as the slot's confirmed position.
     confirmed: Arc<AtomicU64>,
-    checkpoint: Option<Arc<dyn CheckpointStore>>,
+    checkpoint: Option<Arc<VersionedCheckpoint>>,
     /// Connection URL used on teardown to advance the slot durably (see `Drop`).
     url: String,
     /// Slot name used on teardown to advance the slot durably (see `Drop`).
@@ -145,7 +145,7 @@ impl PostgresCdcConsumer {
         // Optional secondary checkpoint (the slot's confirmed_flush_lsn is the
         // authoritative durable position; this file mirror seeds a slot-advance
         // on reconnect and aids observability).
-        let checkpoint: Option<Arc<dyn CheckpointStore>> = match &config.checkpoint_store {
+        let checkpoint: Option<Arc<VersionedCheckpoint>> = match &config.checkpoint_store {
             Some(spec) => {
                 let cid = config
                     .cursor_id
@@ -176,13 +176,24 @@ impl PostgresCdcConsumer {
         };
 
         let start_lsn: Option<u64> = match &checkpoint {
-            Some(cp) => cp.load().await?.and_then(|s| match parse_lsn(&s) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    warn!(value = %s, error = %e, "postgres_cdc: ignoring unparseable checkpoint LSN");
+            Some(cp) => match cp.entry().await? {
+                Some(entry) if entry.source.as_deref().is_some_and(|s| s != cp.source()) => {
+                    warn!(
+                        stored = ?entry.source,
+                        source = %cp.source(),
+                        "postgres_cdc: ignoring checkpoint written by another source; the slot position applies"
+                    );
                     None
                 }
-            }),
+                Some(entry) => match parse_lsn(&entry.value) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        warn!(value = %entry.value, error = %e, "postgres_cdc: ignoring unparseable checkpoint LSN");
+                        None
+                    }
+                },
+                None => None,
+            },
             None => None,
         };
 

@@ -5,7 +5,7 @@
 
 //! `mqb checkpoint`: inspect and edit a source's durable resume position.
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use mq_bridge::checkpoint::{CheckpointEntry, CheckpointStore, VersionedCheckpoint};
 use mq_bridge::models::Endpoint;
 use mq_bridge_app::{config::load_config, copy_pipeline, mq_bridge};
@@ -90,21 +90,24 @@ pub(crate) async fn run(
     match args.action {
         CheckpointAction::Show(_) => print_entry(&checkpoint, checkpoint.entry().await?),
         CheckpointAction::Reset(_) => {
-            let previous = checkpoint.entry().await?;
-            print_entry(&checkpoint, previous.clone());
-            if previous.is_some() {
-                checkpoint.clear().await?;
-                println!("reset: the next run starts from the beginning");
+            match checkpoint.entry().await {
+                Ok(None) => {
+                    print_entry(&checkpoint, None);
+                    return Ok(());
+                }
+                Ok(previous) => print_entry(&checkpoint, previous),
+                Err(e) => println!("value:   unreadable ({e:#})"),
             }
+            checkpoint.clear().await?;
+            println!("reset: the next run starts from the beginning");
         }
         CheckpointAction::Set { value, .. } => {
-            let previous = checkpoint.entry().await?;
+            let previous = match checkpoint.entry().await {
+                Ok(previous) => previous.map_or("unset".to_string(), |e| e.value),
+                Err(e) => format!("unreadable: {e:#}"),
+            };
             checkpoint.save(&value).await?;
-            println!(
-                "set: {} (was {})",
-                value,
-                previous.map_or("unset".to_string(), |e| e.value)
-            );
+            println!("set: {value} (was {previous})");
         }
     }
     Ok(())
