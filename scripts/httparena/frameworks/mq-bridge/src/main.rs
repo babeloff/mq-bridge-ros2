@@ -7,11 +7,12 @@
 //! | Endpoint | Reply | Profiles |
 //! |---|---|---|
 //! | `GET  /pipeline`                | `ok`                  | baseline, pipelined, limited-conn |
+//! | `GET  /delay/{ms}`              | `ms`, after `ms` ms   | async |
 //! | `GET  /baseline11?a=&b=`        | `a+b`                 | baseline |
 //! | `POST /baseline11?a=&b=` + body | `a+b+body`            | baseline |
 //! | `GET  /baseline2?a=&b=`         | `a+b`                 | baseline-h2, baseline-h2c |
 //! | `GET  /json/{count}?m=`         | processed dataset     | json, json-comp, json-tls, json-h2c |
-//! | `POST /upload` + body           | byte count            | upload |
+//! | `POST /echo` + body             | the body, unchanged   | in-out |
 //! | `GET  /async-db?min=&max=&limit=` | `items` rows        | async-db |
 //! | `GET  /static/{file}`           | cached asset          | static, static-tls, static-h2 |
 //! | `GET  /crud/items?category=&page=&limit=` | paginated list | crud |
@@ -30,7 +31,9 @@
 use askama::Template;
 use bytes::Bytes;
 use dashmap::DashMap;
-use mq_bridge::endpoints::http::{guess_content_type, HttpRequestExt, HTTP_STATUS_CODE};
+use mq_bridge::endpoints::http::{
+    guess_content_type, HttpRequestExt, HTTP_STATUS_CODE, HTTP_TRAILER_PREFIX,
+};
 use mq_bridge::models::{Endpoint, EndpointType, HttpConfig, HttpServerProtocol, TlsConfig};
 use mq_bridge::sqlx::postgres::{PgPoolOptions, PgRow};
 use mq_bridge::sqlx::types::Json;
@@ -543,6 +546,71 @@ async fn serve_static(state: &AppState, name: &str, want_gzip: bool) -> Canonica
     }
 }
 
+// ---------- unary gRPC ----------
+
+/// Reads a protobuf varint at `*pos`, advancing it.
+fn read_varint(buf: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *buf.get(*pos)?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// Decodes a `SumRequest { int32 a = 1; int32 b = 2; }` gRPC frame.
+fn decode_sum_request(frame: &[u8]) -> Option<(i32, i32)> {
+    let (&[0, l0, l1, l2, l3], msg) = frame.split_first_chunk::<5>()? else {
+        return None; // compressed frames are not negotiated
+    };
+    let msg = msg.get(..u32::from_be_bytes([l0, l1, l2, l3]) as usize)?;
+    let (mut a, mut b, mut pos) = (0, 0, 0);
+    while pos < msg.len() {
+        let key = read_varint(msg, &mut pos)?;
+        if key & 7 != 0 {
+            return None;
+        }
+        let value = read_varint(msg, &mut pos)? as i32;
+        match key >> 3 {
+            1 => a = value,
+            2 => b = value,
+            _ => {}
+        }
+    }
+    Some((a, b))
+}
+
+/// `benchmark.BenchmarkService/GetSum`: replies a `SumReply { int32 result = 1; }`
+/// frame with `grpc-status` as a trailer (3 = INVALID_ARGUMENT on a bad frame).
+fn grpc_get_sum(frame: &[u8]) -> CanonicalMessage {
+    let trailer = format!("{HTTP_TRAILER_PREFIX}grpc-status");
+    let Some((a, b)) = decode_sum_request(frame) else {
+        return CanonicalMessage::new(Vec::new(), None)
+            .with_metadata_kv("content-type", "application/grpc")
+            .with_metadata_kv(&trailer, "3");
+    };
+    let mut msg = Vec::with_capacity(11);
+    let result = a.wrapping_add(b);
+    if result != 0 {
+        msg.push(0x08);
+        let mut v = result as i64 as u64; // negative int32 is a 10-byte varint
+        while v >= 0x80 {
+            msg.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        msg.push(v as u8);
+    }
+    let mut out = Vec::with_capacity(5 + msg.len());
+    out.push(0);
+    out.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+    out.extend_from_slice(&msg);
+    reply_bytes(Bytes::from(out), "application/grpc").with_metadata_kv(&trailer, "0")
+}
+
 // ---------- dispatch ----------
 
 async fn handle(state: Arc<AppState>, msg: CanonicalMessage) -> Result<Handled, HandlerError> {
@@ -559,7 +627,8 @@ async fn handle(state: Arc<AppState>, msg: CanonicalMessage) -> Result<Handled, 
             let sum = msg.query_int("a").unwrap_or(0) + msg.query_int("b").unwrap_or(0) + body;
             text(sum.to_string())
         }
-        ("POST", "/upload") => text(msg.payload.len().to_string()),
+        ("POST", "/echo") => reply_bytes(msg.payload.clone(), "application/octet-stream"),
+        ("POST", "/benchmark.BenchmarkService/GetSum") => grpc_get_sum(&msg.payload),
         ("GET", "/async-db") => async_db(&state, &msg).await,
         ("GET", "/fortunes") => fortunes(&state).await,
         ("GET", "/crud/items") => crud_list(&state, &msg).await,
@@ -572,6 +641,15 @@ async fn handle(state: Arc<AppState>, msg: CanonicalMessage) -> Result<Handled, 
             Some(id) => crud_update(&state, id, &msg.payload).await,
             None => not_found(),
         },
+        ("GET", p) if p.starts_with("/delay/") => {
+            let ms: u64 = p["/delay/".len()..].parse().unwrap_or(0);
+            // A runtime timer rather than a blocked task, so the bridge keeps draining the queue
+            // while this reply waits.
+            if ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            }
+            text(ms.to_string())
+        }
         ("GET", p) if p.starts_with("/json/") => {
             let count = p["/json/".len()..].parse().unwrap_or(0);
             serve_json(&state, count, msg.query_int("m").unwrap_or(1))

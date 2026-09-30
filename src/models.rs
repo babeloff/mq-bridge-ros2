@@ -1807,6 +1807,11 @@ pub struct MongoDbConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub update: Option<String>,
+    /// Internal: top-level field that lets one `update` call serve all of a key's messages in a
+    /// batch; it keeps the changed fields' intermediate values until the next update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub update_batch_field: Option<String>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
     pub cursor_id: Option<String>,
     /// (Optional) Collection to store sequence counters and cursor positions. Defaults to the message collection if not set.

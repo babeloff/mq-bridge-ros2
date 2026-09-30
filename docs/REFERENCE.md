@@ -1007,6 +1007,39 @@ query answers the whole batch instead of one query per message:
   payload, HTTP 4xx, a query error) is logged and acks and drops only its message; the rest
   of the batch goes on. A misconfigured `from` therefore drops every message.
 
+**Writing lookups.** A per-message `lookup_query` that writes, such as a running counter or
+moving average, batches on PostgreSQL and SQLite: the batch runs in order in one transaction,
+each message seeing its predecessors' writes.
+
+```yaml middleware
+- lookup:
+    from:
+      sqlx:
+        url: "postgres://localhost/metrics"
+        table: "ema"
+        lookup_query: >-
+          INSERT INTO ema (k, v) VALUES (${payload:sensor}, ${payload:value})
+          ON CONFLICT (k) DO UPDATE SET v = ema.v * 0.9 + ${payload:value} * 0.1
+          RETURNING k, v
+    into: average
+```
+
+- PostgreSQL runs the batch as one call to a temporary function that the publisher creates
+  on each connection; values are bound as one `jsonb` parameter, never spliced into SQL. The
+  function holds a transaction-scoped advisory lock per `lookup_query`, so concurrent batches
+  of the same query, across routes and processes, run one at a time and cannot deadlock each
+  other. Behind a transaction-mode pooler (PgBouncer) the function cannot persist; the
+  publisher notices and falls back to one query per message.
+- SQLite opens the transaction with `BEGIN IMMEDIATE`, taking the write lock up front.
+- If a message is rejected (a constraint or data error), the batch rolls back and is redone
+  one message at a time; the rejected message answers `null`. A query that cannot run inside
+  a function (e.g. its own `WITH … INSERT`) falls back, with a warning, to one query per
+  message, as on the other databases.
+- The redo commits message by message. If it fails with a retryable error midway, the retried
+  batch writes the already committed messages again: at-least-once, as without batching.
+- On PostgreSQL the row is encoded by `to_json`: `NUMERIC` and timestamps need no `::text`
+  cast, `bytea` reads `"\\x…"`, `real` keeps its `float4` digits and `NaN` is a string.
+
 `from` and every entry in `entries` run **in parallel**, so a batch waits for the slowest
 lookup, not the sum of all. Each batched entry costs one query per batch; for a lookup that
 needs another's result (e.g. a merchant id from the fetched user), chain a second `lookup`. Each one sets `lookup.<into>.found`, and

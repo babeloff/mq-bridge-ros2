@@ -424,6 +424,9 @@ pub const HTTP_QUERY: &str = "http_query";
 pub const HTTP_VERSION: &str = "http_version";
 /// Metadata key that, when set on a reply, overrides the response status code.
 pub const HTTP_STATUS_CODE: &str = "http_status_code";
+/// Reply metadata prefix sent as an HTTP trailer instead of a header, e.g.
+/// `http_trailer.grpc-status` (gRPC over HTTP/2).
+pub const HTTP_TRAILER_PREFIX: &str = "http_trailer.";
 
 /// Reads the request line and headers a handler receives from an [`http`]
 /// consumer, which exposes them as message metadata. These accessors save a
@@ -1957,9 +1960,19 @@ fn make_response(
             // we honor that: forward the header and skip the server's own compression
             // pass, so the body is never double-encoded.
             let mut preset_encoding: Option<String> = None;
+            let mut trailers = hyper::HeaderMap::new();
             for (key, value) in &msg.metadata {
                 if crate::canonical_message::is_source_metadata_key(key) {
                     continue; // source/provenance keys must not leak as response headers
+                }
+                if let Some(name) = key.strip_prefix(HTTP_TRAILER_PREFIX) {
+                    trailers.insert(
+                        hyper::header::HeaderName::from_bytes(name.as_bytes())
+                            .with_context(|| format!("Invalid trailer name '{name}'"))?,
+                        hyper::header::HeaderValue::from_str(value)
+                            .with_context(|| format!("Invalid value for trailer '{name}'"))?,
+                    );
+                    continue;
                 }
                 let is_content_type = key.eq_ignore_ascii_case("content-type");
                 // Request-echo suppression drops reply metadata that byte-matches the incoming
@@ -2022,7 +2035,13 @@ fn make_response(
                 builder = builder.header(header_name.as_str(), header_value.as_str());
             }
 
-            if is_streaming {
+            if !trailers.is_empty() {
+                let frames = [Frame::data(payload_out), Frame::trailers(trailers)];
+                let stream = futures::stream::iter(frames.map(Ok::<_, anyhow::Error>));
+                builder
+                    .body(streamed(stream))
+                    .map_err(|e| anyhow::anyhow!("Failed to build reply response: {}", e))
+            } else if is_streaming {
                 let stream = futures::stream::once(async move {
                     Ok::<_, anyhow::Error>(Frame::data(payload_out))
                 });

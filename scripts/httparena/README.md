@@ -10,10 +10,10 @@ via `meta.json`.
 
 | Directory                | Language | Port  | Profiles |
 |--------------------------|----------|-------|----------|
-| `frameworks/mq-bridge/`            | Rust   | 8080 + 8443 | baseline, pipelined, limited-conn, json, json-comp, upload, static, async-db, api-4, api-16, baseline-h2, static-h2 |
+| `frameworks/mq-bridge/`            | Rust   | 8080-8082 + 8443 | baseline, async, latency-1m, latency-10k, latency-500k-8cpu, pipelined, limited-conn, json-comp, json-tls, 8gbit, static-tls, async-db, fortunes, baseline-h2, static-h2, baseline-h2c, json-h2c, unary-grpc, unary-grpc-tls |
 | `frameworks/mq-bridge-h2c/`        | Rust   | 8082 | baseline-h2c, json-h2c |
 | `frameworks/mq-bridge-websocket/`  | Rust   | 8080 | echo-ws |
-| `frameworks/mq-bridge-py/`         | Python | 8080 | baseline, pipelined, limited-conn, json, json-comp, upload, static, async-db, api-4, api-16 |
+| `frameworks/mq-bridge-py/`         | Python | 8080-8082 + 8443 | baseline, latency-1m, latency-10k, latency-500k-8cpu, pipelined, limited-conn, json-comp, 8gbit, async-db, fortunes, json-tls, baseline-h2, static-tls, static-h2, baseline-h2c, json-h2c, async |
 
 ## Endpoint contract (implemented)
 
@@ -30,6 +30,7 @@ A single catch-all `http -> response` route dispatches on `http_method` /
 | `POST /upload`+body            | received byte count                                  | upload              |
 | `GET  /async-db?min=&max=&limit=` | Postgres `items` rows as JSON                     | async-db            |
 | `GET  /static/{file}`          | file from `/data/static` (path-traversal-safe)       | static              |
+| `POST /benchmark.BenchmarkService/GetSum` | gRPC `SumReply{result=a+b}`, `grpc-status` trailer (Rust only) | unary-grpc, unary-grpc-tls |
 
 Harness inputs: dataset from `/data/dataset.json` (`DATASET_PATH`), static assets
 from `/data/static` (`STATIC_DIR`), Postgres from `DATABASE_URL`. A missing DB is
@@ -63,6 +64,11 @@ profiles still run.
   has no per-request parameter or request↔reply correlation. So the handler owns
   a pool directly: `sqlx::PgPool` (Rust) / `psycopg_pool` (Python), running
   `SELECT ... FROM items WHERE price BETWEEN $1 AND $2 LIMIT $3`.
+- **unary-grpc on the HTTP listener (Rust entry).** gRPC is HTTP/2, so the same route serves
+  `POST /benchmark.BenchmarkService/GetSum` on 8080 (h2c) and 8443 (h2 over TLS).
+  The handler decodes the length-prefixed `SumRequest` frame and replies with
+  `content-type: application/grpc`; reply metadata `http_trailer.grpc-status`
+  is sent as an HTTP/2 trailer (needs mq-bridge >= 0.4.17).
 - **Off-GIL (Python).** All HTTP framing and the inline response stay in Rust;
   the Python handler runs only the per-request dispatch and JSON assembly.
 
@@ -71,11 +77,8 @@ profiles still run.
 These profiles are intentionally **not** included, because the library cannot
 serve them faithfully without further work:
 
-- **gRPC (`grpc-unary` etc.).** mq-bridge's gRPC server (`server_mode`) only
-  speaks its *own* `Publish`/`PublishBatch` protobuf service. It cannot serve
-  HttpArena's `benchmark.BenchmarkService/GetSum`, so a faithful gRPC entry would
-  require adding arbitrary-service support to the library. Omitted rather than
-  faked.
+- **Streaming gRPC (`stream-grpc` etc.).** Not implemented in these entries;
+  only the unary `GetSum` is served.
 - **HTTP/3 / QUIC.** No `quinn`/`h3` transport in the library; HTTP/3 would need a
   new UDP/QUIC listener, not a config change.
 
@@ -98,7 +101,8 @@ scripts/httparena/frameworks/
 ## Submitting upstream
 
 1. Pin the version: each Rust `Cargo.toml` and the Python `Dockerfile` reference
-   this repo at tag `v0.2.21` — bump to the release you want to benchmark.
+   this repo (Rust `v0.4.17` for the trailer support, Python `0.4.16`) — bump to
+   the release you want to benchmark.
 2. Fork `MDA2AV/HttpArena` and copy each `scripts/httparena/frameworks/<name>/`
    into the fork's `frameworks/<name>/`.
 3. On the PR, validate and benchmark per framework:

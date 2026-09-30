@@ -2,6 +2,25 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## Unreleased
+
+### Added
+
+- **gRPC server mode can serve a descriptor-defined unary method.** Set `descriptor_set_path`
+  (or `descriptor_set_bytes`), `service_name` and `method_name` on a `server_mode` input. It
+  serves that method next to `mqbridge.Bridge`. Each call arrives as JSON (the canonical proto3
+  mapping), and a `response` output's JSON reply is encoded as the method's output message.
+  Streaming methods are rejected. See [docs/GRPC.md](docs/GRPC.md#dynamic-server-method).
+- **HTTP replies can carry trailers.** Reply metadata named `http_trailer.<name>` is sent as
+  an HTTP trailer instead of a header, e.g. `http_trailer.grpc-status` for gRPC over HTTP/2.
+- **Batched writing `sqlx.lookup_query`.** A per-message `lookup_query` that writes (an upsert
+  keeping a counter or moving average) runs a batch in order in one transaction, each message
+  seeing the previous one's write. PostgreSQL runs it as one call to a per-connection
+  temporary function, with the values bound as one `jsonb` parameter and an advisory lock
+  that keeps concurrent batches from deadlocking; SQLite uses `BEGIN IMMEDIATE`. A rejected
+  message answers `null` and does not fail the rest. On PostgreSQL rows are then encoded by
+  `to_json`. See [REFERENCE.md](docs/REFERENCE.md#lookup).
+
 ## 0.4.16
 
 ### Fixed
@@ -62,11 +81,6 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
-- **gRPC server mode can serve a descriptor-defined unary method.** Set `descriptor_set_path`
-  (or `descriptor_set_bytes`), `service_name` and `method_name` on a `server_mode` input. It
-  serves that method next to `mqbridge.Bridge`. Each call arrives as JSON (the canonical proto3
-  mapping), and a `response` output's JSON reply is encoded as the method's output message.
-  Streaming methods are rejected. See [docs/GRPC.md](docs/GRPC.md#dynamic-server-method).
 - **Opt-in SHA-256 for derived message ids.** A string `message_id` that is not a UUID or
   number, and the `postgres_cdc` change id, are hashed into a `u128`. That hash is still
   FNV-1a by default, so ids match earlier releases and existing dedup state keeps working

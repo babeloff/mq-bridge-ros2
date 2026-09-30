@@ -1747,3 +1747,220 @@ fn lookup_writes_detects_modifying_statements() {
         "SELECT replace(name, '-', '') AS name FROM users WHERE id = ${payload:user_id}"
     ));
 }
+
+const COUNTER_UPSERT: &str = "INSERT INTO counters (k, c) VALUES (${payload:k}, ${payload:n}) \
+     ON CONFLICT (k) DO UPDATE SET c = counters.c + ${payload:n} RETURNING k, c";
+
+async fn counter_table(url: &str) {
+    let pool = AnyPool::connect(url).await.unwrap();
+    sqlx::query("CREATE TABLE counters (k TEXT PRIMARY KEY, c INTEGER CHECK (c < 100))")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+fn counter_msg(k: &str, n: i64) -> CanonicalMessage {
+    CanonicalMessage::new(format!(r#"{{"k":"{k}","n":{n}}}"#).into_bytes(), None)
+}
+
+#[tokio::test]
+async fn writing_lookup_runs_a_sqlite_batch_in_order_and_redoes_a_rejected_one_one_by_one() {
+    let (_dir, url) = setup_db_file().await;
+    counter_table(&url).await;
+    let config = SqlxConfig {
+        url: url.clone(),
+        table: "counters".to_string(),
+        lookup_query: Some(COUNTER_UPSERT.into()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    let count = |a: &Option<serde_json::Value>| a.as_ref().unwrap()["c"].as_i64().unwrap();
+    let batch = [
+        counter_msg("a", 1),
+        counter_msg("a", 1),
+        counter_msg("b", 5),
+        counter_msg("a", 1),
+    ];
+    let answers = publisher.lookup_batch(&batch).await.unwrap().unwrap();
+    let counts: Vec<i64> = answers.iter().map(count).collect();
+    assert_eq!(counts, vec![1, 2, 5, 3]);
+
+    // The CHECK rolls the batch back; the redo answers only the rejected message not found.
+    let rejected = [
+        counter_msg("a", 1),
+        counter_msg("a", 500),
+        counter_msg("b", 1),
+    ];
+    let answers = publisher.lookup_batch(&rejected).await.unwrap().unwrap();
+    assert_eq!(
+        answers[1], None,
+        "the rejected message is answered as not found"
+    );
+    assert_eq!((count(&answers[0]), count(&answers[2])), (4, 6));
+}
+
+#[tokio::test]
+async fn read_only_lookup_runs_per_message() {
+    let (_dir, url) = setup_db_file().await;
+    let config = SqlxConfig {
+        url: url.clone(),
+        table: "users".to_string(),
+        lookup_query: Some("SELECT id FROM users WHERE id = ${payload:id}".into()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    let batch = [
+        CanonicalMessage::new(br#"{"id":1}"#.to_vec(), None),
+        CanonicalMessage::new(br#"{"id":2}"#.to_vec(), None),
+    ];
+    assert!(publisher.lookup_batch(&batch).await.is_none());
+}
+
+#[test]
+fn pg_batch_function_casts_each_token_and_quotes_safely() {
+    let (create, name) = pg_batch_function(
+        "SELECT '$mqb0$' AS t WHERE k = ${payload:k} AND n = ${payload:n} OR ${payload:z};\n",
+        &["text", "int8", "null"],
+    )
+    .unwrap();
+    assert!(name.starts_with("mqb_lookup_"));
+    assert!(create.starts_with(&format!("CREATE OR REPLACE FUNCTION pg_temp.{name}(")));
+    assert!(create.contains(
+        "k = (mqb_args->(mqb_i-1)->>0)::text AND n = (mqb_args->(mqb_i-1)->>1)::int8 OR NULL) \
+         SELECT"
+    ));
+    assert!(create.contains(" AS $mqb1$ ") && create.ends_with("END $mqb1$"));
+    let lock = |create: &str| {
+        create
+            .split("PERFORM ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    assert!(lock(&create).starts_with(&format!("pg_advisory_xact_lock({PG_BATCH_LOCK_CLASS}, ")));
+    let (other_create, other) = pg_batch_function("SELECT ${payload:k}", &["int8"]).unwrap();
+    assert_ne!(name, other);
+    assert_ne!(lock(&create), lock(&other_create), "a lock per query");
+}
+
+#[test]
+fn pg_batch_args_types_each_token_across_the_batch() {
+    let sources = [
+        ColumnSource::Payload("k".into()),
+        ColumnSource::Payload("n".into()),
+        ColumnSource::Payload("z".into()),
+    ];
+    let msg = |json: &str| CanonicalMessage::new(json.as_bytes().to_vec(), None);
+    let (a, b) = (msg(r#"{"k":"a","n":1}"#), msg(r#"{"k":"b","n":null}"#));
+    let (types, args) = pg_batch_args(&[&a, &b], &sources).unwrap();
+    assert_eq!(types, vec!["text", "int8", "null"]);
+    assert_eq!(args, r#"[["a",1,null],["b",null,null]]"#);
+    let mixed = msg(r#"{"k":"c","n":"x"}"#);
+    assert!(pg_batch_args(&[&a, &mixed], &sources).is_none());
+    assert!(pg_batch_args(&[&msg(r#"{"k":"a\u0000"}"#)], &sources).is_none());
+}
+
+// Live: the batch function answers exactly as one query per message would.
+// MQB_PG_TEST_URL=postgres://postgres:pw@localhost:55432/t cargo test --features sqlx \
+//   --lib writing_lookup_postgres -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn writing_lookup_postgres_runs_a_batch_as_one_function_call() {
+    let Ok(url) = std::env::var("MQB_PG_TEST_URL") else {
+        eprintln!("MQB_PG_TEST_URL not set; skipping");
+        return;
+    };
+    sqlx::any::install_default_drivers();
+    let pool = AnyPool::connect(&url).await.unwrap();
+    for sql in [
+        "DROP TABLE IF EXISTS counters_pg",
+        "CREATE TABLE counters_pg (k TEXT PRIMARY KEY, c INTEGER CHECK (c < 100))",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+    let upsert = "INSERT INTO counters_pg (k, c) VALUES (${payload:k}, ${payload:n}) \
+         ON CONFLICT (k) DO UPDATE SET c = counters_pg.c + ${payload:n} RETURNING k, c";
+    let config = |query: &str| SqlxConfig {
+        url: url.clone(),
+        table: "counters_pg".to_string(),
+        lookup_query: Some(query.into()),
+        ..Default::default()
+    };
+    let count = |a: &Option<serde_json::Value>| a.as_ref().unwrap()["c"].as_i64().unwrap();
+    let batched = SqlxPublisher::new(&config(upsert)).await.unwrap();
+    let batch = [
+        counter_msg("b", 5),
+        counter_msg("a", 1),
+        counter_msg("a", 1),
+        counter_msg("a", 1),
+    ];
+    let answers = batched.lookup_batch(&batch).await.unwrap().unwrap();
+    let counts: Vec<i64> = answers.iter().map(count).collect();
+    assert_eq!(counts, vec![5, 1, 2, 3]);
+    assert_eq!(answers[0].as_ref().unwrap()["k"], "b");
+
+    // The CHECK rolls the call back; the redo answers only the rejected message not found.
+    let rejected = [
+        counter_msg("a", 1),
+        counter_msg("a", 500),
+        counter_msg("b", 1),
+    ];
+    let answers = batched.lookup_batch(&rejected).await.unwrap().unwrap();
+    assert_eq!(answers[1], None);
+    assert_eq!((count(&answers[0]), count(&answers[2])), (4, 6));
+
+    // A single message takes the function too, on a connection that may not have it yet.
+    let Sent::Response(one) = batched.send(counter_msg("c", 7)).await.unwrap() else {
+        panic!("a lookup answers");
+    };
+    assert_eq!(one.metadata[FOUND_KEY], "true");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&one.payload).unwrap(),
+        serde_json::json!({"k": "c", "c": 7})
+    );
+
+    // A data-modifying WITH cannot nest inside the function: it runs per message instead.
+    let nested = "WITH ins AS (INSERT INTO counters_pg (k, c) VALUES (${payload:k}, ${payload:n}) \
+         ON CONFLICT (k) DO UPDATE SET c = counters_pg.c + ${payload:n} RETURNING k, c) \
+         SELECT k, c FROM ins";
+    let fallback = SqlxPublisher::new(&config(nested)).await.unwrap();
+    assert!(fallback
+        .lookup_batch(&[counter_msg("a", 1), counter_msg("a", 1)])
+        .await
+        .is_none());
+    assert!(fallback.pg_batch_active().is_none());
+    let Sent::Response(one) = fallback.send(counter_msg("a", 1)).await.unwrap() else {
+        panic!("a lookup answers");
+    };
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&one.payload).unwrap()["c"],
+        5
+    );
+
+    // Batches locking the same rows in opposite order would deadlock without the advisory lock.
+    let forward: Vec<_> = (0..20).map(|i| counter_msg(&format!("d{i}"), 1)).collect();
+    let backward: Vec<_> = forward.iter().rev().cloned().collect();
+    let runs = (0..16).map(|i| batched.lookup_batch(if i % 2 == 0 { &forward } else { &backward }));
+    for answers in futures::future::join_all(runs).await {
+        assert!(answers.unwrap().unwrap().iter().all(Option::is_some));
+    }
+    let row = sqlx::query("SELECT c FROM counters_pg WHERE k = 'd0'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sqlx::Row::get::<i32, _>(&row, 0), 16);
+    sqlx::query("DROP TABLE counters_pg")
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
+#[test]
+fn deadlock_and_serialization_failures_are_retryable() {
+    for code in ["40P01", "40001"] {
+        assert!(!is_deterministic_sqlstate(code), "{code}");
+    }
+}

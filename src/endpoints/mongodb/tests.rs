@@ -547,6 +547,8 @@ fn counter_config(collection: &str, find: &str, update: Option<&str>) -> MongoDb
         collection: Some(collection.to_string()),
         find: Some(find.to_string()),
         update: update.map(str::to_string),
+        // A shared client may belong to another test's runtime, already shut down.
+        shared: Some(false),
         ..Default::default()
     }
 }
@@ -683,4 +685,231 @@ async fn mongo_update_rejected_message_fails_alone() {
     );
     let counts: Vec<f64> = [0, 2, 3].map(|i| counter(answers[i].clone())).to_vec();
     assert_eq!(counts, vec![1.0, 3.0, 5.0]);
+}
+
+#[test]
+fn chainable_steps_rewrite_operators_and_refuse_what_cannot_chain() {
+    use mongodb::bson::doc;
+    use mongodb::options::UpdateModifications::{Document as Ops, Pipeline as Steps};
+    let chain = |u| publisher::chainable_steps(u, "_mqb");
+
+    let (steps, touched) =
+        chain(Ops(doc! { "$inc": { "c": 1 }, "$unset": { "old": "" } })).unwrap();
+    assert_eq!(steps.len(), 2);
+    assert!(steps[0].contains_key("$set") && steps[1].contains_key("$unset"));
+    assert_eq!(touched, ["c", "old"]);
+    let (_, touched) = chain(Steps(vec![doc! { "$set": { "s.sum": 1, "t": 2 } }])).unwrap();
+    assert_eq!(touched, ["s", "t"]);
+    assert!(chain(Steps(vec![
+        doc! { "$set": { "a": 1 } },
+        doc! { "$unset": ["b"] }
+    ]))
+    .is_some());
+
+    for refused in [
+        Ops(doc! { "$setOnInsert": { "a": 1 } }),
+        Ops(doc! { "$push": { "a": 1 } }),
+        Ops(doc! { "$set": { "a": 1 }, "$inc": { "a.b": 1 } }),
+        Ops(doc! { "$set": { "items.0": 1 } }),
+        Ops(doc! { "$inc": { "s.sum": 1 } }),
+        Ops(doc! { "$set": { "items.$": 1 } }),
+        Ops(doc! {}),
+        Steps(vec![doc! { "$replaceWith": { "a": 1 } }]),
+        Steps(vec![doc! { "$set": { "_mqb": 1 } }]),
+        Steps(vec![doc! { "$unset": ["x", "_mqb.y"] }]),
+    ] {
+        assert!(chain(refused.clone()).is_none(), "{refused:?}");
+    }
+}
+
+#[test]
+fn folded_result_splits_into_one_document_per_message() {
+    use mongodb::bson::doc;
+    let touched = ["c".to_string(), "gone".to_string()];
+    let update = publisher::folded_update(
+        "_mqb",
+        &touched,
+        vec![
+            vec![doc! { "$set": { "c": 1 } }],
+            vec![doc! { "$set": { "c": 2 } }, doc! { "$unset": "gone" }],
+        ],
+    );
+    assert_eq!(update.len(), 5, "unset, step, snapshot, two steps");
+    assert_eq!(
+        update[2],
+        doc! { "$set": { "_mqb": { "$concatArrays": [
+            { "$ifNull": ["$_mqb", []] }, [{ "c": "$c", "gone": "$gone" }]
+        ] } } }
+    );
+
+    let doc = doc! { "_id": "a", "c": 2, "k": 0, "_mqb": [{ "c": 1, "gone": true }, {}] };
+    let docs = publisher::unfold(doc.clone(), "_mqb", &touched, 3).unwrap();
+    assert_eq!(
+        docs,
+        vec![
+            doc! { "_id": "a", "c": 1, "k": 0, "gone": true },
+            doc! { "_id": "a", "k": 0 },
+            doc! { "_id": "a", "c": 2, "k": 0 },
+        ]
+    );
+    assert!(publisher::unfold(doc, "_mqb", &touched, 2).is_none());
+    assert_eq!(
+        publisher::unfold(doc! { "_id": "a" }, "_mqb", &touched, 1).unwrap(),
+        vec![doc! { "_id": "a" }]
+    );
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_update_batch_field_is_validated() {
+    let find = r#"{"_id": "${payload:k}"}"#;
+    let mut config = counter_config("unused", find, None);
+    config.update_batch_field = Some("_mqb".to_string());
+    assert!(MongoDbPublisher::new(&config).await.is_err());
+    for bad in ["", "a.b", "$x"] {
+        let mut config = counter_config("unused", find, Some(r#"{"$inc": {"c": 1}}"#));
+        config.update_batch_field = Some(bad.to_string());
+        assert!(MongoDbPublisher::new(&config).await.is_err(), "{bad:?}");
+    }
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_update_batch_field_answers_like_one_call_per_message() {
+    let ema = r#"[{"$set": {
+        "ema": {"$add": [{"$multiply": [0.5, ${payload:x}]},
+                         {"$multiply": [0.5, {"$ifNull": ["$ema", ${payload:x}]}]}]},
+        "n": {"$add": [{"$ifNull": ["$n", 0]}, 1]}
+    }}]"#;
+    let ops = r#"{"$inc": {"c": 1, "s.sum": ${payload:x}}, "$mul": {"m": 2},
+        "$min": {"lo": ${payload:x}}, "$max": {"hi": ${payload:x}},
+        "$set": {"last": {"x": ${payload:x}, "tag": "$not-a-field"}}, "$unset": {"gone": ""}}"#;
+    let msg = |k: &str, x: i64| {
+        CanonicalMessage::new(format!(r#"{{"k":"{k}","x":{x}}}"#).into_bytes(), None)
+    };
+    let batches = vec![
+        vec![
+            msg("a", 10),
+            msg("a", 20),
+            msg("b", 5),
+            msg("a", 30),
+            msg("b", 1),
+        ],
+        vec![msg("a", 40)],
+        (0..70).map(|i| msg("c", i % 7)).collect::<Vec<_>>(),
+    ];
+    for update in [ema, ops] {
+        let publisher = |folded: bool| async move {
+            let mut config = counter_config(
+                &format!("update_{}", fast_uuid_v7::gen_id()),
+                r#"{"_id": "${payload:k}"}"#,
+                Some(update),
+            );
+            config.update_batch_field = folded.then(|| "_mqb".to_string());
+            MongoDbPublisher::new(&config).await.unwrap()
+        };
+        let (plain, folded) = (publisher(false).await, publisher(true).await);
+        for batch in &batches {
+            let expected = plain.lookup_batch(batch).await.unwrap().unwrap();
+            let answers = folded.lookup_batch(batch).await.unwrap().unwrap();
+            assert_eq!(answers, expected, "update: {update}");
+            assert!(answers
+                .iter()
+                .all(|a| a.as_ref().unwrap().get("_mqb").is_none()));
+        }
+        let Sent::Response(single) = folded.send(msg("a", 50)).await.unwrap() else {
+            panic!("update must answer with a response");
+        };
+        let Sent::Response(expected) = plain.send(msg("a", 50)).await.unwrap() else {
+            panic!("update must answer with a response");
+        };
+        // Operator updates add new fields sorted, update lists in order: compare values only.
+        let json = |p: &[u8]| serde_json::from_slice::<serde_json::Value>(p).unwrap();
+        assert_eq!(json(&single.payload), json(&expected.payload));
+    }
+}
+
+/// Needs `tests/integration/docker-compose/mongodb.yml` running.
+#[tokio::test]
+#[ignore = "requires a MongoDB on localhost:27017"]
+async fn mongo_update_batch_field_rejected_message_fails_alone() {
+    let update =
+        r#"[{"$set": {"c": {"$add": [{"$ifNull": ["$c", 0]}, {"$toDouble": "${payload:n}"}]}}}]"#;
+    let mut config = counter_config(
+        &format!("update_{}", fast_uuid_v7::gen_id()),
+        r#"{"_id": "${payload:k}"}"#,
+        Some(update),
+    );
+    config.update_batch_field = Some("_mqb".to_string());
+    let publisher = MongoDbPublisher::new(&config).await.unwrap();
+    let msg = |k: &str, n: &str| {
+        CanonicalMessage::new(format!(r#"{{"k":"{k}","n":"{n}"}}"#).into_bytes(), None)
+    };
+    assert!(matches!(
+        publisher.send(msg("a", "abc")).await.unwrap_err(),
+        PublisherError::NonRetryable(_)
+    ));
+    let answers = publisher
+        .lookup_batch(&[msg("a", "1"), msg("a", "abc"), msg("a", "2"), msg("b", "5")])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(answers[1], None);
+    let counts: Vec<f64> = [0, 2, 3].map(|i| counter(answers[i].clone())).to_vec();
+    assert_eq!(counts, vec![1.0, 3.0, 5.0]);
+}
+
+// TEMP bench: remove after measuring.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore]
+async fn tmp_bench_mongo_fold() {
+    let ema = r#"[{"$set": {
+        "ema": {"$add": [{"$multiply": [0.1, ${payload:x}]},
+                         {"$multiply": [0.9, {"$ifNull": ["$ema", ${payload:x}]}]}]},
+        "n": {"$add": [{"$ifNull": ["$n", 0]}, 1]}
+    }}]"#;
+    let inc = r#"{"$inc": {"c": 1, "sum": ${payload:x}}}"#;
+    for (name, update) in [("ema", ema), ("inc", inc)] {
+        let publisher = |folded: bool| async move {
+            let mut config = counter_config(
+                &format!("bench_{}", fast_uuid_v7::gen_id()),
+                r#"{"_id": "${payload:k}"}"#,
+                Some(update),
+            );
+            config.update_batch_field = folded.then(|| "_mqb".to_string());
+            MongoDbPublisher::new(&config).await.unwrap()
+        };
+        let pubs = [publisher(false).await, publisher(true).await];
+        for keys in [1usize, 16, 128] {
+            let batch: Vec<CanonicalMessage> = (0..128)
+                .map(|i| {
+                    CanonicalMessage::new(
+                        format!(r#"{{"k":"k{}","x":{}}}"#, i % keys, i).into_bytes(),
+                        None,
+                    )
+                })
+                .collect();
+            let mut rates = [0.0f64; 2];
+            for round in 0..6 {
+                for (mode, rate) in rates.iter_mut().enumerate() {
+                    let start = std::time::Instant::now();
+                    let batches = 30;
+                    for _ in 0..batches {
+                        pubs[mode].lookup_batch(&batch).await.unwrap().unwrap();
+                    }
+                    if round > 0 {
+                        *rate += (batches * 128) as f64 / start.elapsed().as_secs_f64() / 5.0;
+                    }
+                }
+            }
+            println!(
+                "{name} keys={keys:>3}: per message {:>8.0} msg/s, folded {:>8.0} msg/s, x{:.2}",
+                rates[0],
+                rates[1],
+                rates[1] / rates[0]
+            );
+        }
+    }
 }

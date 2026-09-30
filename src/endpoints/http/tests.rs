@@ -1034,6 +1034,62 @@ async fn test_http2_only_listener_accepts_h2c_prior_knowledge() {
 }
 
 #[tokio::test]
+async fn test_http_reply_trailer_metadata_sent_as_h2_trailers() {
+    init_crypto();
+    let port = get_free_port();
+    let addr = format!("127.0.0.1:{}", port);
+
+    let input = Endpoint::new(EndpointType::Http(HttpConfig {
+        url: addr.clone(),
+        ..Default::default()
+    }));
+    let handle = crate::Route::new(input, Endpoint::new_response())
+        .with_handler(|msg: CanonicalMessage| async move {
+            Ok(crate::Handled::Publish(
+                CanonicalMessage::new(msg.payload.to_vec(), None)
+                    .with_metadata_kv("content-type", "application/grpc")
+                    .with_metadata_kv("http_trailer.grpc-status", "0"),
+            ))
+        })
+        .run("test_http_reply_trailers")
+        .await
+        .unwrap();
+
+    assert!(wait_for_server_ready(&addr, Duration::from_secs(5)).await);
+
+    let stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let (mut client, connection) = h2::client::handshake(stream).await.unwrap();
+    let connection_task = tokio::spawn(connection);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("http://{addr}/"))
+        .body(())
+        .unwrap();
+    let (response, mut send) = client.send_request(request, false).unwrap();
+    send.send_data(bytes::Bytes::from_static(b"frame"), true)
+        .unwrap();
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "application/grpc");
+    assert!(response.headers().get("grpc-status").is_none());
+
+    let mut body = response.into_body();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.data().await {
+        bytes.extend_from_slice(&chunk.unwrap());
+    }
+    assert_eq!(bytes, b"frame");
+    let trailers = body.trailers().await.unwrap().expect("trailers");
+    assert_eq!(trailers["grpc-status"], "0");
+
+    connection_task.abort();
+    let _ = connection_task.await;
+    handle.stop().await;
+    let _ = handle.join().await;
+}
+
+#[tokio::test]
 async fn test_http2_only_listener_rejects_plain_http11() {
     init_crypto();
     let port = get_free_port();
