@@ -6,6 +6,12 @@ All notable changes to `mq-bridge`. Newest first.
 
 ### Added
 
+- **Short Rust entrypoints, like the Python and Node bindings.** `Route::from_file(path, name)`,
+  `Route::from_str` and `Route::from_config` load a route from a config document;
+  `Publisher::from_file`/`from_str` load a publisher and `Publisher::send_json` sends any
+  `Serialize` value. `mq_bridge::deploy_file(path)` deploys every route and registers every
+  publisher of a file in one call. YAML needs the new `yaml` feature (in `full` and
+  `portable`); JSON works without it. The existing API is unchanged.
 - **gRPC server mode can serve a descriptor-defined unary method.** Set `descriptor_set_path`
   (or `descriptor_set_bytes`), `service_name` and `method_name` on a `server_mode` input. It
   serves that method next to `mqbridge.Bridge`. Each call arrives as JSON (the canonical proto3

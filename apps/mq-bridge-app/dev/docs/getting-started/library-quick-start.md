@@ -7,12 +7,13 @@ The engine is a library first. The same route config runs embedded in your **Rus
 
 | Language | Package | Install |
 | :--- | :--- | :--- |
-| Rust | [`mq-bridge`](https://crates.io/crates/mq-bridge) | `cargo add mq-bridge --features kafka,nats` |
+| Rust | [`mq-bridge`](https://crates.io/crates/mq-bridge) | `cargo add mq-bridge --features kafka,nats,yaml` |
 | Python | [`mq-bridge`](https://pypi.org/project/mq-bridge/) | `pip install mq-bridge` |
 | Node.js | [`mq-bridge`](https://www.npmjs.com/package/mq-bridge) | `npm install mq-bridge` |
 
 The Rust crate enables connectors through Cargo features (`kafka`, `nats`, `mongodb`, …, or
-`full` for all of them); the Python and Node.js packages ship with them built in.
+`full` for all of them); `yaml` adds YAML config files (JSON works without it). The Python
+and Node.js packages ship with all of them built in.
 
 ## Describe a route
 
@@ -52,12 +53,9 @@ Route.fromFile("routes.yaml", "kafka_to_nats").start();
 **Rust**
 
 ```rust
-use mq_bridge::models::Config;
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config: Config = serde_yaml_ng::from_str(&std::fs::read_to_string("routes.yaml")?)?;
-    config["kafka_to_nats"].deploy("kafka_to_nats").await?; // runs in the background
+    mq_bridge::deploy_file("routes.yaml").await?; // every route in the file, in the background
     tokio::signal::ctrl_c().await?;
     Ok(())
 }
@@ -75,6 +73,19 @@ def enrich(message):
     return message.with_json(order)
 
 Route.from_file("routes.yaml", "kafka_to_nats").with_handler(enrich).run()
+```
+
+```rust
+use mq_bridge::{CanonicalMessage, Handled, Route};
+
+Route::from_file("routes.yaml", "kafka_to_nats")?
+    .with_handler(|message: CanonicalMessage| async move {
+        let mut order: serde_json::Value = message.parse().map_err(anyhow::Error::from)?;
+        order["processed"] = true.into();
+        Ok(Handled::Publish(CanonicalMessage::from(order)))
+    })
+    .deploy("kafka_to_nats")
+    .await?;
 ```
 
 Handlers, typed dispatch on the `kind` field, and request/reply are covered in

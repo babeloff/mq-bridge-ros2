@@ -284,7 +284,9 @@ async fn test_sqlx_cursor_reader_resumes_and_is_nondestructive() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(last, "int:5");
+    let stored: serde_json::Value = serde_json::from_str(&last).unwrap();
+    assert_eq!(stored["value"], "int:5");
+    assert_eq!(stored["source"], "sqlx:orders:id");
 
     // Restart from a fresh reader: resumes past the checkpoint -> nothing re-emitted.
     let mut reader2 = SqlxCursorReader::new(&config).await.unwrap();
@@ -551,7 +553,9 @@ async fn test_sqlx_cursor_reader_external_db_checkpoint() {
     .fetch_one(&pool_b)
     .await
     .unwrap();
-    assert_eq!(last, "int:3");
+    let stored: serde_json::Value = serde_json::from_str(&last).unwrap();
+    assert_eq!(stored["value"], "int:3");
+    assert_eq!(stored["source"], "sqlx:orders:id");
 
     // The source DB was never written to (no meta table).
     let n: i64 = sqlx::query_scalar(

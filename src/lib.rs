@@ -45,6 +45,31 @@
 //! HTTP, WebSocket, or another supported endpoint without changing the message
 //! model. Transport integrations are enabled with [Cargo features](#cargo-features).
 //!
+//! ## Routes from a config file
+//!
+//! Like the Python and Node bindings, routes and publishers load straight from a
+//! config file (YAML with the `yaml` feature, JSON always):
+//!
+//! ```no_run
+//! use mq_bridge::{CanonicalMessage, Handled, Publisher, Route};
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! // Every route and publisher in the file, running in the background:
+//! mq_bridge::deploy_file("routes.yaml").await?;
+//!
+//! // Or one route with a handler:
+//! Route::from_file("routes.yaml", "orders")?
+//!     .with_handler(|msg: CanonicalMessage| async move { Ok(Handled::Publish(msg)) })
+//!     .deploy("orders")
+//!     .await?;
+//!
+//! Publisher::from_file("routes.yaml", "audit").await?
+//!     .send_json(&serde_json::json!({"order_id": 42}))
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Core concepts
 //!
 //! - [`CanonicalMessage`] is the transport-independent payload and metadata format.
@@ -108,6 +133,7 @@ pub mod canonical_message;
 // missing feature at runtime.
 pub mod checkpoint;
 pub mod command_handler;
+mod config_file;
 pub mod endpoints;
 pub mod errors;
 pub mod event_handler;
@@ -130,6 +156,7 @@ pub mod type_handler;
 
 pub use anyhow;
 pub use canonical_message::{CanonicalMessage, MessageContext};
+pub use config_file::deploy_file;
 pub use errors::HandlerError;
 pub use models::Route;
 pub use outcomes::{Handled, Received, ReceivedBatch, Sent, SentBatch};

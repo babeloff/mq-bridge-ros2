@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 fn cli() -> Command {
@@ -1682,6 +1682,48 @@ fn no_resume_re_copies_rows_past_a_valid_checkpoint() {
     let full_copy = copy_with_options(&source, "null:", &["--no-resume"]);
     assert_success(&full_copy, "full copy ignoring persisted checkpoint");
     assert!(logged(&full_copy).contains("copied 2 rows"));
+}
+
+#[cfg(any(feature = "full", feature = "sqlx"))]
+#[test]
+fn checkpoint_command_shows_sets_and_resets_a_copy_resume_position() {
+    let dir = TestDir::new();
+    let database = dir.path().join("checkpoint-command.db");
+    sqlite_execute(
+        &database,
+        &[
+            "CREATE TABLE orders (id INTEGER PRIMARY KEY, amount INTEGER)",
+            "INSERT INTO orders (id, amount) VALUES (1, 10), (2, 20), (3, 30)",
+        ],
+    );
+    let source = format!(
+        "sqlite://{}?table=orders&cursor_column=id",
+        database.display()
+    );
+    let checkpoint = |args: &[&str]| {
+        let result = cli()
+            .arg("checkpoint")
+            .args(args)
+            .args([source.as_str(), "null:"])
+            .output()
+            .expect("run mq-bridge-app checkpoint");
+        assert_success(&result, "checkpoint command");
+        logged(&result)
+    };
+
+    assert!(logged(&copy_with_options(&source, "null:", &["--resume"])).contains("copied 3 rows"));
+    let shown = checkpoint(&["show"]);
+    assert!(
+        shown.contains("int:3") && shown.contains("sqlx:orders:id"),
+        "{shown}"
+    );
+
+    checkpoint(&["set", "--value", "int:1"]);
+    assert!(logged(&copy_with_options(&source, "null:", &["--resume"])).contains("copied 2 rows"));
+
+    checkpoint(&["reset"]);
+    assert!(checkpoint(&["show"]).contains("unset"));
+    assert!(logged(&copy_with_options(&source, "null:", &["--resume"])).contains("copied 3 rows"));
 }
 
 #[test]

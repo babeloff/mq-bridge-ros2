@@ -4729,6 +4729,7 @@ name = "mq-bridge-app"
 version = "0.4.17"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "hyper",
  "hyper-util",
