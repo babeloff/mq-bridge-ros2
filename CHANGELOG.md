@@ -2,7 +2,7 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## Unreleased
+## 0.4.17
 
 ### Added
 

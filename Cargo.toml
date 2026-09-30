@@ -46,7 +46,7 @@ dbg_macro = "warn"
 exit = "warn"
 
 [workspace.package]
-version = "0.4.16"
+version = "0.4.17"
 
 [workspace.dependencies]
 anyhow = "1.0"
