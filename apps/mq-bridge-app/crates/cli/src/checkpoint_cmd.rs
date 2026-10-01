@@ -11,6 +11,9 @@ use mq_bridge::models::Endpoint;
 use mq_bridge_app::{config::load_config, copy_pipeline, mq_bridge};
 use std::sync::Arc;
 
+const RUNNING_READER_NOTE: &str =
+    "note: a reader that is still running overwrites this with its next batch";
+
 #[derive(clap::Args, Debug)]
 pub(crate) struct CheckpointArgs {
     #[command(subcommand)]
@@ -100,6 +103,7 @@ pub(crate) async fn run(
             }
             checkpoint.clear().await?;
             println!("reset: the next run starts from the beginning");
+            println!("{RUNNING_READER_NOTE}");
         }
         CheckpointAction::Set { value, .. } => {
             let previous = match checkpoint.entry().await {
@@ -108,6 +112,7 @@ pub(crate) async fn run(
             };
             checkpoint.save(&value).await?;
             println!("set: {value} (was {previous})");
+            println!("{RUNNING_READER_NOTE}");
         }
     }
     Ok(())

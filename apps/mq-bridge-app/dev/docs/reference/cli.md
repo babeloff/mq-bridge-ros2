@@ -348,6 +348,9 @@ updated: 2026-09-30T08:12:44.120+00:00
 `reset` prints the previous value before deleting it, so `set --value` can undo it. The value
 format is the one `show` prints. `-v` logs connection details.
 
+Stop the route or copy before `reset` or `set`: a reader that is still running saves its own
+position over the edit with its next acknowledged batch.
+
 It works for SQL, ClickHouse and object-store cursor readers and for MongoDB change streams.
 Postgres CDC is refused: its replication slot is the authoritative position. See
 [Checkpoints & resumable copies](../cookbook/checkpoints.md#inspecting-and-editing-a-checkpoint).

@@ -32,8 +32,11 @@ All notable changes to `mq-bridge`. Newest first.
   atomic `update` call, up to 64 at a time, each answered with its own intermediate document.
   Distinct keys still run in parallel. `$set`, `$inc`, `$mul`, `$min`, `$max`, `$unset` on
   top-level fields and `$set`/`$addFields`/`$unset` pipelines fold; anything else runs one
-  call per message. The field holds the batch's snapshots only until the batch is answered
-  (never in answers). Folded `$inc`/`$mul` treat a `null` field as 0 and `$inc` adds to a date,
+  call per message, and so does a `find` that reads a field the `update` writes (a guard
+  such as `balance >= 10`), so it is rechecked for every message. The field holds the
+  batch's intermediate values and is never in answers; it is cleared after the batch on a
+  best-effort basis, so an interrupted batch can leave them in the document until that key's
+  next batched write. Folded `$inc`/`$mul` treat a `null` field as 0 and `$inc` adds to a date,
   where a single update rejects both.
 - **SQLite math functions.** The bundled SQLite in `mqb`, the Docker image and the Python and
   Node packages is built with `exp`, `ln`, `pow` and the other math functions, e.g. for a

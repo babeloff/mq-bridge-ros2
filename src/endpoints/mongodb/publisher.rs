@@ -470,6 +470,10 @@ impl MongoDbPublisher {
             }
             chained.push(steps);
         }
+        // One call checks `filter` once; a guard on a written field must be rechecked per message.
+        if filter_reads(filter, &touched) {
+            return None;
+        }
         let options = FindOneAndUpdateOptions::builder()
             .upsert(true)
             .return_document(ReturnDocument::After)
@@ -771,6 +775,27 @@ fn operator_steps(update: Document) -> Option<Vec<Document>> {
         steps.push(doc! { "$unset": unset });
     }
     (!steps.is_empty()).then_some(steps)
+}
+
+/// Whether `filter` may read one of the `touched` top-level fields: as a key, as a `$field`
+/// reference in an expression, or through `$where`, which cannot be inspected.
+pub(super) fn filter_reads(filter: &Document, touched: &[String]) -> bool {
+    fn top(path: &str) -> &str {
+        path.split('.').next().unwrap_or(path)
+    }
+    fn value_reads(value: &Bson, touched: &[String]) -> bool {
+        match value {
+            Bson::Document(d) => filter_reads(d, touched),
+            Bson::Array(items) => items.iter().any(|v| value_reads(v, touched)),
+            Bson::String(s) => s
+                .strip_prefix('$')
+                .is_some_and(|path| touched.iter().any(|t| t == top(path))),
+            _ => false,
+        }
+    }
+    filter.iter().any(|(key, value)| {
+        key == "$where" || touched.iter().any(|t| t == top(key)) || value_reads(value, touched)
+    })
 }
 
 /// Chains each message's steps, snapshotting the `touched` fields into `field` between

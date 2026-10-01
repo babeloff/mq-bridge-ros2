@@ -181,6 +181,8 @@ updated: 2026-09-30T08:12:44.120+00:00
   value first.
 - `set --value V` overwrites it, e.g. to replay from a known row (`int:1000`) or to undo a reset.
   Use the format `show` prints.
+- **Stop the route or copy first.** `reset` and `set` do not coordinate with a running reader:
+  its next acknowledged batch saves its own position over the edit.
 - A `copy --resume` job is named by the same SOURCE, TARGET and `--filter` it ran with.
 - Postgres CDC is refused: manage its replication slot instead.
 

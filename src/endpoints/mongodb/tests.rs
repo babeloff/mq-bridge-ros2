@@ -723,6 +723,27 @@ fn chainable_steps_rewrite_operators_and_refuse_what_cannot_chain() {
 }
 
 #[test]
+fn filter_reading_a_written_field_is_not_folded() {
+    use mongodb::bson::doc;
+    let touched = ["balance".to_string()];
+    for reads in [
+        doc! { "_id": "k", "balance": { "$gte": 10 } },
+        doc! { "_id": "k", "balance.available": { "$gte": 10 } },
+        doc! { "$and": [{ "_id": "k" }, { "balance": { "$gte": 10 } }] },
+        doc! { "_id": "k", "$expr": { "$gte": ["$balance", 10] } },
+        doc! { "_id": "k", "$where": "this.balance >= 10" },
+    ] {
+        assert!(publisher::filter_reads(&reads, &touched), "{reads:?}");
+    }
+    for key_only in [doc! { "_id": "k" }, doc! { "_id": "balance", "tenant": 1 }] {
+        assert!(
+            !publisher::filter_reads(&key_only, &touched),
+            "{key_only:?}"
+        );
+    }
+}
+
+#[test]
 fn folded_result_splits_into_one_document_per_message() {
     use mongodb::bson::doc;
     let touched = ["c".to_string(), "gone".to_string()];
