@@ -732,6 +732,8 @@ fn filter_reading_a_written_field_is_not_folded() {
         doc! { "$and": [{ "_id": "k" }, { "balance": { "$gte": 10 } }] },
         doc! { "_id": "k", "$expr": { "$gte": ["$balance", 10] } },
         doc! { "_id": "k", "$where": "this.balance >= 10" },
+        doc! { "_id": "k", "$jsonSchema": { "required": ["balance"] } },
+        doc! { "$and": [{ "_id": "k" }, { "$jsonSchema": { "required": ["balance"] } }] },
     ] {
         assert!(publisher::filter_reads(&reads, &touched), "{reads:?}");
     }

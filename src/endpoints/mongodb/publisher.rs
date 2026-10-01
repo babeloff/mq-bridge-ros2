@@ -778,7 +778,7 @@ fn operator_steps(update: Document) -> Option<Vec<Document>> {
 }
 
 /// Whether `filter` may read one of the `touched` top-level fields: as a key, as a `$field`
-/// reference in an expression, or through `$where`, which cannot be inspected.
+/// reference in an expression, or through `$where` or `$jsonSchema`, which cannot be inspected.
 pub(super) fn filter_reads(filter: &Document, touched: &[String]) -> bool {
     fn top(path: &str) -> &str {
         path.split('.').next().unwrap_or(path)
@@ -794,7 +794,9 @@ pub(super) fn filter_reads(filter: &Document, touched: &[String]) -> bool {
         }
     }
     filter.iter().any(|(key, value)| {
-        key == "$where" || touched.iter().any(|t| t == top(key)) || value_reads(value, touched)
+        matches!(key.as_str(), "$where" | "$jsonSchema")
+            || touched.iter().any(|t| t == top(key))
+            || value_reads(value, touched)
     })
 }
 
