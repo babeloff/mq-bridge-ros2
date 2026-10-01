@@ -1088,8 +1088,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
 
     info!(
         // Redacted: this line is the one that reaches journald, Docker logs and CI.
-        from = %copy_pipeline::redact_uri(&from),
-        to = %copy_pipeline::redact_uri(&to),
+        from = %copy_pipeline::redact_uri(from),
+        to = %copy_pipeline::redact_uri(to),
         filtered = args.filter.is_some(),
         // Names the mechanism, not just the flag: which one the source picked
         // is what tells you where a restart will actually pick up from.
