@@ -100,11 +100,13 @@ impl StateStore for MemoryStateStore {
         while self.paused.load(Ordering::Relaxed) {
             tokio::task::yield_now().await;
         }
-        if self
+        // `try_update`, its replacement, is newer than the MSRV.
+        #[allow(deprecated)]
+        let fail = self
             .failures
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
-            .is_ok()
-        {
+            .is_ok();
+        if fail {
             anyhow::bail!("store unavailable");
         }
         let mut rows = self.rows.lock().unwrap();

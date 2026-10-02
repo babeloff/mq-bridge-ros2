@@ -3185,11 +3185,9 @@ mod tests {
                 let observation = Arc::clone(&observation);
                 Box::pin(async move {
                     let active_now = observation.active.fetch_add(1, Ordering::SeqCst) + 1;
-                    let _ = observation.max_active.fetch_update(
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                        |current| (active_now > current).then_some(active_now),
-                    );
+                    observation
+                        .max_active
+                        .fetch_max(active_now, Ordering::SeqCst);
 
                     tokio::time::sleep(Duration::from_millis(20)).await;
                     let result = original_commit(dispositions).await;
@@ -3358,11 +3356,9 @@ mod tests {
                 .and_then(|message| message.get_payload_str().parse::<u64>().ok())
                 .expect("tracking test expects numeric payloads");
             let active_now = self.observation.active.fetch_add(1, Ordering::SeqCst) + 1;
-            let _ = self.observation.max_active.fetch_update(
-                Ordering::SeqCst,
-                Ordering::SeqCst,
-                |current| (active_now > current).then_some(active_now),
-            );
+            self.observation
+                .max_active
+                .fetch_max(active_now, Ordering::SeqCst);
             // Later batches are faster, so unsequenced sends land in reverse order.
             tokio::time::sleep(Duration::from_millis(
                 10 * (6u64.saturating_sub(seq.min(6))),
