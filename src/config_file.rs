@@ -99,27 +99,40 @@ fn parse_publishers_section(value: Value) -> anyhow::Result<PublisherConfig> {
 
 fn named_route(value: Value, name: &str) -> anyhow::Result<Route> {
     let value = unwrap_config_root(value);
-    if let Ok(mut document) = document_from_value(value.clone()) {
-        if let Some(route) = document.routes.remove(name) {
-            return Ok(route);
-        }
-    }
+    let document_error = match document_from_value(value.clone()) {
+        Ok(mut document) => match document.routes.remove(name) {
+            Some(route) => return Ok(route),
+            None => None,
+        },
+        Err(e) => Some(e),
+    };
     serde_json::from_value(value).with_context(|| {
         format!(
-            "No route named '{name}' found, and the config could not be parsed as a single route"
+            "No route named '{name}' found, and the config could not be parsed as a single route{}",
+            document_error_note(document_error.as_ref())
         )
     })
 }
 
+/// Why the config did not parse as a document, for the single-item fallback error.
+fn document_error_note(error: Option<&anyhow::Error>) -> String {
+    error.map_or_else(String::new, |e| format!(" (as a config document: {e:#})"))
+}
+
 fn named_publisher(value: Value, name: &str) -> anyhow::Result<Endpoint> {
     let value = unwrap_config_root(value);
-    if let Ok(mut document) = document_from_value(value.clone()) {
-        if let Some(endpoint) = document.publishers.remove(name) {
-            return Ok(endpoint);
-        }
-    }
+    let document_error = match document_from_value(value.clone()) {
+        Ok(mut document) => match document.publishers.remove(name) {
+            Some(endpoint) => return Ok(endpoint),
+            None => None,
+        },
+        Err(e) => Some(e),
+    };
     serde_json::from_value(value).with_context(|| {
-        format!("No publisher named '{name}' found, and the config could not be parsed as a single publisher endpoint")
+        format!(
+            "No publisher named '{name}' found, and the config could not be parsed as a single publisher endpoint{}",
+            document_error_note(document_error.as_ref())
+        )
     })
 }
 
@@ -235,6 +248,18 @@ mod tests {
     fn route_from_config_reports_missing_name() {
         let err = Route::from_config(document(), "missing").unwrap_err();
         assert!(err.to_string().contains("No route named 'missing'"));
+    }
+
+    #[test]
+    fn a_broken_document_is_named_in_the_fallback_error() {
+        let broken = json!({"routes": {"orders": {"input": 7}}, "publishers": "nope"});
+        let err = Route::from_config(broken.clone(), "orders").unwrap_err();
+        assert!(err.to_string().contains("failed to parse 'routes' section"));
+        let err = named_publisher(broken, "audit").unwrap_err();
+        assert!(err.to_string().contains("failed to parse 'routes' section"));
+        // A document that parses adds nothing to the missing-name error.
+        let err = Route::from_config(document(), "missing").unwrap_err();
+        assert!(!err.to_string().contains("as a config document"));
     }
 
     #[test]

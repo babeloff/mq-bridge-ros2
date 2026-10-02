@@ -281,7 +281,7 @@ protoc-bin-vendored = { version = "3.2", optional = true }
 
 [features]
 default = []
-middleware = ["metrics", "otel", "dedup", "compression", "encryption", "filter"]
+middleware = ["metrics", "otel", "dedup", "compression", "encryption", "filter", "aggregate"]
 # Opt-in: parse JSON f64 with full precision so a number round-trips bit-exactly.
 # Off by default because it slows float parsing; without it serde_json shifts ~1 ULP
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
@@ -339,6 +339,8 @@ encryption = ["dep:chacha20poly1305", "dep:aes-gcm", "dep:zeroize"]
 # `when` cases. Kept out of `portable` because zen-expression pulls in psm,
 # whose build.rs assembles per-target stack-switching assembly.
 filter = ["zen"]
+# Per-key running state computed in-process: the `aggregate` middleware.
+aggregate = ["zen", "dep:hashbrown"]
 zen = ["dep:zen-expression", "dep:rust_decimal"]
 metrics = ["dep:metrics"]
 # Per-message spans (`otel` middleware); inert until the host calls `otel::enable()`.

@@ -6,6 +6,162 @@
     "$ref": "#/$defs/Route"
   },
   "$defs": {
+    "AggregateConsistency": {
+      "description": "How an `aggregate` middleware with a `store` keeps its states consistent.",
+      "oneOf": [
+        {
+          "description": "Loads and writes the states of every batch; correct with several instances.",
+          "type": "string",
+          "const": "shared"
+        },
+        {
+          "description": "Keeps the states in memory and writes them behind; correct with one instance only.",
+          "type": "string",
+          "const": "single_writer"
+        }
+      ]
+    },
+    "AggregateEmit": {
+      "description": "Which state an `aggregate` entry writes into the message.",
+      "oneOf": [
+        {
+          "description": "The state including this message.",
+          "type": "string",
+          "const": "updated"
+        },
+        {
+          "description": "The state before this message; `null` for a key seen for the first time.",
+          "type": "string",
+          "const": "previous"
+        }
+      ]
+    },
+    "AggregateEntry": {
+      "description": "One aggregate of an `aggregate` middleware.",
+      "type": "object",
+      "properties": {
+        "emit": {
+          "description": "Which state the message carries: after (`updated`) or before (`previous`) its own update.",
+          "$ref": "#/$defs/AggregateEmit",
+          "default": "updated"
+        },
+        "expression": {
+          "description": "Expression returning the new state; reads payload fields, `meta.<key>` and `state`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fields": {
+          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "into": {
+          "description": "Dotted payload path the result is written to, e.g. `features.sensor`.",
+          "type": "string"
+        },
+        "key": {
+          "description": "Key template selecting the state, e.g. `${payload:sensor_id}`.",
+          "type": "string"
+        },
+        "output": {
+          "description": "Expression over `state` shaping what is written to the message. Defaults to the state.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "into"
+      ]
+    },
+    "AggregateMiddleware": {
+      "description": "Aggregate middleware configuration.\n\nKeeps one state document per key in this process and updates it with every message:\nrunning sums, counters, moving averages. The message is not consumed; it leaves with\nthe state written into its payload. Requires the `aggregate` feature.",
+      "type": "object",
+      "properties": {
+        "consistency": {
+          "description": "With a `store`: `shared` is correct with several instances, `single_writer` is faster with one.",
+          "$ref": "#/$defs/AggregateConsistency",
+          "default": "shared"
+        },
+        "emit": {
+          "description": "Which state the message carries: after (`updated`) or before (`previous`) its own update.",
+          "$ref": "#/$defs/AggregateEmit",
+          "default": "updated"
+        },
+        "entries": {
+          "description": "Further aggregates over other keys, updated by the same message.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AggregateEntry"
+          }
+        },
+        "expression": {
+          "description": "Expression returning the new state; reads payload fields, `meta.<key>` and `state`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fields": {
+          "description": "Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "into": {
+          "description": "Dotted payload path the result is written to, e.g. `features.sensor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Key template selecting the state, e.g. `${payload:sensor_id}`. Use `entries` for several.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_keys": {
+          "description": "States kept in memory per entry; beyond it the least recently used are dropped. Defaults to 1000000, 0 is unlimited.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "output": {
+          "description": "Expression over `state` shaping what is written to the message. Defaults to the state.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "store": {
+          "description": "Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it they live in memory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
     "AmqpConfig": {
       "description": "General AMQP connection configuration.",
       "type": "object",
@@ -1402,7 +1558,7 @@
           }
         },
         "descriptor_set_path": {
-          "description": "Compiled protobuf FileDescriptorSet for dynamic client mode.",
+          "description": "Compiled protobuf FileDescriptorSet for dynamic calls or a served method.",
           "type": [
             "string",
             "null"
@@ -1487,7 +1643,7 @@
           }
         },
         "method_name": {
-          "description": "RPC method name for dynamic client mode.",
+          "description": "RPC method name for dynamic calls or a served unary method.",
           "type": [
             "string",
             "null"
@@ -1524,7 +1680,7 @@
           "minimum": 0
         },
         "server_mode": {
-          "description": "If `true`, start an embedded tonic gRPC server that accepts incoming `Publish` /\n`PublishBatch` RPCs. If `false` (the default), connect to a remote server as a client.",
+          "description": "If `true`, start an embedded tonic gRPC server that accepts `Publish` / `PublishBatch`\nRPCs, plus one descriptor-defined unary method when `method_name` is set. If `false`\n(the default), connect to a remote server as a client.",
           "type": "boolean",
           "default": false
         },
@@ -1534,7 +1690,7 @@
           "default": false
         },
         "service_name": {
-          "description": "Fully-qualified protobuf service name for dynamic client mode.",
+          "description": "Fully-qualified protobuf service name for dynamic calls or a served method.",
           "type": [
             "string",
             "null"
@@ -2355,6 +2511,19 @@
           "additionalProperties": false,
           "required": [
             "lookup"
+          ]
+        },
+        {
+          "description": "Keeps a running state per key (sums, counters, moving averages) and writes it into the payload. Input and output.",
+          "type": "object",
+          "properties": {
+            "aggregate": {
+              "$ref": "#/$defs/AggregateMiddleware"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "aggregate"
           ]
         },
         {

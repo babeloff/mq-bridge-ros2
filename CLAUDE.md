@@ -3,7 +3,7 @@
 > **Looking for what middleware or structural endpoints exist, and how to configure them?**
 > [REFERENCE.md](docs/REFERENCE.md) is the complete, authoritative list — every middleware
 > (`retry`, `dlq`, `transform`, `id`, `filter`, `deduplication`, `weak_join`, `buffer`, `limiter`, `delay`,
-> `cookie_jar`, `encryption`, `compression`, `pack`, `unpack`, `metrics`, `otel`, `lookup`, `random_panic`, `custom`) and every
+> `cookie_jar`, `encryption`, `compression`, `pack`, `unpack`, `metrics`, `otel`, `lookup`, `aggregate`, `random_panic`, `custom`) and every
 > structural endpoint (`ref`,
 > `fanout`, `switch`, `request`, `response`, `reader`, `static`, `stream_buffer`, `null`,
 > `custom`), each with its fields, defaults, and a working YAML example. Do not infer these
@@ -75,6 +75,7 @@ src/
 │       ├── stream_buffer.rs   # Correlation-partitioned in-memory stream
 │       └── null.rs            # Null endpoint (sink)
 ├── middleware/           # Middleware implementations
+│   ├── aggregate/       # Per-key running state (sums, counters, moving averages)
 │   ├── buffer.rs        # Batch accumulation
 │   ├── cookie_jar.rs    # Cookie / metadata persistence across requests
 │   ├── deduplication.rs # Message deduplication (sled)

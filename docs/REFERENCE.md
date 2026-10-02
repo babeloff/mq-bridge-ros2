@@ -35,8 +35,9 @@ my_route:
 **Output (publisher) middlewares wrap in list order, so the *last* entry is the outermost
 layer and sees the failures of the ones before it.** Put `dlq` last.
 
-**Input (consumer) middlewares are applied in reverse, so the *first* entry is outermost**
-and runs first on an incoming message.
+**Input (consumer) middlewares are applied in reverse, so the *first* entry is outermost.**
+An incoming message passes the *last* entry first and the first entry last: list
+`[aggregate, deduplication]` to drop duplicates before they are counted.
 
 **Consequence: a route that reads back what another route wrote needs the *reversed* list.**
 Writing with `[compression, encryption]` produces `compress(encrypt(payload))`; a reader
@@ -87,6 +88,7 @@ middlewares:
 | [`metrics`](#metrics) | ✅ | ✅ | `metrics` | Emit throughput/latency/error metrics |
 | [`otel`](#otel) | ✅ | ✅ | `otel` | OpenTelemetry span per message, continuing `traceparent` |
 | [`lookup`](#lookup) | ✅ | ✅ | – | Enrich each message with other endpoints' responses |
+| [`aggregate`](#aggregate) | ✅ | ✅ | `aggregate` | Keep a running state per key and write it into each message |
 | [`random_panic`](#random_panic) | ✅ | ✅ | – | Fault injection for testing |
 | [`custom`](#custom-middleware) | ✅ | ✅ | – | Your own middleware via a registered factory |
 
@@ -114,7 +116,7 @@ above rather than assuming:
   the pair is directional.
 
 A middleware whose feature is not compiled in (`deduplication` without `dedup`, `metrics`
-without `metrics`, `otel` without `otel`) is likewise a startup error, not a silent no-op.
+without `metrics`, `otel` without `otel`, `aggregate` without `aggregate`) is likewise a startup error, not a silent no-op.
 
 ---
 
@@ -1109,6 +1111,193 @@ needs another's result (e.g. a merchant id from the fetched user), chain a secon
               SELECT score, updated_at FROM card_risk
               WHERE card_id = ${payload:card_id} ORDER BY updated_at DESC LIMIT 1
 ```
+
+### `aggregate`
+
+Keeps one state per key in this process and updates it with every message: running sums,
+counters, moving averages. Input and output. The message is not consumed; it leaves with
+the state written into its payload. Use it where a [`lookup`](#lookup) would ask a database
+to keep a counter: the arithmetic runs here, so no request is made per message.
+
+| Field | Type | Default |
+|---|---|---|
+| `key` | template | selects the state, e.g. `${payload:sensor_id}`; required unless `entries` is set |
+| `expression` | expression | returns the new state; `key` needs this or `fields` |
+| `fields` | map of name to built-in aggregate | – ; the fast alternative to `expression` |
+| `into` | dotted payload path | where the result is written; required with `key` |
+| `output` | expression | the state itself; shapes what is written to the message |
+| `emit` | `updated` \| `previous` | `updated` |
+| `entries` | list of `{key, expression, fields, into, output, emit}` | `[]`; further aggregates |
+| `store` | URL | – (states live in memory); `postgres://…/db[/table]`, `sqlite://…`, `mongodb://host/db[/collection]` |
+| `consistency` | `shared` \| `single_writer` | `shared`; only used with `store` |
+| `max_keys` | integer | `1000000`; states kept in memory per entry, `0` is unlimited |
+
+```yaml middleware
+- aggregate:
+    key: "${payload:sensor_id}"
+    into: sensor
+    expression: "{ total: (state.total ?? 0) + reading, count: (state.count ?? 0) + 1 }"
+```
+
+`{"sensor_id": 7, "reading": 20}` leaves as
+`{"sensor_id": 7, "reading": 20, "sensor": {"total": 20, "count": 1}}`; the next message for sensor 7
+continues from that state.
+
+**Expressions** are the ones [`filter`](#filter) and [`transform`](#transform) use. They read
+payload fields by name and metadata as `meta.<key>`, plus `state`: the value `expression`
+returned for the previous message with the same key. For a key seen for the first time
+`state` is `null`, so `state.total ?? 0` and `state ?? 0` both give the starting value. The
+state can be an object or a single value. A payload field named `state` or `meta` is hidden
+by these two names.
+
+**`output`** runs after the update, with `state` set to the state the message carries. Use
+it when the stored state is not what a reader wants to see. With `emit: previous` the
+message carries the state from before its own update, `null` for a new key; `output` is then
+skipped for a new key.
+
+**A moving average that a first value does not skew.** The usual
+`avg = avg * 0.99 + reading * 0.01` starts at the first reading and takes hundreds of messages
+to forget it. Keep the weighted sum and the weight instead and divide when writing:
+
+```yaml middleware
+- aggregate:
+    key: "${payload:sensor_id}"
+    into: sensor.avg_reading
+    expression: "{ s: (state.s ?? 0) * 0.99 + reading, w: (state.w ?? 0) * 0.99 + 1 }"
+    output: "state.s / state.w"
+```
+
+After a first reading of 500 followed by readings of 50, this reads 52.6 after 100 messages;
+the usual form still reads 216.
+
+**Several keys** update from the same message with `entries`, each with its own states:
+
+```yaml middleware
+- aggregate:
+    entries:
+      - key: "${payload:sensor_id}"
+        into: features.sensor
+        expression: "{ sum: (state.sum ?? 0) + reading, n: (state.n ?? 0) + 1 }"
+      - key: "${payload:site_id}"
+        into: features.site
+        emit: previous
+        expression: "{ max: max([state.max ?? reading, reading]) }"
+```
+
+**Built-in aggregates.** `fields` replaces `expression` for the common cases and is several
+times faster, because no expression runs and the payload is not parsed into a tree:
+
+```yaml middleware
+- aggregate:
+    key: "${payload:sensor_id}"
+    into: sensor
+    fields:
+      n: count
+      total: sum(reading)
+      high: max(reading)
+      avg: ema(reading, 0.01)
+```
+
+| Aggregate | Result |
+|---|---|
+| `count` | number of messages |
+| `sum(path)`, `min(path)`, `max(path)`, `last(path)` | over the values at `path` |
+| `mean(path)` | arithmetic mean |
+| `stddev(path)`, `variance(path)` | sample standard deviation and variance (divided by n − 1) of all values; `null` for the first message |
+| `ema(path, alpha)` | moving average weighting each new value with `alpha` (0 < alpha ≤ 1), without a start bias: the first message reads its own value |
+| `ema_stddev(path, alpha)`, `ema_variance(path, alpha)` | the same over values weighted like `ema`, so old values fade; `null` for the first message |
+
+`path` is a dotted payload path such as `reading` or `device.reading`. Its value must be a
+number or a numeric string (what a CSV source delivers); a message without one fails like a
+message with a failing expression. The result is an object with the field names in
+alphabetical order, e.g. `{"avg": 20.0, "high": 20.0, "n": 1, "total": 20.0}`. An entry takes
+either `expression` or `fields`; entries of both kinds can be mixed. `fields` takes no `output`.
+
+**Keeping the states in a store.** With `store` the states survive a restart. The table or
+collection defaults to `mqb_aggregate_<route>` and is created on start; PostgreSQL, SQLite
+and MongoDB are supported.
+
+```yaml middleware
+- aggregate:
+    store: "postgres://localhost/telemetry"
+    key: "${payload:sensor_id}"
+    into: sensor
+    fields: { n: count, avg: "ema(reading, 0.01)" }
+```
+
+| `consistency` | How a batch runs | Correct with | Speed |
+|---|---|---|---|
+| `shared` (default) | loads its states, folds, writes them back guarded by a version | any number of instances | bound by the store: two round trips per batch |
+| `single_writer` | folds in memory, writes changed states behind; the ack waits for that write | exactly one instance | several times faster; grows with how often keys repeat |
+
+- Every stored state is one row: the key `<into>:<key>`, the state as JSON text, and a
+  version that counts its writes. A write names the version it was computed from and only
+  takes effect while the row still has it (optimistic concurrency).
+- With `shared`, a batch loads the states of its distinct keys in one query, folds, and
+  writes the changed ones back in one statement. Two instances that change the same key at
+  the same time cannot overwrite each other: the later write is refused and the batch folds
+  again from the reloaded states, up to 32 times before it fails. MongoDB reloads and folds
+  again only the refused keys; PostgreSQL and SQLite roll the transaction back and repeat the
+  whole batch. The message goes on only after the write. No state stays in memory between
+  batches, and one instance runs its batches against the store one at a time.
+- With `single_writer`, a key is loaded once, when it is first seen. Batches fold in memory
+  and go on at once; a background task writes the changed states, and starts the next write
+  as soon as one returns, so under load one write covers many batches and a key changed
+  often is written once. A batch is acked (on an output: `send` returns) only after the
+  write that covers it. If a write fails, the states in memory are dropped, the batches not
+  yet stored are nacked and fold again from the stored states. A second instance writing the
+  same states is detected as a refused write, not prevented.
+- The state write and the ack are two steps, not one transaction. A crash between them
+  redelivers a batch whose states are already stored, and it counts twice.
+- A store that cannot be reached nacks the whole batch on an input and is a retryable error
+  on an output.
+- PostgreSQL and SQLite write the states of a batch in one transaction. MongoDB writes each
+  state atomically but not the batch as a whole.
+- Larger batches help: `batch_size: 4096` to `8192` roughly halves the cost per message.
+- Changing the `fields` of an entry changes the layout of its stored states. Start with a new
+  table, or a new `into`, which is part of the stored key.
+
+**What to expect.**
+
+- **Without `store`, state lives in memory only.** It is lost on restart and it is not shared
+  between instances.
+- **Memory is bounded by `max_keys`.** An entry keeps at most that many states in memory,
+  one million unless set. When it is full, the half that was used least recently is dropped.
+  Without a `store` those states are forgotten: their key starts again from an empty state,
+  and a warning is logged the first time. With `single_writer` they are only dropped from
+  memory and loaded again from the store when their key returns, so results do not change.
+  `shared` keeps nothing in memory. A `fields` state takes roughly 100 to 300 bytes.
+- **A replayed message counts twice.** Delivery is at-least-once: a batch that is nacked or
+  retried after it was folded is folded again. Where that matters, let [`deduplication`](#deduplication) see the message
+  first: on an input, list it *after* `aggregate` (see [Ordering](#ordering--read-this-before-combining-middleware)).
+- **Order matters for order-dependent states** such as a moving average. Within a batch
+  messages are folded in order; with a route `concurrency` above 1 the order across batches
+  is not guaranteed.
+- **A message that cannot be folded fails alone** and changes no state: its payload is not a
+  JSON object, its `key` has no value, or an expression fails. On an input it is logged,
+  acked and dropped; on an output only that message fails, as non-retryable.
+- **No windows and no expiry by time.** There is no "last hour" and no time to live: a state
+  covers every message of its key, and a row in the store is never removed. `ema` and
+  `ema_stddev` stand in for a sliding window. For fixed windows put the window into the key,
+  e.g. `key: "${payload:sensor_id}:${payload:hour}"`, and use a `store` with `shared`, which
+  keeps no state in memory; the rows of past windows stay until you delete them.
+- **No exactly-once and no key ownership.** A stream processor commits state and input
+  position together and assigns each key to one worker. Here a redelivered message counts
+  twice, and `single_writer` relies on you running one instance.
+- **Field order.** The fields of a written state object are not in the order the expression
+  lists them.
+- **Numbers.** Expression states are held as decimals and stored with every digit.
+  Fractions are written to the payload as the shortest `f64`, integers exactly. `fields`
+  compute in `f64`. Fields the middleware does not write are copied byte for byte.
+
+Throughput on one Apple M-series core, three moving averages per key (indicative):
+
+| | 1 key | 5 keys |
+|---|---|---|
+| `expression`, in memory | 330k msg/s | 100k msg/s |
+| `fields`, in memory | 1.8M msg/s | 700k msg/s |
+| `fields`, `single_writer`, local PostgreSQL, batch 8192 | 370k msg/s | 240k msg/s |
+| `fields`, `shared`, local PostgreSQL, batch 8192 | 49k msg/s | 17k msg/s |
 
 ### `random_panic`
 

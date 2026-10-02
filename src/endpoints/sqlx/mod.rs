@@ -25,6 +25,10 @@ use tracing::{info, trace, warn};
 mod dedup;
 #[cfg(feature = "dedup")]
 pub(crate) use dedup::build_sql_dedup_store;
+#[cfg(feature = "aggregate")]
+mod aggregate;
+#[cfg(feature = "aggregate")]
+pub(crate) use aggregate::build_sql_state_store;
 
 fn is_deadlock_error(e: &sqlx::Error) -> bool {
     if let Some(db_err) = e.as_database_error() {
@@ -1134,11 +1138,66 @@ impl SqlxPublisher {
         Some(
             match self.lookup_in_transaction(sql, sources, &group).await {
                 Err(PublisherError::NonRetryable(_)) => {
-                    self.lookup_one_by_one(sql, sources, &group).await
+                    match self.pool.begin_with("BEGIN IMMEDIATE").await {
+                        Ok(tx) => self.lookup_redo(tx, sql, sources, &group).await,
+                        Err(e) => Err(PublisherError::Retryable(anyhow!(e))),
+                    }
                 }
                 other => other,
             },
         )
+    }
+
+    /// Redoes a rolled-back batch in `tx`, a savepoint per message: a rejected message is
+    /// answered as not found, any other failure rolls every write of the redo back.
+    async fn lookup_redo(
+        &self,
+        mut tx: sqlx::Transaction<'_, sqlx::Any>,
+        sql: &str,
+        sources: &[ColumnSource],
+        messages: &[&CanonicalMessage],
+    ) -> Result<Vec<Option<serde_json::Value>>, PublisherError> {
+        use sqlx::Acquire;
+        let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
+        let answers = async {
+            let mut answers = Vec::with_capacity(messages.len());
+            for message in messages {
+                let mut step = tx.begin().await.map_err(retryable)?;
+                // Not cached: a statement prepared for one message's bind types fails the next.
+                let query = sqlx::query(audited_sql(sql)).persistent(false);
+                let row = match bind_message_sources(query, message, sources) {
+                    Ok(query) => match query.fetch_optional(&mut *step).await {
+                        Err(e) if is_permanent_decode_error(&e) => return Err(lookup_error(e)),
+                        other => other.map_err(lookup_error),
+                    },
+                    Err(e) => Err(e),
+                };
+                match row.and_then(|row| row.as_ref().map(row_json).transpose()) {
+                    Ok(answer) => {
+                        step.commit().await.map_err(retryable)?;
+                        answers.push(answer);
+                    }
+                    Err(PublisherError::NonRetryable(e)) => {
+                        step.rollback().await.map_err(retryable)?;
+                        warn!(error = %e, "SQLx lookup rejected; answering not found");
+                        answers.push(None);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(answers)
+        }
+        .await;
+        match answers {
+            Ok(answers) => {
+                tx.commit().await.map_err(retryable)?;
+                Ok(answers)
+            }
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        }
     }
 
     /// Runs the messages in order in one `BEGIN IMMEDIATE` transaction and commits once.
@@ -1176,7 +1235,8 @@ impl SqlxPublisher {
         Ok(answers)
     }
 
-    /// Redoes a rolled-back batch message by message; a rejected one is answered as not found.
+    /// One autocommit query per message; a rejected one is answered as not found. A failure
+    /// leaves earlier writes committed, so callers pass a single message.
     async fn lookup_one_by_one(
         &self,
         sql: &str,
@@ -1233,6 +1293,18 @@ impl SqlxPublisher {
                     PgVerdict::Fail(e) => return Err(e),
                 },
             }
+            // One transaction under the batch function's lock, so a failure commits nothing.
+            let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
+            let mut tx = self.pool.begin().await.map_err(retryable)?;
+            let lock = format!(
+                "SELECT pg_advisory_xact_lock({PG_BATCH_LOCK_CLASS}, {})",
+                stable_hash(&pg.template) as i32
+            );
+            sqlx::query(audited_sql(&lock))
+                .execute(&mut *tx)
+                .await
+                .map_err(retryable)?;
+            return self.lookup_redo(tx, sql, sources, group).await.map(Some);
         }
         let mut answers = Vec::with_capacity(group.len());
         for &message in group {

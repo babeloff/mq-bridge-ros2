@@ -19,6 +19,18 @@ All notable changes to `mq-bridge`. Newest first.
   Streaming methods are rejected. See [docs/GRPC.md](docs/GRPC.md#dynamic-server-method).
 - **HTTP replies can carry trailers.** Reply metadata named `http_trailer.<name>` is sent as
   an HTTP trailer instead of a header, e.g. `http_trailer.grpc-status` for gRPC over HTTP/2.
+- **`aggregate` middleware.** Keeps a running state per key in the process (sums, counters,
+  moving averages) and writes it into each message, on an input or an output. The update is an
+  expression over the payload, metadata and the previous `state`; an optional `output`
+  expression shapes what the message carries, and `entries` update several keys from one
+  message. `fields` offers built-in aggregates (`count`, `sum`, `min`, `max`, `last`, `mean`,
+  `stddev`, `variance`, and `ema`, `ema_stddev`, `ema_variance` without start bias) that fold about 700k msg/s for five keys on one core. States
+  live in memory, or with `store` in PostgreSQL, SQLite or MongoDB: `consistency: shared`
+  (default) is correct with several instances, `single_writer` keeps the states in memory,
+  writes them behind and acks a batch only once they are stored. `max_keys` (default one
+  million per entry) bounds the states held in memory: the least recently used are dropped,
+  and with `single_writer` loaded again from the store when their key returns. Needs the new `aggregate`
+  feature (in `middleware`). See [REFERENCE.md](docs/REFERENCE.md#aggregate).
 - **Batched writing `sqlx.lookup_query`.** A per-message `lookup_query` that writes (an upsert
   keeping a counter or moving average) runs a batch in order in one transaction, each message
   seeing the previous one's write. PostgreSQL runs it as one call to a per-connection
@@ -60,6 +72,10 @@ All notable changes to `mq-bridge`. Newest first.
   value of another column. Plain values from 0.4.16 and older still load and are upgraded on
   the next save. **Downgrading loses the position:** an older mq-bridge cannot read the new
   format and starts from the beginning.
+- **mq-bridge-app: a route keeps its identity across restarts.** A `routes:` entry, and a
+  consumer or publisher without an `id`, got a random id on every start. Stores named after
+  the route (`deduplication`, `aggregate`) therefore began empty after a restart. The id is
+  now derived from the name. An `id` written in the config is used as before.
 
 ## 0.4.16
 

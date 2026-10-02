@@ -294,6 +294,7 @@ kafka_to_nats:
                 Middleware::Filter(_) => {}
                 Middleware::Otel(_) => {}
                 Middleware::Lookup(_) => {}
+                Middleware::Aggregate(_) => {}
             }
         }
 
