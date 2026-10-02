@@ -36,6 +36,7 @@
   - [Transform & schema mapping](cookbook/transform.md)
   - [Content-based routing (switch)](cookbook/switch.md)
   - [Enrichment & lookups](cookbook/lookup.md)
+  - [Running aggregates](cookbook/aggregate.md)
   - [Fan-out](cookbook/fanout.md)
   - [Weak join / correlation](cookbook/weak-join.md)
 - [Security & payloads]()

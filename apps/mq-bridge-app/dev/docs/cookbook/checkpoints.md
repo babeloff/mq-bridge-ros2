@@ -134,9 +134,9 @@ orders_dump:
 ```
 
 **`--resume` cannot be reproduced.** It generates a `copy-…` cursor id from the
-credential-redacted source, destination, and filter, and never prints it. Re-running the same
-command resumes correctly, but a config route has no way to name that id, so it starts a fresh
-checkpoint under whatever `cursor_id` you choose.
+credential-redacted source, destination, and filter. Re-running the same command resumes
+correctly, and `mqb checkpoint show SOURCE TARGET` finds its position, but a config route has
+no way to name that id, so it starts a fresh checkpoint under whatever `cursor_id` you choose.
 
 **The defaults differ.** `copy` defaults to `concurrency: 4` and `batch_size: 1024`; a route
 defaults to `1` and `512`. Write both out explicitly, or the translated route runs at a quarter
@@ -160,6 +160,39 @@ An **object-store** source ends a drain run when it reaches the end of the objec
 which can be before the prefix is exhausted — the checkpoint makes this safe rather than lossy:
 each run resumes at the last fully-acked object key, so repeated runs advance until one reports
 zero messages. Loop the job until it moves nothing if you need a single pass to cover everything.
+
+## Inspecting and editing a checkpoint
+
+`mqb checkpoint` reads and changes a stored position without touching the store by hand:
+
+```bash
+mqb -c config.yaml checkpoint show --route orders_sync     # a configured route or consumer
+mqb checkpoint show 'sqlite:///data/app.db?table=orders&cursor_column=id' \
+  file:///data/orders.jsonl                                 # a `copy --resume` job
+```
+
+```text
+value:   int:3
+source:  sqlx:orders:id
+updated: 2026-09-30T08:12:44.120+00:00
+```
+
+- `reset` deletes the position, so the next run starts from the beginning. It prints the old
+  value first.
+- `set --value V` overwrites it, e.g. to replay from a known row (`int:1000`) or to undo a reset.
+  Use the format `show` prints.
+- **Stop the route or copy first.** `reset` and `set` do not coordinate with a running reader:
+  its next acknowledged batch saves its own position over the edit.
+- A `copy --resume` job is named by the same SOURCE, TARGET and `--filter` it ran with.
+- Postgres CDC is refused: manage its replication slot instead.
+
+Each position is stored with the source that wrote it and a timestamp. On SQL and ClickHouse
+the source is the table and `cursor_column`, on MongoDB the database and collection. A run
+**refuses** a position written by a different source instead of resuming from a value that
+means something else, e.g. after `cursor_column` changed under the same `cursor_id`. `show`
+marks it `MISMATCH`. Reset it, or pick a new `cursor_id`. Positions written by mq-bridge
+0.4.16 or older still load and are upgraded on the next save; an older mq-bridge cannot read
+the new format and starts from the beginning.
 
 ## Delivery semantics
 
@@ -194,7 +227,8 @@ Checkpoints are **at-least-once**, never at-most-once:
   the other consumes.
 - **Changing `cursor_id` or `checkpoint_store` starts over.** The position is keyed by both; a
   new key means a full re-copy. Reuse the same pair to continue a sync, and give unrelated jobs
-  distinct `cursor_id`s.
+  distinct `cursor_id`s. Changing the table or `cursor_column` under the same key fails the
+  run instead; see [Inspecting and editing a checkpoint](#inspecting-and-editing-a-checkpoint).
 - **`capture_all`'s initial snapshot is not incrementally checkpointed.** What gets persisted is
   the change-stream resume token, written once streaming begins; a run interrupted during the
   snapshot re-snapshots from the beginning. Size the sink's idempotency accordingly.
@@ -206,4 +240,4 @@ Checkpoints are **at-least-once**, never at-most-once:
 - [Endpoints (concepts)](../reference/endpoints.md) — read modes and CDC
 - [PostgreSQL parameters](../reference/postgres.md) · [MongoDB](../reference/mongodb.md) ·
   [ClickHouse](../reference/clickhouse.md) · [Postgres CDC](../reference/postgres-cdc.md)
-- [CLI commands](../reference/cli.md) — `copy` flags and URI grammar
+- [CLI commands](../reference/cli.md) — `copy` and `checkpoint` flags, URI grammar

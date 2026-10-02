@@ -26,6 +26,8 @@ pub struct MongoDbPublisher {
     find_list: Option<(ListQuery, CompiledTemplate)>,
     /// Opt-in write: upsert this update on the `find` match and answer with the result.
     update: Option<CompiledTemplate>,
+    /// Set by `update_batch_field`: a key's messages share one `update` call.
+    update_batch_field: Option<String>,
 }
 
 /// Metadata key carrying the insert outcome when `report_outcome` is enabled.
@@ -36,6 +38,8 @@ pub(crate) const OUTCOME_EXISTED: &str = "existed";
 const FOUND_KEY: &str = "mongodb.found";
 /// Distinct `update` keys written in parallel per batch; one key's messages run in order.
 const UPDATE_CONCURRENCY: usize = 16;
+/// Most messages of one key folded into one `update` call; bounds the snapshots it stores.
+const MAX_FOLDED_UPDATES: usize = 64;
 
 fn mongodb_uses_sequencer(request_reply: bool, format: &MongoDbFormat) -> bool {
     !request_reply && !matches!(format, MongoDbFormat::Raw)
@@ -107,6 +111,17 @@ impl MongoDbPublisher {
         if update.is_some() && find_list.is_some() {
             anyhow::bail!("MongoDB `update` needs one key per message; `find` must not use `$in`");
         }
+        let update_batch_field = config.update_batch_field.clone();
+        if let Some(field) = &update_batch_field {
+            if update.is_none() {
+                anyhow::bail!("MongoDB `update_batch_field` requires `update`");
+            }
+            if !field.starts_with("_mqb") || field.contains('.') {
+                anyhow::bail!(
+                    "MongoDB `update_batch_field` must be a top-level field name starting with `_mqb`"
+                );
+            }
+        }
         let shared_client = create_shared_client(config).await?;
         let client = (*shared_client).clone();
         let db = client.database(&config.database);
@@ -132,6 +147,7 @@ impl MongoDbPublisher {
                 find,
                 find_list,
                 update,
+                update_batch_field,
             });
         }
 
@@ -236,6 +252,7 @@ impl MongoDbPublisher {
             find: None,
             find_list: None,
             update: None,
+            update_batch_field: None,
         })
     }
 
@@ -266,6 +283,7 @@ impl MongoDbPublisher {
         let found = match &self.update {
             // A message without a key writes nothing: it would share one counter with all such.
             Some(update) => match template.render_resolved(Some(message)) {
+                // One message has nothing to fold: the plain update is faster.
                 Some(rendered) => {
                     self.find_and_update(find_filter(&rendered)?, update, message)
                         .await?
@@ -302,11 +320,19 @@ impl MongoDbPublisher {
             .upsert(true)
             .return_document(ReturnDocument::After)
             .build();
-        self.collection
+        let doc = self
+            .collection
             .find_one_and_update(filter, update)
             .with_options(options)
             .await
-            .map_err(update_error)
+            .map_err(update_error)?;
+        // Snapshots left by an earlier folded batch are not part of the answer.
+        Ok(doc.map(|mut doc| {
+            if let Some(field) = &self.update_batch_field {
+                doc.remove(field);
+            }
+            doc
+        }))
     }
 
     /// Answers every message with its updated document: distinct keys in parallel, the
@@ -330,8 +356,14 @@ impl MongoDbPublisher {
             });
             groups[group].1.push(i);
         }
+        let failed = &std::sync::atomic::AtomicBool::new(false);
+        let folded_ids = &std::sync::Mutex::new(Vec::new());
         let mut answers = futures::stream::iter(groups)
             .map(|(rendered, indices)| async move {
+                // After a failure, keys not yet started stay unwritten for the retry.
+                if failed.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Ok(Vec::new());
+                }
                 let mut out = Vec::with_capacity(indices.len());
                 let filter = match find_filter(&rendered) {
                     Ok(filter) => filter,
@@ -342,28 +374,129 @@ impl MongoDbPublisher {
                         return Ok(out);
                     }
                 };
-                for i in indices {
-                    let doc = match self.find_and_update(filter.clone(), update, &messages[i]).await {
-                        Ok(doc) => doc,
-                        // One rejected message must neither stall nor drop the rest of the batch.
-                        Err(e) => {
-                            let e = rejected_in_batch(e)?;
-                            warn!(error = %e, "MongoDB `update` lookup rejected; answering not found");
-                            None
+                for chunk in indices.chunks(MAX_FOLDED_UPDATES) {
+                    let fold = self.update_batch_field.as_ref().filter(|_| chunk.len() > 1);
+                    if let Some(field) = fold {
+                        let batch: Vec<&CanonicalMessage> =
+                            chunk.iter().map(|&i| &messages[i]).collect();
+                        match self.update_folded(field, &filter, update, &batch).await {
+                            Some(Ok(docs)) => {
+                                if let Some(id) = docs.last().and_then(|d| d.as_ref()?.get("_id")) {
+                                    folded_ids.lock().unwrap().push(id.clone());
+                                }
+                                out.extend(chunk.iter().copied().zip(
+                                    docs.into_iter()
+                                        .map(|d| d.map(|d| Bson::Document(d).into_relaxed_extjson())),
+                                ));
+                                continue;
+                            }
+                            // Nothing was written: redo it message by message to find the culprit.
+                            Some(Err(e)) => {
+                                rejected_in_batch(e)?;
+                            }
+                            None => {}
                         }
-                    };
-                    out.push((i, doc.map(|d| Bson::Document(d).into_relaxed_extjson())));
+                    }
+                    for &i in chunk {
+                        let doc = match self.find_and_update(filter.clone(), update, &messages[i]).await {
+                            Ok(doc) => doc,
+                            // One rejected message must neither stall nor drop the rest of the batch.
+                            Err(e) => {
+                                let e = rejected_in_batch(e)?;
+                                warn!(error = %e, "MongoDB `update` lookup rejected; answering not found");
+                                None
+                            }
+                        };
+                        out.push((i, doc.map(|d| Bson::Document(d).into_relaxed_extjson())));
+                    }
                 }
                 Ok::<_, PublisherError>(out)
             })
             .buffer_unordered(UPDATE_CONCURRENCY);
         let mut results = vec![None; messages.len()];
+        let mut error = None;
+        // Keys already in flight finish rather than being cancelled mid-write.
         while let Some(group) = answers.next().await {
-            for (i, doc) in group? {
-                results[i] = doc;
+            match group {
+                Ok(group) => group.into_iter().for_each(|(i, doc)| results[i] = doc),
+                Err(e) => {
+                    failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    error.get_or_insert(e);
+                }
             }
         }
-        Ok(results)
+        drop(answers);
+        if let Some(field) = &self.update_batch_field {
+            let ids = std::mem::take(&mut *folded_ids.lock().unwrap());
+            self.clear_snapshots(field, ids).await;
+        }
+        error.map_or(Ok(results), Err)
+    }
+
+    /// Removes the snapshots folded writes left, so no intermediate value outlives its batch.
+    /// Best effort: the next folded write of a key clears them too.
+    async fn clear_snapshots(&self, field: &str, ids: Vec<Bson>) {
+        if ids.is_empty() {
+            return;
+        }
+        let filter = doc! { "_id": { "$in": ids }, field: { "$exists": true } };
+        if let Err(e) = self
+            .collection
+            .update_many(filter, doc! { "$unset": { field: "" } })
+            .await
+        {
+            warn!(error = %e, field, "MongoDB `update` batch could not clear its snapshots");
+        }
+    }
+
+    /// Runs a key's messages, in order, as one atomic `update` call that records each one's
+    /// document in `field`. `None` when an update cannot be chained; nothing is written then.
+    async fn update_folded(
+        &self,
+        field: &str,
+        filter: &Document,
+        update: &CompiledTemplate,
+        messages: &[&CanonicalMessage],
+    ) -> Option<Result<Vec<Option<Document>>, PublisherError>> {
+        let mut chained = Vec::with_capacity(messages.len());
+        let mut touched: Vec<String> = Vec::new();
+        for message in messages {
+            let parsed = update_modifications(&update.render(Some(message))).ok()?;
+            let (steps, fields) = chainable_steps(parsed, field)?;
+            for f in fields {
+                if !touched.contains(&f) {
+                    touched.push(f);
+                }
+            }
+            chained.push(steps);
+        }
+        // One call checks `filter` once; a guard on a written field must be rechecked per message.
+        if filter_reads(filter, &touched) {
+            return None;
+        }
+        let options = FindOneAndUpdateOptions::builder()
+            .upsert(true)
+            .return_document(ReturnDocument::After)
+            .build();
+        let result = self
+            .collection
+            .find_one_and_update(filter.clone(), folded_update(field, &touched, chained))
+            .with_options(options)
+            .await
+            .map_err(update_error);
+        // Past this point the write happened, so a result that does not split is not redone.
+        Some(result.map(
+            |doc| match doc.and_then(|doc| unfold(doc, field, &touched, messages.len())) {
+                Some(docs) => docs.into_iter().map(Some).collect(),
+                None => {
+                    warn!(
+                        field,
+                        "MongoDB `update` batch lost its snapshots; answering not found"
+                    );
+                    vec![None; messages.len()]
+                }
+            },
+        ))
     }
 
     /// Answers every message with one `$in` query per chunk of distinct keys.
@@ -547,6 +680,184 @@ pub(super) fn update_modifications(rendered: &[u8]) -> Result<UpdateModification
             other.element_type()
         ))),
     }
+}
+
+/// A rendered `update` as steps that can run after another message's, and the
+/// top-level fields they write; `None` when it cannot chain: other steps, operators, dotted
+/// operator paths, or a write to `field`.
+pub(super) fn chainable_steps(
+    update: UpdateModifications,
+    field: &str,
+) -> Option<(Vec<Document>, Vec<String>)> {
+    let steps = match update {
+        UpdateModifications::Pipeline(steps) => steps,
+        UpdateModifications::Document(update) => operator_steps(update)?,
+        _ => return None,
+    };
+    let mut touched: Vec<String> = Vec::new();
+    for step in &steps {
+        let mut entries = step.iter();
+        let (Some((name, spec)), None) = (entries.next(), entries.next()) else {
+            return None;
+        };
+        let paths: Vec<&str> = match (name.as_str(), spec) {
+            ("$set" | "$addFields", Bson::Document(fields)) => {
+                fields.keys().map(String::as_str).collect()
+            }
+            ("$unset", Bson::String(path)) => vec![path.as_str()],
+            ("$unset", Bson::Array(paths)) => paths
+                .iter()
+                .map(|p| match p {
+                    Bson::String(p) => Some(p.as_str()),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?,
+            _ => return None,
+        };
+        for path in paths {
+            let top = path.split('.').next().unwrap_or(path);
+            if top == field {
+                return None;
+            }
+            if !touched.iter().any(|t| t == top) {
+                touched.push(top.to_string());
+            }
+        }
+    }
+    Some((steps, touched))
+}
+
+/// An operator update as steps with the same effect. Covers `$set`, `$inc`, `$mul`,
+/// `$min`, `$max` and `$unset` on distinct top-level fields; a dotted path could cross an array.
+fn operator_steps(update: Document) -> Option<Vec<Document>> {
+    let mut set = Document::new();
+    let mut unset = Vec::new();
+    let mut paths: Vec<String> = Vec::new();
+    for (op, fields) in update {
+        let Bson::Document(fields) = fields else {
+            return None;
+        };
+        for (path, value) in fields {
+            let plain = !path.is_empty() && !path.contains(['.', '$']);
+            if !plain || paths.contains(&path) {
+                return None;
+            }
+            paths.push(path.clone());
+            let current = Bson::String(format!("${path}"));
+            let value = doc! { "$literal": value };
+            let missing = doc! { "$eq": [{ "$type": current.clone() }, "missing"] };
+            let expr = match op.as_str() {
+                "$set" => Bson::Document(value),
+                "$inc" => Bson::Document(doc! { "$add": [{ "$ifNull": [current, 0] }, value] }),
+                "$mul" => {
+                    Bson::Document(doc! { "$multiply": [{ "$ifNull": [current, 0] }, value] })
+                }
+                "$min" => Bson::Document(doc! { "$cond": [
+                    { "$or": [missing, { "$lt": [value.clone(), current.clone()] }] }, value, current
+                ] }),
+                "$max" => Bson::Document(doc! { "$cond": [
+                    { "$or": [missing, { "$gt": [value.clone(), current.clone()] }] }, value, current
+                ] }),
+                "$unset" => {
+                    unset.push(Bson::String(path));
+                    continue;
+                }
+                _ => return None,
+            };
+            set.insert(path, expr);
+        }
+    }
+    let mut steps = Vec::new();
+    if !set.is_empty() {
+        steps.push(doc! { "$set": set });
+    }
+    if !unset.is_empty() {
+        steps.push(doc! { "$unset": unset });
+    }
+    (!steps.is_empty()).then_some(steps)
+}
+
+/// Whether `filter` may read one of the `touched` top-level fields: as a key, as a `$field`
+/// reference in an expression, or through `$where` or `$jsonSchema`, which cannot be inspected.
+pub(super) fn filter_reads(filter: &Document, touched: &[String]) -> bool {
+    fn top(path: &str) -> &str {
+        path.split('.').next().unwrap_or(path)
+    }
+    fn value_reads(value: &Bson, touched: &[String]) -> bool {
+        match value {
+            Bson::Document(d) => filter_reads(d, touched),
+            Bson::Array(items) => items.iter().any(|v| value_reads(v, touched)),
+            Bson::String(s) => s
+                .strip_prefix('$')
+                .is_some_and(|path| touched.iter().any(|t| t == top(path))),
+            _ => false,
+        }
+    }
+    filter.iter().any(|(key, value)| {
+        matches!(key.as_str(), "$where" | "$jsonSchema")
+            || touched.iter().any(|t| t == top(key))
+            || value_reads(value, touched)
+    })
+}
+
+/// Chains each message's steps, snapshotting the `touched` fields into `field` between
+/// messages. The last message's document is the result itself, so it needs no snapshot.
+pub(super) fn folded_update(
+    field: &str,
+    touched: &[String],
+    chained: Vec<Vec<Document>>,
+) -> Vec<Document> {
+    // A missing field is left out of the snapshot, so `unfold` can tell it from a null.
+    let fields: Document = touched
+        .iter()
+        .map(|t| (t.clone(), Bson::String(format!("${t}"))))
+        .collect();
+    let snapshot = doc! { "$set": { field: { "$concatArrays": [
+        { "$ifNull": [format!("${field}"), []] },
+        [fields],
+    ] } } };
+    let last = chained.len().saturating_sub(1);
+    let mut update = vec![doc! { "$unset": field }];
+    for (i, steps) in chained.into_iter().enumerate() {
+        update.extend(steps);
+        if i < last {
+            update.push(snapshot.clone());
+        }
+    }
+    update
+}
+
+/// Splits a folded result into one document per message, or `None` if the snapshots are off:
+/// each snapshot overlays the final document's `touched` fields.
+pub(super) fn unfold(
+    mut doc: Document,
+    field: &str,
+    touched: &[String],
+    messages: usize,
+) -> Option<Vec<Document>> {
+    let snapshots = match doc.remove(field) {
+        Some(Bson::Array(snapshots)) => snapshots,
+        None => Vec::new(),
+        Some(_) => return None,
+    };
+    let mut docs = Vec::with_capacity(messages);
+    for snapshot in snapshots {
+        let Bson::Document(mut snapshot) = snapshot else {
+            return None;
+        };
+        let mut before = Document::new();
+        for (key, value) in &doc {
+            if !touched.contains(key) {
+                before.insert(key.clone(), value.clone());
+            } else if let Some(value) = snapshot.remove(key) {
+                before.insert(key.clone(), value);
+            }
+        }
+        before.extend(snapshot);
+        docs.push(before);
+    }
+    docs.push(doc);
+    (docs.len() == messages).then_some(docs)
 }
 
 /// Parses a rendered `find` filter into a BSON document.

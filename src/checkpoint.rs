@@ -8,10 +8,12 @@
 //! `s3|gs|az|abfs://…` URL persists it to a cloud object store (one object per cursor).
 //!
 //! Values are opaque strings; each endpoint encodes its native key (a BSON `_id`, a SQL
-//! column value) into a string it can decode back.
+//! column value) into a string it can decode back. Endpoints persist them through
+//! [`VersionedCheckpoint`], which records which source wrote the value and when.
 
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,6 +27,172 @@ pub trait CheckpointStore: Send + Sync {
     async fn load(&self) -> anyhow::Result<Option<String>>;
     /// Persists the cursor value, overwriting any previous position.
     async fn save(&self, value: &str) -> anyhow::Result<()>;
+    /// Removes the persisted cursor, so the next run starts from the beginning.
+    async fn clear(&self) -> anyhow::Result<()> {
+        Err(anyhow!("this checkpoint store does not support clearing"))
+    }
+}
+
+const ENVELOPE_VERSION: u64 = 1;
+
+/// The stored form of a checkpoint value.
+#[derive(Serialize, Deserialize)]
+struct Envelope {
+    mqb_checkpoint: u64,
+    source: String,
+    value: String,
+    updated_at_ms: u64,
+}
+
+/// A checkpoint as stored, with what is known about who wrote it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckpointEntry {
+    /// The endpoint-encoded cursor value.
+    pub value: String,
+    /// The source that wrote it; `None` for a value saved before checkpoints were versioned.
+    pub source: Option<String>,
+    /// Unix time of the last save in milliseconds; `None` for an unversioned value.
+    pub updated_at_ms: Option<u64>,
+}
+
+impl CheckpointEntry {
+    fn decode(raw: String) -> anyhow::Result<Self> {
+        let versioned = raw.starts_with('{')
+            && serde_json::from_str::<serde_json::Value>(&raw)
+                .is_ok_and(|v| v.get("mqb_checkpoint").is_some());
+        if !versioned {
+            return Ok(Self {
+                value: raw,
+                source: None,
+                updated_at_ms: None,
+            });
+        }
+        let envelope: Envelope =
+            serde_json::from_str(&raw).context("Failed to parse versioned checkpoint")?;
+        if envelope.mqb_checkpoint > ENVELOPE_VERSION {
+            return Err(anyhow!(
+                "checkpoint format v{} was written by a newer mq-bridge (this one reads up to v{ENVELOPE_VERSION})",
+                envelope.mqb_checkpoint
+            ));
+        }
+        Ok(Self {
+            value: envelope.value,
+            source: Some(envelope.source),
+            updated_at_ms: Some(envelope.updated_at_ms),
+        })
+    }
+}
+
+/// Wraps a [`CheckpointStore`] so values are saved with the identity of the source that wrote
+/// them. Loading refuses a value written by a different source (e.g. after `cursor_column`
+/// changed) instead of resuming from a position that does not apply. Unversioned values from
+/// older releases load as-is and are upgraded on the next save.
+pub struct VersionedCheckpoint {
+    inner: Arc<dyn CheckpointStore>,
+    source: String,
+}
+
+impl VersionedCheckpoint {
+    pub fn new(inner: Arc<dyn CheckpointStore>, source: impl Into<String>) -> Self {
+        Self {
+            inner,
+            source: source.into(),
+        }
+    }
+
+    /// The identity this checkpoint saves under, e.g. `sqlx:orders:id`.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// The stored entry without the source check, for inspection.
+    pub async fn entry(&self) -> anyhow::Result<Option<CheckpointEntry>> {
+        self.inner
+            .load()
+            .await?
+            .map(CheckpointEntry::decode)
+            .transpose()
+    }
+}
+
+#[async_trait]
+impl CheckpointStore for VersionedCheckpoint {
+    async fn load(&self) -> anyhow::Result<Option<String>> {
+        let Some(entry) = self.entry().await? else {
+            return Ok(None);
+        };
+        match &entry.source {
+            Some(stored) if stored != &self.source => Err(anyhow!(
+                "checkpoint was written by source `{stored}`, but this source is `{}`; the stored position does not apply. \
+                 Reset it with `mqb checkpoint reset` or use a different cursor_id",
+                self.source
+            )),
+            _ => Ok(Some(entry.value)),
+        }
+    }
+
+    async fn save(&self, value: &str) -> anyhow::Result<()> {
+        let updated_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default();
+        let envelope = serde_json::to_string(&Envelope {
+            mqb_checkpoint: ENVELOPE_VERSION,
+            source: self.source.clone(),
+            value: value.to_string(),
+            updated_at_ms,
+        })?;
+        self.inner.save(&envelope).await
+    }
+
+    async fn clear(&self) -> anyhow::Result<()> {
+        self.inner.clear().await
+    }
+}
+
+/// Opens the resume checkpoint a consumer built from `endpoint_type` would use, without starting
+/// it. `route_name` fills defaults a route derives from its name (a MongoDB `collection`).
+/// Returns `None` when the endpoint has no durable checkpoint configured (no `cursor_id`).
+pub async fn open_endpoint_checkpoint(
+    route_name: &str,
+    endpoint_type: &crate::models::EndpointType,
+) -> anyhow::Result<Option<Arc<VersionedCheckpoint>>> {
+    use crate::models::EndpointType;
+    let _ = route_name;
+    match endpoint_type {
+        #[cfg(feature = "sqlx")]
+        EndpointType::Sqlx(cfg) if cfg.publication.is_none() && cfg.cursor_column.is_some() => {
+            crate::endpoints::sqlx::cursor_checkpoint(cfg).await
+        }
+        #[cfg(feature = "clickhouse")]
+        EndpointType::ClickHouse(cfg) => crate::endpoints::clickhouse::cursor_checkpoint(cfg).await,
+        #[cfg(feature = "object-store")]
+        EndpointType::ObjectStore(cfg) => {
+            crate::endpoints::object_store::cursor_checkpoint(cfg).await
+        }
+        #[cfg(feature = "mongodb")]
+        EndpointType::MongoDb(cfg) => {
+            use crate::models::MongoConsume;
+            if !matches!(
+                cfg.resolved_consume(),
+                MongoConsume::CaptureNew | MongoConsume::CaptureAll
+            ) {
+                return Err(anyhow!(
+                    "mongodb keeps a resume checkpoint only in capture_new/capture_all mode"
+                ));
+            }
+            let mut cfg = cfg.clone();
+            cfg.collection.get_or_insert_with(|| route_name.to_string());
+            crate::endpoints::mongodb::change_stream_checkpoint(&cfg).await
+        }
+        EndpointType::PostgresCdc(_) => Err(anyhow!(
+            "postgres_cdc resumes from its replication slot, which is authoritative; manage the slot instead"
+        )),
+        EndpointType::Sqlx(cfg) if cfg.publication.is_some() => Err(anyhow!(
+            "sqlx with `publication` resumes from its replication slot, which is authoritative; manage the slot instead"
+        )),
+        _ => Err(anyhow!("this endpoint has no mq-bridge resume checkpoint")),
+    }
 }
 
 /// Returns a process-wide async lock for `path`, so concurrent saves to the same checkpoint
@@ -78,12 +246,31 @@ impl CheckpointStore for FileCheckpointStore {
     }
 
     async fn save(&self, value: &str) -> anyhow::Result<()> {
+        self.update(|map| {
+            map.insert(self.key.clone(), value.to_string());
+        })
+        .await
+    }
+
+    async fn clear(&self) -> anyhow::Result<()> {
+        self.update(|map| {
+            map.remove(&self.key);
+        })
+        .await
+    }
+}
+
+impl FileCheckpointStore {
+    async fn update(
+        &self,
+        change: impl FnOnce(&mut HashMap<String, String>),
+    ) -> anyhow::Result<()> {
         // Serialize the read-modify-write so parallel saves to the same file can't lose updates.
         let lock = path_lock(&self.path);
         let _guard = lock.lock().await;
 
         let mut map = self.read_map().await?;
-        map.insert(self.key.clone(), value.to_string());
+        change(&mut map);
         let bytes =
             serde_json::to_vec_pretty(&map).context("Failed to serialize checkpoint map")?;
 
@@ -455,6 +642,14 @@ pub(crate) mod object_store_backend {
                 .with_context(|| format!("Failed to save checkpoint object '{}'", self.path))?;
             Ok(())
         }
+
+        async fn clear(&self) -> anyhow::Result<()> {
+            match self.store.delete(&self.path).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+                Err(e) => Err(e)
+                    .with_context(|| format!("Failed to delete checkpoint object '{}'", self.path)),
+            }
+        }
     }
 
     /// Build an object-store checkpoint store from a cloud URL. Each cursor gets its own object at
@@ -550,6 +745,43 @@ mod tests {
         assert_eq!(store.load().await.unwrap(), Some("oid:def".to_string()));
 
         tokio::fs::remove_dir_all(dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn versioned_checkpoint_upgrades_legacy_and_rejects_foreign_source() {
+        let dir = std::env::temp_dir().join(format!("mqb_ckpt_{}", fast_uuid_v7::gen_id()));
+        let raw: Arc<dyn CheckpointStore> =
+            Arc::new(FileCheckpointStore::new(dir.join("cursors.json"), "t:c1"));
+        raw.save("int:7").await.unwrap();
+
+        let store = VersionedCheckpoint::new(raw.clone(), "sqlx:t:id");
+        assert_eq!(store.load().await.unwrap(), Some("int:7".to_string()));
+        assert_eq!(store.entry().await.unwrap().unwrap().source, None);
+
+        store.save("int:9").await.unwrap();
+        let entry = store.entry().await.unwrap().unwrap();
+        assert_eq!(entry.value, "int:9");
+        assert_eq!(entry.source.as_deref(), Some("sqlx:t:id"));
+        assert!(entry.updated_at_ms.is_some());
+
+        let renamed = VersionedCheckpoint::new(raw.clone(), "sqlx:t:updated_at");
+        let err = renamed.load().await.unwrap_err().to_string();
+        assert!(err.contains("sqlx:t:id"), "{err}");
+
+        renamed.clear().await.unwrap();
+        assert_eq!(renamed.load().await.unwrap(), None);
+        tokio::fs::remove_dir_all(dir).await.ok();
+    }
+
+    #[test]
+    fn checkpoint_entry_keeps_json_legacy_values_and_refuses_newer_format() {
+        let token = r#"{"_data":"8263"}"#.to_string();
+        let entry = CheckpointEntry::decode(token.clone()).unwrap();
+        assert_eq!(entry.value, token);
+        assert_eq!(entry.source, None);
+
+        let newer = r#"{"mqb_checkpoint":2,"source":"s","value":"v","updated_at_ms":1}"#;
+        assert!(CheckpointEntry::decode(newer.to_string()).is_err());
     }
 
     #[test]

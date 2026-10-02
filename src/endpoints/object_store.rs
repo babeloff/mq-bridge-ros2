@@ -26,7 +26,7 @@
 //!   resumes without re-emitting. Objects are never deleted or rewritten — resume is
 //!   non-destructive, at-least-once at object granularity.
 
-use crate::checkpoint::{self, CheckpointBackend, CheckpointStore};
+use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
 use crate::endpoints::file::{encode_record, parse_delimiter, parse_message};
 use crate::models::{Compression, DatePartitionStyle, FileFormat, NameBy, ObjectStoreConfig};
 #[cfg(feature = "encryption")]
@@ -704,6 +704,31 @@ pub struct ObjectStoreConsumer {
 /// single poison object cannot block the source forever.
 const MAX_OBJECT_DECODE_FAILURES: u32 = 5;
 
+/// Opens a consumer's external checkpoint. The source URL is already part of the store key.
+async fn open_checkpoint(
+    backend: CheckpointBackend,
+    config: &ObjectStoreConfig,
+    cursor_id: &str,
+) -> anyhow::Result<Arc<VersionedCheckpoint>> {
+    let store = checkpoint::build_external_store(backend, &config.url, cursor_id).await?;
+    Ok(Arc::new(VersionedCheckpoint::new(store, "object_store")))
+}
+
+/// The checkpoint of a source, or `None` without both `cursor_id` and `checkpoint_store`.
+pub(crate) async fn cursor_checkpoint(
+    config: &ObjectStoreConfig,
+) -> anyhow::Result<Option<Arc<VersionedCheckpoint>>> {
+    let (Some(cursor_id), Some(spec)) = (&config.cursor_id, &config.checkpoint_store) else {
+        return Ok(None);
+    };
+    match checkpoint::parse_checkpoint_store(spec)? {
+        CheckpointBackend::Source { .. } => Err(anyhow!(
+            "object_store needs an external checkpoint_store (file://, s3://, postgres://, or mongodb://)"
+        )),
+        external => open_checkpoint(external, config, cursor_id).await.map(Some),
+    }
+}
+
 impl ObjectStoreConsumer {
     pub async fn new(config: &ObjectStoreConfig) -> anyhow::Result<Self> {
         Self::new_with_no_resume(config, false).await
@@ -743,7 +768,7 @@ impl ObjectStoreConsumer {
                             ))));
                             }
                         }
-                        Some(checkpoint::build_external_store(external, &config.url, cid).await?)
+                        Some(open_checkpoint(external, config, cid).await?)
                     }
                 },
                 (Some(_), None) => {

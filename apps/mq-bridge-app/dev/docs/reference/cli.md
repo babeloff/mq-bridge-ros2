@@ -2,12 +2,14 @@
 
 `mqb` is a single headless binary with three modes: **config mode** (the default —
 run a long-lived bridge, optionally serving the browser UI), the **`copy`** subcommand (an
-ad-hoc one-route job), and the **`mcp`** subcommand (expose the bridge as MCP tools).
+ad-hoc one-route job), and the **`mcp`** subcommand (expose the bridge as MCP tools). The
+**`checkpoint`** subcommand inspects and edits a source's resume position.
 
 ```text
 mqb [OPTIONS]                          # config mode
 mqb copy SOURCE TARGET [COPY OPTIONS]  # one-route ad-hoc job
 mqb mcp  [MCP OPTIONS]                 # MCP server
+mqb checkpoint show|reset|set ...      # inspect or edit a resume position
 ```
 
 ## Config mode (default)
@@ -322,6 +324,36 @@ mqb copy \
 
 See the [Quick start](../quick-start.md) for complete, working `copy`
 commands.
+
+## `checkpoint` — inspect and edit a resume position
+
+```bash
+mqb -c config.yaml checkpoint show --route orders_sync     # a configured route or consumer
+mqb checkpoint show SOURCE TARGET [--filter EXPR]         # a `copy --resume` job
+mqb -c config.yaml checkpoint reset --route orders_sync    # next run starts from the beginning
+mqb -c config.yaml checkpoint set --value int:1000 --route orders_sync
+```
+
+`--route NAME` names a route or consumer from the config, which `-c` loads (it goes before
+`checkpoint`). Otherwise pass the same
+SOURCE, TARGET and `--filter` the `copy --resume` ran with; they resolve to the same generated
+cursor id. `show` prints the stored value, the source that wrote it, and when:
+
+```text
+value:   int:3
+source:  sqlx:orders:id
+updated: 2026-09-30T08:12:44.120+00:00
+```
+
+`reset` prints the previous value before deleting it, so `set --value` can undo it. The value
+format is the one `show` prints. `-v` logs connection details.
+
+Stop the route or copy before `reset` or `set`: a reader that is still running saves its own
+position over the edit with its next acknowledged batch.
+
+It works for SQL, ClickHouse and object-store cursor readers and for MongoDB change streams.
+Postgres CDC is refused: its replication slot is the authoritative position. See
+[Checkpoints & resumable copies](../cookbook/checkpoints.md#inspecting-and-editing-a-checkpoint).
 
 ## `mcp` — MCP server
 

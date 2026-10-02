@@ -115,6 +115,8 @@ ENV RUSTFLAGS="-L native=/opt/mqm/lib64"
 # from the build WORKDIR upward — setting it here keeps the image build correct
 # regardless of where the build is invoked from.
 ENV CMAKE_ARGS="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+# Same reason: SQLite math functions, as in the root .cargo/config.toml.
+ENV LIBSQLITE3_FLAGS="SQLITE_ENABLE_MATH_FUNCTIONS"
 
 # The Docker build context is the monorepo root.
 WORKDIR /usr/src/mq-bridge

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+AggregateEntry = dict
+AggregateMiddleware = dict
 AmqpConfig = dict
 AwsConfig = dict
 BufferMiddleware = dict
@@ -54,6 +56,8 @@ UnpackMiddleware = dict
 WeakJoinMiddleware = dict
 WebSocketConfig = dict
 ZeroMqConfig = dict
+AggregateConsistency = str
+AggregateEmit = str
 CipherKind = str
 Compression = str
 DatePartitionStyle = str
@@ -87,6 +91,10 @@ RoutesConfig = dict
 ConfigDocument = dict
 
 __all__ = [
+    "AggregateConsistency",
+    "AggregateEmit",
+    "AggregateEntry",
+    "AggregateMiddleware",
     "AmqpConfig",
     "AwsConfig",
     "BufferMiddleware",

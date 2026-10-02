@@ -47,8 +47,46 @@ fn default_route_migrated_capture() -> ConsumerMessageCaptureConfig {
     }
 }
 
-fn generate_config_id() -> String {
-    Uuid::now_v7().to_string()
+/// The id of an entity that has none in the config: derived from its kind and name, so a
+/// restart finds the stores (deduplication, aggregate, ...) named after it again.
+fn stable_config_id(kind: &str, name: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(format!("mq-bridge-app:{kind}:{}", name.trim()));
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_custom_bytes(bytes)
+        .into_uuid()
+        .to_string()
+}
+
+/// A stable id for `name`; when another entity already has it, the next free one of a
+/// counted series, so a collision resolves to the same id on every load.
+fn unused_config_id(kind: &str, name: &str, known_ids: &HashSet<String>) -> String {
+    let mut id = stable_config_id(kind, name);
+    let mut attempt = 1u32;
+    while known_ids.contains(&id) {
+        attempt += 1;
+        id = stable_config_id(kind, &format!("{}#{attempt}", name.trim()));
+    }
+    id
+}
+
+/// Gives every `(id, name)` entity a unique id. Explicit ids are reserved up front, so a
+/// derived id never takes one from an entity further down the list.
+fn assign_entity_ids<'a>(kind: &str, entities: impl Iterator<Item = (&'a mut String, &'a str)>) {
+    let entities: Vec<_> = entities.collect();
+    let mut reserved_ids: HashSet<String> = entities
+        .iter()
+        .filter(|(id, _)| !id.trim().is_empty())
+        .map(|(id, _)| id.to_string())
+        .collect();
+    let mut explicit_ids = HashSet::new();
+    for (id, name) in entities {
+        if id.trim().is_empty() || !explicit_ids.insert(id.to_string()) {
+            *id = unused_config_id(kind, name, &reserved_ids);
+            reserved_ids.insert(id.to_string());
+        }
+    }
 }
 
 #[derive(
@@ -331,7 +369,7 @@ pub struct RouteConfig {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema, Clone)]
 pub struct ConsumerConfig {
-    #[serde(default = "generate_config_id")]
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: String,
@@ -400,7 +438,7 @@ fn consumer_output_is_none(output: &ConsumerOutputConfig) -> bool {
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, JsonSchema, Clone)]
 pub struct PublisherClient {
-    #[serde(default = "generate_config_id")]
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub name: String,
@@ -962,21 +1000,18 @@ pub fn load_config_at_path(
 
 impl AppConfig {
     pub fn ensure_entity_ids(&mut self) {
-        let mut known_ids = HashSet::new();
-        for publisher in &mut self.publishers {
-            if publisher.id.trim().is_empty() || !known_ids.insert(publisher.id.clone()) {
-                publisher.id = generate_config_id();
-                known_ids.insert(publisher.id.clone());
-            }
-        }
-
-        known_ids.clear();
-        for consumer in &mut self.consumers {
-            if consumer.id.trim().is_empty() || !known_ids.insert(consumer.id.clone()) {
-                consumer.id = generate_config_id();
-                known_ids.insert(consumer.id.clone());
-            }
-        }
+        assign_entity_ids(
+            "publisher",
+            self.publishers
+                .iter_mut()
+                .map(|publisher| (&mut publisher.id, publisher.name.as_str())),
+        );
+        assign_entity_ids(
+            "consumer",
+            self.consumers
+                .iter_mut()
+                .map(|consumer| (&mut consumer.id, consumer.name.as_str())),
+        );
     }
 
     fn normalize_consumer_publisher_outputs(&mut self) {
@@ -1088,9 +1123,11 @@ impl AppConfig {
                 .iter()
                 .map(|consumer| consumer.name.clone())
                 .collect();
-            let mut routes = std::mem::take(&mut self.routes);
+            // Sorted, so colliding names get the same suffix on every start.
+            let mut routes: Vec<_> = std::mem::take(&mut self.routes).into_iter().collect();
+            routes.sort_by(|a, b| a.0.cmp(&b.0));
 
-            for (route_name, route_config) in routes.drain() {
+            for (route_name, route_config) in routes {
                 let normalized_route_name = route_name.trim().to_string();
                 let output =
                     if matches!(route_config.route.output.endpoint_type, EndpointType::Null) {
@@ -1110,7 +1147,7 @@ impl AppConfig {
                         );
                         existing_publisher_names.insert(publisher_name.clone());
                         let publisher = PublisherClient {
-                            id: generate_config_id(),
+                            id: String::new(),
                             name: publisher_name.clone(),
                             endpoint: route_config.route.output.clone(),
                             comment: String::new(),
@@ -1118,11 +1155,10 @@ impl AppConfig {
                             headers: Vec::new(),
                             sort_order: None,
                         };
-                        let publisher_id = publisher.id.clone();
                         self.publishers.push(publisher);
                         ConsumerOutputConfig::Publisher {
                             publisher: publisher_name,
-                            publisher_id: Some(publisher_id),
+                            publisher_id: None,
                         }
                     };
 
@@ -1130,7 +1166,7 @@ impl AppConfig {
                     next_unique_name(&normalized_route_name, &existing_consumer_names);
                 existing_consumer_names.insert(consumer_name.clone());
                 self.consumers.push(ConsumerConfig {
-                    id: generate_config_id(),
+                    id: String::new(),
                     name: consumer_name,
                     enabled: route_config.enabled,
                     endpoint: route_config.route.input,
@@ -2070,6 +2106,69 @@ output:
         // And the legacy flag still migrates rather than being lost in the route.
         config.migrate_legacy_routes();
         assert_eq!(config.security_mode(), ConfigSecurityMode::Balanced);
+    }
+
+    #[test]
+    fn entities_without_an_id_get_the_same_one_on_every_load() {
+        let load = || {
+            let mut config: AppConfig = serde_yaml_ng::from_str(
+                r#"
+routes:
+  orders:
+    input: { memory: { topic: "in" } }
+    output: { memory: { topic: "out" } }
+consumers:
+  - name: audit
+    endpoint: { memory: { topic: "audit" } }
+  - id: fixed
+    name: fixed
+    endpoint: { memory: { topic: "fixed" } }
+"#,
+            )
+            .unwrap();
+            config.migrate_legacy_routes();
+            let mut ids: Vec<(String, String)> = config
+                .consumers
+                .iter()
+                .map(|c| (c.name.clone(), c.id.clone()))
+                .chain(config.publishers.iter().map(|p| (p.name.clone(), p.id.clone())))
+                .collect();
+            ids.sort();
+            ids
+        };
+
+        let ids = load();
+        assert_eq!(ids, load());
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&("fixed".to_string(), "fixed".to_string())));
+        let distinct: HashSet<&String> = ids.iter().map(|(_, id)| id).collect();
+        assert_eq!(distinct.len(), 4);
+        assert!(ids.iter().all(|(_, id)| !id.is_empty()));
+    }
+
+    #[test]
+    fn a_derived_id_never_takes_a_later_explicit_one() {
+        let derived = stable_config_id("publisher", "audit");
+        let mut config: AppConfig = serde_yaml_ng::from_str(&format!(
+            r#"
+publishers:
+  - name: audit
+    endpoint: {{ memory: {{ topic: "a" }} }}
+  - id: {derived}
+    name: explicit
+    endpoint: {{ memory: {{ topic: "b" }} }}
+  - id: {derived}
+    name: duplicate
+    endpoint: {{ memory: {{ topic: "c" }} }}
+"#
+        ))
+        .unwrap();
+        config.ensure_entity_ids();
+
+        let ids: Vec<&String> = config.publishers.iter().map(|p| &p.id).collect();
+        assert_eq!(ids[1], &derived);
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 3);
+        assert!(ids.iter().all(|id| !id.is_empty()));
     }
 
     #[test]

@@ -306,6 +306,56 @@ pub(crate) fn is_change_stream_unsupported(err: &anyhow::Error) -> bool {
 /// the oplog window. This interval bounds how stale that saved position can get.
 const IDLE_RESUME_REFRESH: Duration = Duration::from_secs(10);
 
+/// Opens a change-stream reader's resume-token checkpoint.
+async fn open_change_stream_checkpoint(
+    config: &MongoDbConfig,
+    collection_name: &str,
+    cursor_id: &str,
+    db: &Database,
+) -> anyhow::Result<Arc<crate::checkpoint::VersionedCheckpoint>> {
+    use crate::checkpoint::CheckpointBackend;
+    let backend = match &config.checkpoint_store {
+        None => CheckpointBackend::Source {
+            name: crate::checkpoint::default_meta_name(collection_name),
+        },
+        Some(spec) => crate::checkpoint::parse_checkpoint_store(spec)?,
+    };
+    let store: Arc<dyn crate::checkpoint::CheckpointStore> = match backend {
+        CheckpointBackend::Source { name } => Arc::new(MongoCollectionCheckpointStore {
+            meta: db.collection::<Document>(&name),
+            doc_id: crate::checkpoint::checkpoint_key(collection_name, cursor_id),
+        }),
+        external => {
+            crate::checkpoint::build_external_store(external, collection_name, cursor_id).await?
+        }
+    };
+    Ok(Arc::new(crate::checkpoint::VersionedCheckpoint::new(
+        store,
+        format!(
+            "mongodb_change_stream:{}.{collection_name}",
+            config.database
+        ),
+    )))
+}
+
+/// The checkpoint of a `capture_new`/`capture_all` source, or `None` without a `cursor_id`.
+pub(crate) async fn change_stream_checkpoint(
+    config: &MongoDbConfig,
+) -> anyhow::Result<Option<Arc<crate::checkpoint::VersionedCheckpoint>>> {
+    let Some(cursor_id) = &config.cursor_id else {
+        return Ok(None);
+    };
+    let collection_name = config
+        .collection
+        .as_deref()
+        .ok_or_else(|| anyhow!("Collection name is required for MongoDB CDC reader"))?;
+    let client = create_client(config).await?;
+    let db = client.database(&config.database);
+    open_change_stream_checkpoint(config, collection_name, cursor_id, &db)
+        .await
+        .map(Some)
+}
+
 /// A real change-data-capture reader over an arbitrary MongoDB collection. Tails the collection's
 /// change stream (requires a replica set), emitting insert/update/replace/delete events with the
 /// full post-image (`updateLookup`), and persists the resume token (keyed by `cursor_id`) to a
@@ -421,23 +471,7 @@ impl MongoDbChangeStreamReader {
         let checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>> = if no_resume {
             None
         } else if let Some(cid) = &config.cursor_id {
-            use crate::checkpoint::CheckpointBackend;
-            let backend = match &config.checkpoint_store {
-                None => CheckpointBackend::Source {
-                    name: crate::checkpoint::default_meta_name(collection_name),
-                },
-                Some(spec) => crate::checkpoint::parse_checkpoint_store(spec)?,
-            };
-            let store: Arc<dyn crate::checkpoint::CheckpointStore> = match backend {
-                CheckpointBackend::Source { name } => Arc::new(MongoCollectionCheckpointStore {
-                    meta: db.collection::<Document>(&name),
-                    doc_id: crate::checkpoint::checkpoint_key(collection_name, cid),
-                }),
-                external => {
-                    crate::checkpoint::build_external_store(external, collection_name, cid).await?
-                }
-            };
-            Some(store)
+            Some(open_change_stream_checkpoint(config, collection_name, cid, &db).await?)
         } else {
             warn!(
                 collection = %collection_name,

@@ -7,6 +7,30 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from typing_extensions import Required, TypedDict
 
 
+class AggregateEntry(TypedDict, total=False):
+    """One aggregate of an `aggregate` middleware."""
+    emit: AggregateEmit
+    expression: Optional[str]
+    fields: Optional[Dict[str, str]]
+    into: Required[str]
+    key: Required[str]
+    output: Optional[str]
+
+
+class AggregateMiddleware(TypedDict, total=False):
+    """Aggregate middleware configuration."""
+    consistency: AggregateConsistency
+    emit: AggregateEmit
+    entries: List[AggregateEntry]
+    expression: Optional[str]
+    fields: Optional[Dict[str, str]]
+    into: Optional[str]
+    key: Optional[str]
+    max_keys: Optional[int]
+    output: Optional[str]
+    store: Optional[str]
+
+
 class AmqpConfig(TypedDict, total=False):
     """General AMQP connection configuration."""
     delayed_ack: bool
@@ -340,6 +364,7 @@ class MetricsMiddleware(TypedDict, total=False):
 
 class Middleware(TypedDict, total=False):
     """An enumeration of all supported middleware types."""
+    aggregate: AggregateMiddleware
     buffer: BufferMiddleware
     compression: CompressionMiddleware
     cookie_jar: CookieJarMiddleware
@@ -677,6 +702,8 @@ class ZeroMqConfig(TypedDict, total=False):
     url: Required[str]
 
 
+AggregateConsistency = Literal["shared", "single_writer"]
+AggregateEmit = Literal["updated", "previous"]
 CipherKind = Literal["xchacha20poly1305", "aes256gcm"]
 Compression = Literal["none", "gzip", "lz4", "zstd"]
 DatePartitionStyle = Literal["nested", "hive"]

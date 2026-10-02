@@ -80,6 +80,26 @@ at-least-once matter, use the built-in `mqbridge.Bridge` protocol (the default) 
 are real RPCs, and unacknowledged messages are retained and redelivered to the same
 `consumer_id` while the server process lives.
 
+## Serving a unary method
+
+A server-mode input with a descriptor, a service and a method also serves that one unary method.
+Each call arrives as its request in canonical JSON, and a `response` output replies:
+
+```yaml
+input:
+  grpc:
+    url: 0.0.0.0:50051
+    server_mode: true
+    descriptor_set_path: proto/benchmark.bin
+    service_name: benchmark.BenchmarkService
+    method_name: GetSum
+output:
+  response: {}
+```
+
+The reply payload must be JSON matching the method's output message. Streaming methods are
+rejected.
+
 ## Key options
 
 | Option | Purpose |
@@ -88,7 +108,7 @@ are real RPCs, and unacknowledged messages are retained and redelivered to the s
 | `topic` | Topic / subject used for both subscribe and publish paths. |
 | `timeout_ms` | Client: connection timeout and per-request deadline. Server: per-request deadline. |
 | `consumer_id` | For the built-in `mqbridge.Bridge` protocol, the subscription identity for ACK tracking and redelivery. Defaults to a fresh id per consumer; set it to have unacknowledged messages redelivered after a reconnect. Dynamic services use the remote API's own semantics. |
-| `descriptor_set_path` / `service_name` / `method_name` / `request` / `server_streaming` | Dynamic client mode (above). |
+| `descriptor_set_path` / `service_name` / `method_name` / `request` / `server_streaming` | Dynamic client mode, or the served unary method in server mode (above). |
 | `max_decoding_message_size` / `max_encoding_message_size` | Max decoded / encoded message size (decode default 4 MiB, encode unlimited). |
 | `http2_keepalive_interval_ms` / `http2_keepalive_timeout_ms` | HTTP/2 keepalive tuning, both modes. |
 | `tls` | TLS configuration (object; set with a JSON literal `?tls={...}`). |

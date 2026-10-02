@@ -1,8 +1,8 @@
 # gRPC integration
 
-mq-bridge exposes two deliberately separate gRPC capabilities. A third, generic-server
-capability is intentionally not implemented because no safe, general RPC-to-message mapping has
-been defined.
+mq-bridge exposes two deliberately separate gRPC capabilities: the `mqbridge.Bridge` protocol and
+descriptor-driven dynamic calls. A server-mode endpoint can additionally serve one
+descriptor-defined **unary** method per route; streaming server methods are not implemented.
 
 ## Bridge protocol
 
@@ -246,13 +246,41 @@ input:
 The same TLS fields apply to Bridge clients and servers. On an embedded server, `ca_file` enables
 client-certificate verification for mTLS.
 
+## Dynamic server method
+
+A server-mode input with a descriptor, `service_name`, and `method_name` serves that unary method
+alongside `mqbridge.Bridge` on the same listener:
+
+```yaml
+input:
+  grpc:
+    url: 0.0.0.0:50051
+    server_mode: true
+    descriptor_set_path: proto/benchmark.bin
+    service_name: benchmark.BenchmarkService
+    method_name: GetSum
+output:
+  response: {}
+```
+
+Each call becomes one message whose payload is the request in protobuf's canonical JSON mapping
+and whose `mq_bridge.topic` metadata is the RPC path (`/benchmark.BenchmarkService/GetSum`). The
+route's reply payload must be JSON matching the output message; it is encoded back to protobuf.
+An acknowledgement without a reply returns the default output message, a failed message returns
+`INTERNAL`, and a request that does not decode returns `INVALID_ARGUMENT`. Streaming methods, and a
+method name without a service name or descriptor, are rejected at construction.
+
+Any caller the listener admits can invoke the method; there is no per-call authorization. Incoming
+call metadata is not passed to the route, so it cannot carry a caller identity downstream. Restrict
+who may call with TLS client certificates on the listener.
+
 ## Generic server boundary
 
-Server mode hosts `mqbridge.Bridge` plus both v1 and v1alpha reflection for it. It does not register arbitrary RPC paths from descriptor
-sets. A generic server would first need a public
-contract defining all of the following:
+Beyond one unary method per route, server mode does not register arbitrary RPC paths from
+descriptor sets. Streaming server methods would first need a public contract defining all of the
+following:
 
-- conversion of every incoming unary or streamed protobuf request into `CanonicalMessage`;
+- conversion of every incoming streamed protobuf request into `CanonicalMessage`;
 - correlation and production of unary, client-streaming, server-streaming, and bidi responses;
 - registration and conflict handling for descriptor-defined RPC paths;
 - how downstream code returns gRPC headers, status codes, and trailers;
@@ -260,4 +288,4 @@ contract defining all of the following:
 - behavior when downstream processing fails before or after a partial streamed response.
 
 Until those semantics exist, accepting arbitrary inbound services would make delivery and failure
-behavior ambiguous, so the boundary remains intentionally Bridge-only.
+behavior ambiguous, so streaming stays out of server mode.

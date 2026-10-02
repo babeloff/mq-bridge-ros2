@@ -112,6 +112,8 @@ pub struct CompiledTemplate {
     /// The path of the only `${payload:…}` token, when there is exactly one. Rendering then
     /// extracts that one field instead of materializing the whole document.
     single_payload_path: Option<String>,
+    /// `single_payload_path` split into its segments.
+    single_payload_segments: Vec<String>,
     /// Backs `${gen:counter}`; shared across clones via the enclosing `Arc`.
     counter: AtomicU64,
     /// Sum of literal byte lengths, used to pre-size the render buffer.
@@ -191,11 +193,17 @@ impl CompiledTemplate {
             _ => None,
         };
 
+        let single_payload_segments = single_payload_path
+            .as_deref()
+            .map(path_segments)
+            .unwrap_or_default();
+
         Ok(Self {
             segments,
             escape,
             needs_payload,
             single_payload_path,
+            single_payload_segments,
             counter: AtomicU64::new(0),
             literal_len,
         })
@@ -205,6 +213,14 @@ impl CompiledTemplate {
     /// rendering entirely (send the body verbatim) when this is false.
     pub fn is_dynamic(&self) -> bool {
         self.segments.iter().any(|s| matches!(s, Segment::Token(_)))
+    }
+
+    /// The payload path, when the whole template is one `${payload:path}` token.
+    pub fn sole_payload_path(&self) -> Option<&str> {
+        match self.segments.as_slice() {
+            [Segment::Token(_)] => self.single_payload_path.as_deref(),
+            _ => None,
+        }
     }
 
     /// Whether every token is derived from data that remains stable across message replays.
@@ -234,14 +250,14 @@ impl CompiledTemplate {
     }
 
     fn render_inner(&self, msg: Option<&CanonicalMessage>, strict: bool) -> Option<Vec<u8>> {
-        let payload = self.parse_payload(msg);
+        let mut payload = self.parse_payload(msg);
 
         let mut out = Vec::with_capacity(self.literal_len + 16);
         for seg in &self.segments {
             match seg {
                 Segment::Literal(b) => out.extend_from_slice(b),
                 Segment::Token(tok) => {
-                    let value = match self.resolve(tok, msg, &payload) {
+                    let value = match self.resolve(tok, msg, &mut payload) {
                         Some(value) => value,
                         None if strict => return None,
                         None => String::new(),
@@ -266,7 +282,7 @@ impl CompiledTemplate {
             return Payload::None;
         };
         match &self.single_payload_path {
-            Some(path) => Payload::Field(pick_path(&msg.payload, path)),
+            Some(_) => Payload::Field(pick_path(&msg.payload, &self.single_payload_segments)),
             None => match serde_json::from_slice(&msg.payload) {
                 Ok(doc) => Payload::Doc(doc),
                 Err(_) => Payload::None,
@@ -281,11 +297,15 @@ impl CompiledTemplate {
         &self,
         tok: &Token,
         msg: Option<&CanonicalMessage>,
-        payload: &Payload,
+        payload: &mut Payload,
     ) -> Option<String> {
         match &tok.source {
             Source::Payload(path) => match payload {
-                Payload::Field(value) => value.as_ref().map(value_to_string),
+                // The one payload token of the template, so the value can be moved out.
+                Payload::Field(value) => value.take().map(|value| match value {
+                    Value::String(text) => text,
+                    other => value_to_string(&other),
+                }),
                 Payload::Doc(doc) => walk(doc, path).map(value_to_string),
                 Payload::None => None,
             },
@@ -446,22 +466,29 @@ enum Payload {
     Field(Option<Value>),
 }
 
-/// Deserialize only the value at `path`, skipping every other field.
+/// The non-empty segments of a dotted payload path.
+fn path_segments(path: &str) -> Vec<String> {
+    path.split('.')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Deserialize only the value at `segments`, skipping every other field.
 ///
 /// Equivalent to `walk(&serde_json::from_slice(bytes)?, path)` — the picked subtree is built
 /// as a normal `Value`, so rendering is byte-identical — but the rest of the document is
 /// discarded as it is scanned instead of being allocated.
-fn pick_path(bytes: &[u8], path: &str) -> Option<Value> {
-    let segs: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+fn pick_path(bytes: &[u8], segments: &[String]) -> Option<Value> {
     let mut de = serde_json::Deserializer::from_slice(bytes);
-    let picked = Pick(&segs).deserialize(&mut de).ok().flatten();
+    let picked = Pick(segments).deserialize(&mut de).ok().flatten();
     // Keep `from_slice`'s strictness: trailing garbage is still a parse failure.
     de.end().ok()?;
     picked
 }
 
 #[derive(Clone, Copy)]
-struct Pick<'a>(&'a [&'a str]);
+struct Pick<'a>(&'a [String]);
 
 impl<'de, 'a> DeserializeSeed<'de> for Pick<'a> {
     type Value = Option<Value>;
@@ -476,7 +503,7 @@ impl<'de, 'a> DeserializeSeed<'de> for Pick<'a> {
 
 struct PickVisitor<'a> {
     head: &'a str,
-    rest: &'a [&'a str],
+    rest: &'a [String],
 }
 
 // Scalars are left to the default `Visitor` methods, which error. `pick_path` maps that to
@@ -675,7 +702,7 @@ mod tests {
                 let expected = serde_json::from_slice::<Value>(payload)
                     .ok()
                     .and_then(|doc| walk(&doc, path).cloned());
-                let actual = pick_path(payload, path);
+                let actual = pick_path(payload, &path_segments(path));
                 assert_eq!(
                     actual,
                     expected,

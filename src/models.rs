@@ -428,6 +428,8 @@ pub enum Middleware {
     Otel(OtelMiddleware),
     /// Asks other endpoints per message and writes their responses into the payload. Input and output.
     Lookup(Box<LookupMiddleware>),
+    /// Keeps a running state per key (sums, counters, moving averages) and writes it into the payload. Input and output.
+    Aggregate(Box<AggregateMiddleware>),
     Dlq(Box<DeadLetterQueueMiddleware>),
     Retry(RetryMiddleware),
     RandomPanic(RandomPanicMiddleware),
@@ -555,6 +557,94 @@ pub struct LookupEntry {
 
 fn default_lookup_concurrency() -> usize {
     16
+}
+
+/// Aggregate middleware configuration.
+///
+/// Keeps one state document per key in this process and updates it with every message:
+/// running sums, counters, moving averages. The message is not consumed; it leaves with
+/// the state written into its payload. Requires the `aggregate` feature.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AggregateMiddleware {
+    /// Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it they live in memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<String>,
+    /// With a `store`: `shared` is correct with several instances, `single_writer` is faster with one.
+    #[serde(default)]
+    pub consistency: AggregateConsistency,
+    /// States kept in memory per entry; beyond it the least recently used are dropped. Defaults to 1000000, 0 is unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_keys: Option<usize>,
+    /// Key template selecting the state, e.g. `${payload:sensor_id}`. Use `entries` for several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// Expression returning the new state; reads payload fields, `meta.<key>` and `state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    /// Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<std::collections::BTreeMap<String, String>>,
+    /// Expression over `state` shaping what is written to the message. Defaults to the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Dotted payload path the result is written to, e.g. `features.sensor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
+    /// Which state the message carries: after (`updated`) or before (`previous`) its own update.
+    #[serde(default)]
+    pub emit: AggregateEmit,
+    /// Further aggregates over other keys, updated by the same message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<AggregateEntry>,
+}
+
+/// One aggregate of an `aggregate` middleware.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AggregateEntry {
+    /// Key template selecting the state, e.g. `${payload:sensor_id}`.
+    pub key: String,
+    /// Expression returning the new state; reads payload fields, `meta.<key>` and `state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
+    /// Built-in aggregates instead of `expression`, e.g. `n: count`, `avg: ema(reading, 0.1)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fields: Option<std::collections::BTreeMap<String, String>>,
+    /// Expression over `state` shaping what is written to the message. Defaults to the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Dotted payload path the result is written to, e.g. `features.sensor`.
+    pub into: String,
+    /// Which state the message carries: after (`updated`) or before (`previous`) its own update.
+    #[serde(default)]
+    pub emit: AggregateEmit,
+}
+
+/// Which state an `aggregate` entry writes into the message.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateEmit {
+    /// The state including this message.
+    #[default]
+    Updated,
+    /// The state before this message; `null` for a key seen for the first time.
+    Previous,
+}
+
+/// How an `aggregate` middleware with a `store` keeps its states consistent.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateConsistency {
+    /// Loads and writes the states of every batch; correct with several instances.
+    #[default]
+    Shared,
+    /// Keeps the states in memory and writes them behind; correct with one instance only.
+    SingleWriter,
 }
 
 /// Dead-Letter Queue (DLQ) middleware configuration.
@@ -1807,6 +1897,11 @@ pub struct MongoDbConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(skip))]
     pub update: Option<String>,
+    /// Internal: top-level field that lets one `update` call serve all of a key's messages in a
+    /// batch. Must start with `_mqb`; cleared after the batch (best effort), never in answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    pub update_batch_field: Option<String>,
     /// The ID used for the cursor in sequenced mode. If not provided, consumption starts from the current sequence (ephemeral).
     pub cursor_id: Option<String>,
     /// (Optional) Collection to store sequence counters and cursor positions. Defaults to the message collection if not set.
@@ -2045,8 +2140,9 @@ pub struct GrpcConfig {
     /// TLS configuration.
     #[serde(default)]
     pub tls: TlsConfig,
-    /// If `true`, start an embedded tonic gRPC server that accepts incoming `Publish` /
-    /// `PublishBatch` RPCs. If `false` (the default), connect to a remote server as a client.
+    /// If `true`, start an embedded tonic gRPC server that accepts `Publish` / `PublishBatch`
+    /// RPCs, plus one descriptor-defined unary method when `method_name` is set. If `false`
+    /// (the default), connect to a remote server as a client.
     #[serde(default)]
     pub server_mode: bool,
     /// HTTP/2 stream-level initial window size in bytes. Applies in both modes.
@@ -2070,7 +2166,7 @@ pub struct GrpcConfig {
     /// Maximum size of an encoded outgoing message in bytes. Default unlimited.
     #[serde(default)]
     pub max_encoding_message_size: Option<usize>,
-    /// Compiled protobuf FileDescriptorSet for dynamic client mode.
+    /// Compiled protobuf FileDescriptorSet for dynamic calls or a served method.
     #[serde(default)]
     pub descriptor_set_path: Option<String>,
     /// Compiled protobuf FileDescriptorSet bytes for embedded callers. Takes precedence
@@ -2080,10 +2176,10 @@ pub struct GrpcConfig {
     /// Discover descriptors from the remote gRPC server reflection v1 service.
     #[serde(default)]
     pub reflection: bool,
-    /// Fully-qualified protobuf service name for dynamic client mode.
+    /// Fully-qualified protobuf service name for dynamic calls or a served method.
     #[serde(default)]
     pub service_name: Option<String>,
-    /// RPC method name for dynamic client mode.
+    /// RPC method name for dynamic calls or a served unary method.
     #[serde(default)]
     pub method_name: Option<String>,
     /// JSON request mapped to the dynamic protobuf input message.

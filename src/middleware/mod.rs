@@ -10,6 +10,8 @@ use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
 use std::sync::Arc;
 
+#[cfg(feature = "aggregate")]
+pub(crate) mod aggregate;
 mod buffer;
 #[cfg(feature = "compression")]
 pub(crate) mod compression;
@@ -104,7 +106,8 @@ fn otel_inactive(route_name: &str) -> Result<()> {
 /// Wraps a `MessageConsumer` with the middlewares specified in the endpoint configuration.
 ///
 /// Middlewares are applied in reverse order of the configuration list.
-/// This means the first middleware in the config is the outermost layer, executed first.
+/// This means the first middleware in the config is the outermost layer: a received message
+/// passes the last entry first and the first entry last.
 pub async fn apply_middlewares_to_consumer(
     mut consumer: Box<dyn MessageConsumer>,
     endpoint: &Endpoint,
@@ -151,6 +154,8 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Lookup(cfg) => {
                 Box::new(lookup::LookupConsumer::new(consumer, cfg, route_name).await?)
             }
+            #[cfg(feature = "aggregate")]
+            Middleware::Aggregate(cfg) => Box::new(aggregate::AggregateConsumer::new(consumer, cfg, route_name).await?),
             Middleware::Timeout(_) => {
                 return Err(anyhow::anyhow!(
                     "[middleware:{route_name}] `timeout` bounds sends and is output-only. Move it to the route's output endpoint."
@@ -214,6 +219,8 @@ pub async fn apply_middlewares_to_publisher(
             Middleware::Lookup(cfg) => {
                 Box::new(lookup::LookupPublisher::new(publisher, cfg, route_name).await?)
             }
+            #[cfg(feature = "aggregate")]
+            Middleware::Aggregate(cfg) => Box::new(aggregate::AggregatePublisher::new(publisher, cfg, route_name).await?),
             #[cfg(feature = "metrics")]
             Middleware::Metrics(cfg) => {
                 Box::new(MetricsPublisher::new(publisher, cfg, route_name, "output"))

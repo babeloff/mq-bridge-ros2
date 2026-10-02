@@ -42,7 +42,7 @@ Install the library for your language:
 
 | Language | Package | Install |
 | :--- | :--- | :--- |
-| Rust | [`mq-bridge`](https://crates.io/crates/mq-bridge) | `cargo add mq-bridge --features kafka,nats` |
+| Rust | [`mq-bridge`](https://crates.io/crates/mq-bridge) | `cargo add mq-bridge --features kafka,nats,yaml` |
 | Python | [`mq-bridge`](python/mq-bridge-py/README.md) ([PyPI](https://pypi.org/project/mq-bridge/)) | `pip install mq-bridge` |
 | Node.js | [`mq-bridge`](node/mq-bridge-node/README.md) ([npm](https://www.npmjs.com/package/mq-bridge)) | `npm install mq-bridge` |
 
@@ -71,9 +71,7 @@ Route.fromFile("routes.yaml", "kafka_to_nats").start();
 ```
 
 ```rust
-let config: mq_bridge::models::Config =
-    serde_yaml_ng::from_str(&std::fs::read_to_string("routes.yaml")?)?;
-config["kafka_to_nats"].deploy("kafka_to_nats").await?; // runs in the background
+mq_bridge::deploy_file("routes.yaml").await?; // every route in the file, in the background
 ```
 
 Attach a handler (`with_handler` / `withHandler`) when you need business logic in between. **No code at all?** [`mq-bridge-app`](apps/mq-bridge-app) runs the same engine from the command line or a desktop UI:

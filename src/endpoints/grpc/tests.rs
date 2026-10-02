@@ -378,7 +378,8 @@ mod dynamic {
     use super::super::GrpcStatusError;
     use crate::models::{GrpcConfig, SecretExtractor, TlsConfig};
     use crate::traits::{
-        ConsumerError, MessageConsumer, MessagePublisher, PublisherError, SentBatch,
+        ConsumerError, MessageConsumer, MessageDisposition, MessagePublisher, PublisherError,
+        SentBatch,
     };
     use crate::CanonicalMessage;
     use std::collections::HashMap;
@@ -634,6 +635,137 @@ mod dynamic {
             "the same RPC response must have a deterministic id"
         );
         handle.abort();
+    }
+
+    fn served_config(method: &str) -> GrpcConfig {
+        GrpcConfig::new("127.0.0.1:0")
+            .with_server_mode(true)
+            .with_descriptor_set_bytes(dynamic_fixture::FILE_DESCRIPTOR_SET.to_vec())
+            .with_service_name("mqbridge.test.v1.DynamicFixture")
+            .with_method_name(method)
+    }
+
+    #[tokio::test]
+    async fn server_mode_serves_a_descriptor_defined_unary_method() {
+        let config = served_config("Unary");
+        let mut server = ServerModeConsumer::new(&config, &config.url).await.unwrap();
+        let address = server.bound_addr();
+        let route = tokio::spawn(async move {
+            for _ in 0..2 {
+                let batch = server.receive_batch(16).await.unwrap();
+                let replies = batch
+                    .messages
+                    .iter()
+                    .map(|msg| {
+                        let request: serde_json::Value =
+                            serde_json::from_slice(&msg.payload).unwrap();
+                        assert_eq!(
+                            msg.metadata["mq_bridge.topic"],
+                            "/mqbridge.test.v1.DynamicFixture/Unary"
+                        );
+                        let sequence: i64 = request["sequence"].as_str().unwrap().parse().unwrap();
+                        let reply = serde_json::json!({
+                            "data": request["data"],
+                            "sequence": (sequence + 1).to_string(),
+                        });
+                        MessageDisposition::Reply(CanonicalMessage::from_json(reply).unwrap())
+                    })
+                    .collect();
+                (batch.commit)(replies).await.unwrap();
+            }
+            server
+        });
+
+        let client_config = dynamic_config(address, "Unary").with_request(serde_json::Value::Null);
+        let publisher = DynamicPublisher::new(&client_config, &client_config.url)
+            .await
+            .unwrap();
+        for sequence in [41, 99] {
+            let payload = format!(r#"{{"data":"aGk=","sequence":"{sequence}"}}"#);
+            let sent = publisher
+                .send_batch(vec![CanonicalMessage::new(payload.into_bytes(), None)])
+                .await
+                .unwrap();
+            let SentBatch::Partial { responses, failed } = sent else {
+                panic!("a unary call replies");
+            };
+            assert!(failed.is_empty(), "{failed:?}");
+            let json: serde_json::Value =
+                serde_json::from_slice(&responses.unwrap()[0].payload).unwrap();
+            assert_eq!(json["sequence"], (sequence + 1).to_string());
+            assert_eq!(json["data"], "aGk=");
+        }
+        drop(route.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_route_replies_through_a_served_unary_method() {
+        use crate::models::{Endpoint, EndpointType, Route};
+        use crate::outcomes::Handled;
+        let mut config = served_config("Unary");
+        config.url = format!("127.0.0.1:{}", crate::test_utils::get_free_port());
+        let address = config.url.parse().unwrap();
+        let route = Route::new(
+            Endpoint::new(EndpointType::Grpc(config)),
+            Endpoint::new_response(),
+        )
+        .with_handler(|msg: CanonicalMessage| async move {
+            let request: serde_json::Value = serde_json::from_slice(&msg.payload).unwrap();
+            let sequence: i64 = request["sequence"].as_str().unwrap().parse().unwrap();
+            let reply = serde_json::json!({ "sequence": (sequence * 2).to_string() });
+            Ok(Handled::Publish(
+                CanonicalMessage::from_json(reply).unwrap(),
+            ))
+        });
+        let handle = route.run("grpc-served-unary").await.unwrap();
+
+        let client_config = dynamic_config(address, "Unary").with_request(serde_json::Value::Null);
+        let publisher = DynamicPublisher::new(&client_config, &client_config.url)
+            .await
+            .unwrap();
+        let sent = publisher
+            .send_batch(vec![CanonicalMessage::new(
+                br#"{"sequence":"21"}"#.to_vec(),
+                None,
+            )])
+            .await
+            .unwrap();
+        let SentBatch::Partial { responses, .. } = sent else {
+            panic!("a unary call replies");
+        };
+        let json: serde_json::Value =
+            serde_json::from_slice(&responses.unwrap()[0].payload).unwrap();
+        assert_eq!(json["sequence"], "42");
+        handle.stop().await;
+    }
+
+    #[tokio::test]
+    async fn server_mode_rejects_unservable_method_configs() {
+        let err = ServerModeConsumer::new(&served_config("Stream"), "127.0.0.1:0")
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("unary methods only"), "{err}");
+
+        let mut half = served_config("Unary");
+        half.service_name = None;
+        let err = ServerModeConsumer::new(&half, "127.0.0.1:0")
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("both service_name and method_name"),
+            "{err}"
+        );
+
+        let mut no_descriptor = served_config("Unary");
+        no_descriptor.descriptor_set_bytes = None;
+        let err = ServerModeConsumer::new(&no_descriptor, "127.0.0.1:0")
+            .await
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("descriptor_set"), "{err}");
     }
 
     #[tokio::test]
@@ -1169,6 +1301,7 @@ mod server {
             rxs: vec![rx],
             drain_start: 0,
             exit_on_empty: false,
+            served_path: None,
         };
         let (completion, receipt) = oneshot::channel();
         tx.send(InboundDelivery {

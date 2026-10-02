@@ -2,7 +2,82 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
-## Unreleased
+## 0.4.17
+
+### Added
+
+- **Short Rust entrypoints, like the Python and Node bindings.** `Route::from_file(path, name)`,
+  `Route::from_str` and `Route::from_config` load a route from a config document;
+  `Publisher::from_file`/`from_str` load a publisher and `Publisher::send_json` sends any
+  `Serialize` value. `mq_bridge::deploy_file(path)` deploys every route and registers every
+  publisher of a file in one call. YAML needs the new `yaml` feature (in `full` and
+  `portable`); JSON works without it. The existing API is unchanged.
+- **gRPC server mode can serve a descriptor-defined unary method.** Set `descriptor_set_path`
+  (or `descriptor_set_bytes`), `service_name` and `method_name` on a `server_mode` input. It
+  serves that method next to `mqbridge.Bridge`. Each call arrives as JSON (the canonical proto3
+  mapping), and a `response` output's JSON reply is encoded as the method's output message.
+  Streaming methods are rejected. See [docs/GRPC.md](docs/GRPC.md#dynamic-server-method).
+- **HTTP replies can carry trailers.** Reply metadata named `http_trailer.<name>` is sent as
+  an HTTP trailer instead of a header, e.g. `http_trailer.grpc-status` for gRPC over HTTP/2.
+- **`aggregate` middleware.** Keeps a running state per key in the process (sums, counters,
+  moving averages) and writes it into each message, on an input or an output. The update is an
+  expression over the payload, metadata and the previous `state`; an optional `output`
+  expression shapes what the message carries, and `entries` update several keys from one
+  message. `fields` offers built-in aggregates (`count`, `sum`, `min`, `max`, `last`, `mean`,
+  `stddev`, `variance`, and `ema`, `ema_stddev`, `ema_variance` without start bias) that fold about 700k msg/s for five keys on one core. States
+  live in memory, or with `store` in PostgreSQL, SQLite or MongoDB: `consistency: shared`
+  (default) is correct with several instances, `single_writer` keeps the states in memory,
+  writes them behind and acks a batch only once they are stored. `max_keys` (default one
+  million per entry) bounds the states held in memory: the least recently used are dropped,
+  and with `single_writer` loaded again from the store when their key returns. Needs the new `aggregate`
+  feature (in `middleware`). See [REFERENCE.md](docs/REFERENCE.md#aggregate).
+- **Batched writing `sqlx.lookup_query`.** A per-message `lookup_query` that writes (an upsert
+  keeping a counter or moving average) runs a batch in order in one transaction, each message
+  seeing the previous one's write. PostgreSQL runs it as one call to a per-connection
+  temporary function, with the values bound as one `jsonb` parameter and an advisory lock
+  that keeps concurrent batches from deadlocking; SQLite uses `BEGIN IMMEDIATE`. A rejected
+  message answers `null` and does not fail the rest. On PostgreSQL rows are then encoded by
+  `to_json`. See [REFERENCE.md](docs/REFERENCE.md#lookup).
+- **Batched MongoDB `update` lookups.** A `mongodb` lookup with `find` and `update` (a keyed
+  counter or moving average) answers with the updated document; set `update_batch_field` to
+  a top-level field name starting with `_mqb` (e.g. `_mqb`) and all of a key's messages in a batch run as one
+  atomic `update` call, up to 64 at a time, each answered with its own intermediate document.
+  Distinct keys still run in parallel. `$set`, `$inc`, `$mul`, `$min`, `$max`, `$unset` on
+  top-level fields and `$set`/`$addFields`/`$unset` pipelines fold; anything else runs one
+  call per message, and so does a `find` that reads a field the `update` writes (a guard
+  such as `balance >= 10`), so it is rechecked for every message. The field holds the
+  batch's intermediate values and is never in answers; it is cleared after the batch on a
+  best-effort basis, so an interrupted batch can leave them in the document until that key's
+  next batched write. Folded `$inc`/`$mul` treat a `null` field as 0 and `$inc` adds to a date,
+  where a single update rejects both.
+- **SQLite math functions.** The bundled SQLite in `mqb`, the Docker image and the Python and
+  Node packages is built with `exp`, `ln`, `pow` and the other math functions, e.g. for a
+  time-decayed average in a `lookup_query`. Rust users set
+  `LIBSQLITE3_FLAGS=SQLITE_ENABLE_MATH_FUNCTIONS` in their own build.
+- **`mqb checkpoint show | reset | set`.** Inspect or edit a source's resume position without
+  touching the store by hand. Name it with `--route NAME` from the config, or with the
+  SOURCE, TARGET and `--filter` of a `copy --resume` job. `reset` prints the old value so
+  `set --value` can undo it. Works for SQL, ClickHouse and object-store cursor readers and
+  MongoDB change streams; Postgres CDC is refused, its slot is authoritative. See
+  [Checkpoints](apps/mq-bridge-app/dev/docs/cookbook/checkpoints.md#inspecting-and-editing-a-checkpoint).
+- **`CheckpointStore::clear`**, implemented for the file, SQL, MongoDB and object-store
+  backends. The default returns an error, so existing implementations still compile.
+
+### Changed
+
+- **Checkpoints record which source wrote them.** A position is now stored as
+  `{"mqb_checkpoint":1,"source":…,"value":…,"updated_at_ms":…}`, the source being e.g.
+  `sqlx:<table>:<cursor_column>`. A run refuses a position written by a different source,
+  e.g. after `cursor_column` changed under the same `cursor_id`, instead of resuming from a
+  value of another column. Plain values from 0.4.16 and older still load and are upgraded on
+  the next save. **Downgrading loses the position:** an older mq-bridge cannot read the new
+  format and starts from the beginning.
+- **mq-bridge-app: a route keeps its identity across restarts.** A `routes:` entry, and a
+  consumer or publisher without an `id`, got a random id on every start. Stores named after
+  the route (`deduplication`, `aggregate`) therefore began empty after a restart. The id is
+  now derived from the name. An `id` written in the config is used as before.
+
+## 0.4.16
 
 ### Fixed
 

@@ -24,6 +24,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 
 use anyhow::Context;
 
+mod checkpoint_cmd;
 mod mcp;
 mod mcp_install;
 
@@ -195,6 +196,10 @@ enum Command {
     /// Print a copyable, self-contained command for the loaded YAML/JSON config.
     /// Credential values are replaced by environment-variable placeholders.
     ToCli,
+
+    /// Show, reset, or set the resume checkpoint of a configured route or of a
+    /// `copy --resume` job.
+    Checkpoint(checkpoint_cmd::CheckpointArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -507,6 +512,11 @@ async fn main() -> anyhow::Result<()> {
                 workspace_path,
             )
             .await;
+        }
+        Some(Command::Checkpoint(checkpoint_args)) => {
+            init_copy_logging(args.color, checkpoint_args.verbose());
+            load_cli_plugins(&args.plugins)?;
+            return checkpoint_cmd::run(checkpoint_args, args.config, args.config_str).await;
         }
         Some(Command::ToCli) => {
             let (config, _) = load_config(
@@ -1033,14 +1043,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     use mq_bridge::route::RouteOutcome;
 
     let (from, to) = copy_endpoints(&args)?;
-    // Expanded here rather than by the shell, so a single-quoted URI can name a
-    // credential without it ever appearing in the history or in `argv`.
-    let from = copy_pipeline::expand_uri_variables(from).context("invalid copy source endpoint")?;
-    let to =
-        copy_pipeline::expand_uri_variables(to).context("invalid copy destination endpoint")?;
-    let mut input = endpoint_from_uri(&from).context("invalid copy source endpoint")?;
-    make_listen_address(&mut input).context("invalid copy source endpoint")?;
-    let output = endpoint_from_uri(&to).context("invalid copy destination endpoint")?;
+    let (mut input, output) = copy_route_endpoints(from, to)?;
     let resume = if args.resume {
         Some(copy_pipeline::configure_resume(
             &mut input,
@@ -1085,8 +1088,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
 
     info!(
         // Redacted: this line is the one that reaches journald, Docker logs and CI.
-        from = %copy_pipeline::redact_uri(&from),
-        to = %copy_pipeline::redact_uri(&to),
+        from = %copy_pipeline::redact_uri(from),
+        to = %copy_pipeline::redact_uri(to),
         filtered = args.filter.is_some(),
         // Names the mechanism, not just the flag: which one the source picked
         // is what tells you where a restart will actually pick up from.
@@ -1217,6 +1220,23 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
             &throughput(&copied, &read, started),
         );
     }
+}
+
+/// Builds a copy's source and destination. `checkpoint` shares it, so both derive
+/// the same resume identity from the same URIs.
+fn copy_route_endpoints(
+    from: &str,
+    to: &str,
+) -> anyhow::Result<(mq_bridge::models::Endpoint, mq_bridge::models::Endpoint)> {
+    // Expanded here rather than by the shell, so a single-quoted URI can name a
+    // credential without it ever appearing in the history or in `argv`.
+    let from = copy_pipeline::expand_uri_variables(from).context("invalid copy source endpoint")?;
+    let to =
+        copy_pipeline::expand_uri_variables(to).context("invalid copy destination endpoint")?;
+    let mut input = endpoint_from_uri(&from).context("invalid copy source endpoint")?;
+    make_listen_address(&mut input).context("invalid copy source endpoint")?;
+    let output = endpoint_from_uri(&to).context("invalid copy destination endpoint")?;
+    Ok((input, output))
 }
 
 fn copy_endpoints(args: &CopyArgs) -> anyhow::Result<(&str, &str)> {
