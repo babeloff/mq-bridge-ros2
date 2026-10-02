@@ -47,10 +47,6 @@ fn default_route_migrated_capture() -> ConsumerMessageCaptureConfig {
     }
 }
 
-fn generate_config_id() -> String {
-    Uuid::now_v7().to_string()
-}
-
 /// The id of an entity that has none in the config: derived from its kind and name, so a
 /// restart finds the stores (deduplication, aggregate, ...) named after it again.
 fn stable_config_id(kind: &str, name: &str) -> String {
@@ -63,14 +59,16 @@ fn stable_config_id(kind: &str, name: &str) -> String {
         .to_string()
 }
 
-/// A stable id for `name`, or a random one when another entity already has it.
+/// A stable id for `name`; when another entity already has it, the next free one of a
+/// counted series, so a collision resolves to the same id on every load.
 fn unused_config_id(kind: &str, name: &str, known_ids: &HashSet<String>) -> String {
-    let id = stable_config_id(kind, name);
-    if known_ids.contains(&id) {
-        generate_config_id()
-    } else {
-        id
+    let mut id = stable_config_id(kind, name);
+    let mut attempt = 1u32;
+    while known_ids.contains(&id) {
+        attempt += 1;
+        id = stable_config_id(kind, &format!("{}#{attempt}", name.trim()));
     }
+    id
 }
 
 #[derive(

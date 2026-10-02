@@ -1037,8 +1037,10 @@ each message seeing its predecessors' writes.
   one message at a time; the rejected message answers `null`. A query that cannot run inside
   a function (e.g. its own `WITH … INSERT`) falls back, with a warning, to one query per
   message, as on the other databases.
-- The redo commits message by message. If it fails with a retryable error midway, the retried
-  batch writes the already committed messages again: at-least-once, as without batching.
+- The redo runs in one transaction with a savepoint per message: a rejected message rolls
+  back only its own write, any other failure rolls the whole redo back, so a retry never
+  repeats a half-committed redo. A batch that committed and then fails downstream is written
+  again when it is retried: at-least-once, as without batching.
 - On PostgreSQL the row is encoded by `to_json`: `NUMERIC` and timestamps need no `::text`
   cast, `bytea` reads `"\\x…"`, `real` keeps its `float4` digits and `NaN` is a string.
   Where the function is not used (behind a pooler, or a query it cannot wrap), rows come from
