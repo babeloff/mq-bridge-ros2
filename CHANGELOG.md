@@ -4,7 +4,8 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## 0.4.18
 
-A documentation and packaging release. No library or app behaviour changes.
+A documentation and packaging release, with one behaviour change: secret extraction now covers
+custom endpoints.
 
 ### Added
 
@@ -16,11 +17,18 @@ A documentation and packaging release. No library or app behaviour changes.
   the ClickHouse endpoint versus `s3()`.
 - **`llms.txt`.** A capability index for agents, at the repository root and published with the
   book. The docs workflow fails if the book stops shipping it.
+- **A Debezium recipe in the cookbook.** MySQL, MariaDB, SQL Server and Oracle change capture by
+  running Debezium Server beside mq-bridge, handed over by HTTP or through a broker.
 - **A feature-flag table on docs.rs.** The crate docs list each Cargo feature with what it
   enables, and link to the README's capabilities table.
 
 ### Changed
 
+- **Secret extraction covers custom endpoints and middlewares.** `extract_config_secrets` and
+  the app's `balanced` config security mode now move credentials out of a `custom` config, such
+  as a Connect, Pulsar or Meilisearch endpoint: fields named like a credential and URLs
+  carrying `user:pass@`. They used to stay in the config file. The cookbook's Secrets page
+  lists what is recognised and what is left in place.
 - **Package metadata describes the ETL scope.** The crates.io, PyPI and npm descriptions,
   keywords and categories now cover CDC, Parquet and object storage as well as the brokers. The
   homepage points at the book instead of the repository.

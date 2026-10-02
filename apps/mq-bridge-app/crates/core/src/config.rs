@@ -2502,6 +2502,79 @@ publishers:
     }
 
     #[test]
+    fn test_balanced_custom_endpoint_secrets_survive_reload() {
+        let yaml = r#"
+config_security:
+  mode: balanced
+routes:
+  rt_custom_route:
+    input:
+      memory: { topic: "rt_custom_in" }
+    output:
+      custom:
+        name: "rt_custom"
+        config:
+          connector: "amqp_0_9"
+          urls: ["amqp://rt_user:rt_url_pass@localhost:5672/"]
+          sasl: { user: "rt_user", password: "rt_sasl_pass" }
+publishers:
+  - name: "rt_custom_pub"
+    endpoint:
+      custom:
+        name: "rt_custom"
+        config:
+          connector: "elasticsearch_v8"
+          api_key: "rt_api_key"
+"#;
+        let config: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let secret_store = RecordingSecretStore::default();
+        let path = std::env::temp_dir().join("mqb-config-balanced-custom-reload.yml");
+        let path_str = path.to_str().unwrap().to_string();
+        config
+            .save_with_secret_store(&path_str, &secret_store)
+            .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        for secret in ["rt_url_pass", "rt_sasl_pass", "rt_api_key"] {
+            assert!(!saved.contains(secret), "{secret} left in {saved}");
+        }
+
+        let stored = secret_store.stored.lock().unwrap()[0].clone();
+        let _env = env_lock();
+        let _vars = EnvVarsGuard::capture(stored.keys().cloned());
+        unsafe {
+            for (key, value) in &stored {
+                std::env::set_var(key, value);
+            }
+        }
+        let cli = load_config_internal(Some(path_str.clone()), None, None, None, false, true);
+        let desktop = load_config_at_path(path_str);
+        let _ = std::fs::remove_file(path);
+
+        let custom_config = |endpoint: &Endpoint| match &endpoint.endpoint_type {
+            EndpointType::Custom { config, .. } => Some(config.clone()),
+            _ => None,
+        };
+        // Loading migrates the route's output into a publisher.
+        for (loaded, _) in [cli.unwrap(), desktop.unwrap()] {
+            let reloaded: Vec<_> = loaded
+                .publishers
+                .iter()
+                .filter_map(|publisher| custom_config(&publisher.endpoint))
+                .collect();
+            for original in [
+                &config.routes["rt_custom_route"].route.output,
+                &config.publishers[0].endpoint,
+            ] {
+                let original = custom_config(original).unwrap();
+                assert!(
+                    reloaded.contains(&original),
+                    "{original} not in {reloaded:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_save_env_temporary_messages_extracts_and_stores_secrets() {
         let config = sample_security_config("env_temporary_messages");
         let secret_store = RecordingSecretStore::default();

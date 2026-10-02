@@ -32,6 +32,7 @@
   - [Checkpoints & resumable copies](cookbook/checkpoints.md)
   - [Retries & backoff](cookbook/retries.md)
   - [Dead-letter queues](cookbook/dlq.md)
+  - [MySQL, SQL Server & Oracle CDC via Debezium](cookbook/debezium.md)
 - [Shaping & routing]()
   - [Transform & schema mapping](cookbook/transform.md)
   - [Content-based routing (switch)](cookbook/switch.md)

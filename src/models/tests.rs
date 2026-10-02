@@ -623,6 +623,77 @@ kafka_to_nats:
     }
 
     #[test]
+    fn custom_config_secrets_are_extracted_by_field_name_and_url() {
+        let mut endpoint = Endpoint {
+            endpoint_type: EndpointType::Custom {
+                name: "connect".to_string(),
+                config: serde_json::json!({
+                    "connector": "amqp_0_9",
+                    "urls": ["amqp://guest:guest@localhost:5672/", "amqp://other:5672/"],
+                    "key": "${! json(\"id\") }",
+                    "max_tokens": "5",
+                    "password": "${DB_PASSWORD}",
+                    "token": "12345",
+                    "sasl": { "user": "bob", "password": "pw" },
+                    "tls": { "client_certs": [{ "cert": "c", "private_key": "pk" }] },
+                    "dsn": "bob:pw@tcp(localhost:3306)/db",
+                    "X-Api-Token": "kept",
+                }),
+            },
+            middlewares: vec![Middleware::Custom {
+                name: "connect".to_string(),
+                config: serde_json::json!({ "api_key": "mw-key" }),
+            }],
+            handler: None,
+        };
+
+        let mut secrets = HashMap::new();
+        endpoint.extract_secrets("MQB__R__OUTPUT", &mut secrets);
+
+        let expected: HashMap<String, String> = [
+            (
+                "MQB__R__OUTPUT__CUSTOM__CONFIG__URLS__0",
+                "amqp://guest:guest@localhost:5672/",
+            ),
+            ("MQB__R__OUTPUT__CUSTOM__CONFIG__SASL__PASSWORD", "pw"),
+            (
+                "MQB__R__OUTPUT__CUSTOM__CONFIG__TLS__CLIENT_CERTS__0__PRIVATE_KEY",
+                "pk",
+            ),
+            (
+                "MQB__R__OUTPUT__CUSTOM__CONFIG__DSN",
+                "bob:pw@tcp(localhost:3306)/db",
+            ),
+            (
+                "MQB__R__OUTPUT__MIDDLEWARES__0__CUSTOM__CONFIG__API_KEY",
+                "mw-key",
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        assert_eq!(secrets, expected);
+
+        let EndpointType::Custom { config, .. } = &endpoint.endpoint_type else {
+            panic!("expected a custom endpoint");
+        };
+        assert_eq!(
+            config,
+            &serde_json::json!({
+                "connector": "amqp_0_9",
+                "urls": ["", "amqp://other:5672/"],
+                "key": "${! json(\"id\") }",
+                "max_tokens": "5",
+                "password": "${DB_PASSWORD}",
+                "token": "12345",
+                "sasl": { "user": "bob" },
+                "tls": { "client_certs": [{ "cert": "c" }] },
+                "X-Api-Token": "kept",
+            })
+        );
+    }
+
+    #[test]
     fn grpc_binary_metadata_is_extracted_reversibly() {
         let mut grpc = GrpcConfig::new("https://localhost:50051");
         grpc.binary_metadata
