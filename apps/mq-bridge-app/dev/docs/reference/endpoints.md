@@ -94,6 +94,8 @@ Databases have no native pub/sub, so a database source is read one of two ways:
     collection for changes from now on. Both emit `insert`/`update`/`replace`/`delete` tagged
     with `mongodb.operation` and checkpoint under `cursor_id`. Change streams need a replica
     set; without one, use `consume: snapshot` for a one-shot read.
+  - **MySQL, MariaDB, SQL Server, Oracle, Db2** — no native endpoint. Run Debezium Server
+    beside mq-bridge and read its output; see [CDC via Debezium](../cookbook/debezium.md).
 - **Cursor polling** pages an existing table by a monotonic `cursor_column`
   (`WHERE col > $last ORDER BY col ASC`), persisting the last read value under `cursor_id`.
   Captures **appends only** — updates and deletes are not observed. Available on **SQLx**

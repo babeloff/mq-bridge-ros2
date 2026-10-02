@@ -139,8 +139,10 @@ endpoint needs the plugin loaded up front, as `mqb`'s `plugins:` list does.
 - **`publish_timeout`** (default `30s`, outputs) bounds a send. When it elapses the send fails as
   retryable, so `retry` and `dlq` take over; the timed-out batch may still arrive later.
 - **No replies.** Request/reply is not supported through a `connect` endpoint.
-- **Secrets.** mq-bridge's secret handling does not cover a custom endpoint's config. Reference
-  secrets from the environment or a file.
+- **Secrets.** The app's `balanced` config security mode moves credentials out of a `connect`
+  config as it does for native endpoints; see
+  [Secrets](../cookbook/secrets.md#custom-endpoints-and-plugins). It cannot see inside a `yaml`
+  document, so reference secrets there from the environment or a file.
 
 Details are in the plugin's [Semantics](https://github.com/marcomq/mq-bridge-connect#semantics).
 
