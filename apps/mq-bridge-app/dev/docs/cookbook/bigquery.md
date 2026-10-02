@@ -27,8 +27,8 @@ orders_to_gcs:
             required: [id]
             properties:
               id: { type: integer }
-              country: { type: string }
-              amount: { type: number }
+              country: { type: string, default: "" }
+              amount: { type: number, default: 0 }
               note: { type: string, default: "" }
     object_store:
       url: "gs://my-bucket/orders"
@@ -54,7 +54,7 @@ orders_to_gcs:
 ## Schema drift between files
 
 The Parquet schema is inferred **per batch**. An optional field that no row of a batch carries is
-**absent from that file**. Give such a field a `default` in the schema, as `note` has above, or
+**absent from that file**. Give such a field a `default` in the schema, as the optional columns have above, or
 create the BigQuery table with every column up front so a file that lacks one loads `NULL`.
 BigQuery matches Parquet columns by name.
 
@@ -71,6 +71,9 @@ FROM FILES (
   uris = ['gs://my-bucket/orders/*.parquet']
 );
 ```
+
+A wildcard load requires every matched file to have the same schema. Give every optional column a
+`default` so no file lacks it, or load files with differing schemas in separate jobs.
 
 A load job appends whatever the URI matches. Running it twice over the same files loads them
 twice, so load each file once (for example by date prefix) or use an external table instead.

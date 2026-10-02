@@ -53,7 +53,7 @@ Middleware: `connect_avro`, or inside a `connect` middleware.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `operator` | string | required | The &lt;&lt;operators, operator&gt;&gt; to execute |
+| `operator` | string | required | The operator to execute |
 | `encoding` | string | `"textual"` | An Avro encoding format to use for conversions to and from a schema. |
 | `schema` | string | `""` | A full Avro schema to use. |
 | `schema_path` | string | `""` | The path of a schema document to apply. |
@@ -62,7 +62,7 @@ Middleware: `connect_avro`, or inside a `connect` middleware.
 
 ## `azure_cosmosdb`
 
-Creates or updates messages as JSON documents in Azure CosmosDB^.
+Creates or updates messages as JSON documents in Azure CosmosDB.
 
 Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
@@ -142,7 +142,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `resource` | string | required | The `cache` resource to target with this processor. |
-| `operator` | string | required | The &lt;&lt;operators, operation&gt;&gt; to perform with the cache. |
+| `operator` | string | required | The operation to perform with the cache. |
 | `key` | string | required | A key to use with the cache. |
 | `value` | string |  | A value to use with the cache (when applicable). |
 
@@ -488,7 +488,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `type` | string | required | The metric &lt;&lt;types, type&gt;&gt; to create. |
+| `type` | string | required | The metric type to create. |
 | `name` | string | required | The name of the metric to create, this must be unique across all Redpanda Connect components otherwise it will overwrite those other metrics. |
 | `labels` | map of string |  | A map of label names and values that can be used to enrich metrics. |
 | `value` | string | `""` | For some metric types specifies a value to set, increment. |
@@ -510,9 +510,9 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 | `collection` | string | required | The name of the target collection. |
 | `operation` | string | `"insert-one"` | The mongodb operation to perform. |
 | `write_concern` | object |  | The write concern settings for the mongo connection. |
-| `document_map` | string | `""` | A bloblang map representing a document to store within MongoDB, expressed as extended JSON in canonical form^. |
-| `filter_map` | string | `""` | A bloblang map representing a filter for a MongoDB command, expressed as extended JSON in canonical form^. |
-| `hint_map` | string | `""` | A bloblang map representing the hint for the MongoDB command, expressed as extended JSON in canonical form^. |
+| `document_map` | string | `""` | A bloblang map representing a document to store within MongoDB, expressed as extended JSON in canonical form. |
+| `filter_map` | string | `""` | A bloblang map representing a filter for a MongoDB command, expressed as extended JSON in canonical form. |
+| `hint_map` | string | `""` | A bloblang map representing the hint for the MongoDB command, expressed as extended JSON in canonical form. |
 | `upsert` | bool | `false` | The upsert setting is optional and only applies for update-one and replace-one operations. |
 
 Advanced: `app_name`, `aws`, `json_marshal_mode`.
@@ -521,7 +521,7 @@ Advanced: `app_name`, `aws`, `json_marshal_mode`.
 
 ## `msgpack`
 
-Converts messages to or from the MessagePack^ format.
+Converts messages to or from the MessagePack format.
 
 Middleware: `connect_msgpack`, or inside a `connect` middleware.
 
@@ -599,13 +599,13 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 ## `parse_log`
 
-Parses common log &lt;&lt;formats&gt;&gt; into &lt;&lt;codecs, structured data&gt;&gt;. This is easier and often much faster than `grok`.
+Parses common log formats into structured data. This is easier and often much faster than `grok`.
 
 Middleware: `connect_parse_log`, or inside a `connect` middleware.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `format` | string | required | A common log &lt;&lt;formats, format&gt;&gt; to parse. |
+| `format` | string | required | A common log format to parse. |
 
 Advanced: `best_effort`, `allow_rfc3339`, `default_year`, `default_timezone`.
 
@@ -623,7 +623,7 @@ Takes a single list of processor value, not a map of fields.
 
 ## `qdrant`
 
-Query items within a Qdrant^ collection.
+Query items within a Qdrant collection.
 
 Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
@@ -672,7 +672,7 @@ Advanced: `kind`, `master`, `client_name`, `tls`, `retries`, `retry_period`.
 
 ## `redis_script`
 
-Performs actions against Redis using LUA scripts^.
+Performs actions against Redis using LUA scripts.
 
 Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
@@ -764,7 +764,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 ## `sentry_capture`
 
-Captures log events from messages and submits them to Sentry^.
+Captures log events from messages and submits them to Sentry.
 
 Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
@@ -817,7 +817,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `data_source_name` | string | required | Data source name. |
 | `query` | string | required | The query to execute. |
 | `args_mapping` | string |  | An optional Bloblang mapping which should evaluate to an array of values matching in size to the number of placeholder arguments in the field `query`. |
@@ -835,7 +835,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `dsn` | string | required | A Data Source Name to identify the target database. |
 | `table` | string | required | The table to insert to. |
 | `columns` | list of string | required | A list of columns to insert. |
@@ -853,7 +853,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `dsn` | string | required | A Data Source Name to identify the target database. |
 | `query` | string |  | The query to execute. |
 | `args_mapping` | string |  | An optional Bloblang mapping which should evaluate to an array of values matching in size to the number of placeholder arguments in the field `query`. |
@@ -872,7 +872,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `dsn` | string | required | A Data Source Name to identify the target database. |
 | `table` | string | required | The table to query. |
 | `columns` | list of string | required | A list of columns to query. |
@@ -1029,7 +1029,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `meta_path` | string | `"meta.workflow"` | A dot path indicating where to store and reference &lt;&lt;structured-metadata, structured metadata&gt;&gt; about the workflow execution. |
+| `meta_path` | string | `"meta.workflow"` | A dot path indicating where to store and reference structured metadata about the workflow execution. |
 | `order` | string | `[]` | An explicit declaration of branch ordered tiers, which describes the order in which parallel tiers of branches should be executed. |
 | `branches` | map of object | `{}` | An object of named `branch` processors that make up the workflow. |
 

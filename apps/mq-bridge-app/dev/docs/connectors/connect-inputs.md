@@ -85,7 +85,7 @@ Advanced: `delete_objects`.
 
 ## `azure_cosmosdb`
 
-Executes a SQL query against Azure CosmosDB^ and creates a batch of messages from each page of items.
+Executes a SQL query against Azure CosmosDB and creates a batch of messages from each page of items.
 
 `connector: azure_cosmosdb` · URI `connect+azure-cosmosdb://`
 
@@ -200,7 +200,7 @@ Advanced: `tls`, `password_authenticator`, `disable_initial_host_lookup`, `max_r
 
 ## `cockroachdb_changefeed`
 
-Listens to a CockroachDB Core Changefeed^ and creates a message for each row received. Each message is a json object looking like: ```json { "primary_key": "[\"1a7ff641-3e3b-47ee-94fe-a0cadb56cd8f\", 2]", // stringified JSON array "row": "{\"after\": {\"k\": \"1a7ff641-3e3b-47ee-94fe-a0cadb56cd8f\", \"v\": 2}, \"updated\": \"1637953249519902405.0000000000\"}", // stringified JSON object "table": "strm_2" } ```
+Listens to a CockroachDB Core Changefeed and creates a message for each row received.
 
 `connector: cockroachdb_changefeed` · URI `connect+cockroachdb-changefeed://`
 
@@ -208,7 +208,7 @@ Listens to a CockroachDB Core Changefeed^ and creates a message for each row rec
 |---|---|---|---|
 | `dsn` | string | required | A Data Source Name to identify the target database. |
 | `tables` | list of string | required | CSV of tables to be included in the changefeed |
-| `cursor_cache` | string |  | A cache resource^ to use for storing the current latest cursor that has been successfully delivered, this allows Redpanda Connect to continue from that cursor upon restart, rather than consume the entire state of the table. |
+| `cursor_cache` | string |  | A cache resource to use for storing the current latest cursor that has been successfully delivered, this allows Redpanda Connect to continue from that cursor upon restart, rather than consume the entire state of the table. |
 | `auto_replay_nacks` | bool | `true` | Whether messages that are rejected (nacked) at the output level should be automatically replayed indefinitely, eventually resulting in back pressure if the cause of the rejections is persistent. |
 
 Advanced: `tls`, `options`.
@@ -801,7 +801,7 @@ Executes a select query and creates a message for each row received.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `dsn` | string | required | A Data Source Name to identify the target database. |
 | `query` | string | required | The query to execute. |
 | `args_mapping` | string |  | An optional Bloblang mapping which should evaluate to an array of values matching in size to the number of placeholder arguments in the field `query`. |
@@ -819,7 +819,7 @@ Executes a select query and creates a message for each row received.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `dsn` | string | required | A Data Source Name to identify the target database. |
 | `table` | string | required | The table to select from. |
 | `columns` | list of string | required | A list of columns to select. |

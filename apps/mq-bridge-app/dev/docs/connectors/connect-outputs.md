@@ -34,7 +34,7 @@ output:
 
 ## `amqp_0_9`
 
-Sends messages to an AMQP (0.91) exchange. AMQP is a messaging protocol used by various message brokers, including RabbitMQ.Connects to an AMQP (0.91) queue. AMQP is a messaging protocol used by various message brokers, including RabbitMQ.
+Sends messages to an AMQP (0.91) exchange. AMQP is a messaging protocol used by various message brokers, including RabbitMQ.
 
 `connector: amqp_0_9` · URI `connect+amqp-0-9://`
 
@@ -113,7 +113,7 @@ Advanced: `blob_type`, `public_access_level`.
 
 ## `azure_cosmosdb`
 
-Creates or updates messages as JSON documents in Azure CosmosDB^.
+Creates or updates messages as JSON documents in Azure CosmosDB.
 
 `connector: azure_cosmosdb` · URI `connect+azure-cosmosdb://`
 
@@ -210,7 +210,7 @@ Write messages to a Beanstalkd queue.
 
 ## `broker`
 
-Allows you to route messages to multiple child outputs using a range of brokering &lt;&lt;patterns&gt;&gt;.
+Allows you to route messages to multiple child outputs using a range of brokering patterns.
 
 `connector: broker` · URI `connect+broker://`
 
@@ -610,9 +610,9 @@ Inserts items into a MongoDB collection.
 | `collection` | string | required | The name of the target collection. |
 | `operation` | string | `"update-one"` | The mongodb operation to perform. |
 | `write_concern` | object |  | The write concern settings for the mongo connection. |
-| `document_map` | string | `""` | A bloblang map representing a document to store within MongoDB, expressed as extended JSON in canonical form^. |
-| `filter_map` | string | `""` | A bloblang map representing a filter for a MongoDB command, expressed as extended JSON in canonical form^. |
-| `hint_map` | string | `""` | A bloblang map representing the hint for the MongoDB command, expressed as extended JSON in canonical form^. |
+| `document_map` | string | `""` | A bloblang map representing a document to store within MongoDB, expressed as extended JSON in canonical form. |
+| `filter_map` | string | `""` | A bloblang map representing a filter for a MongoDB command, expressed as extended JSON in canonical form. |
+| `hint_map` | string | `""` | A bloblang map representing the hint for the MongoDB command, expressed as extended JSON in canonical form. |
 | `upsert` | bool | `false` | The upsert setting is optional and only applies for update-one and replace-one operations. |
 | `max_in_flight` | int | `64` | The maximum number of messages to have in flight at a given time. |
 | `batching` | object |  | Allows you to configure a batching policy. |
@@ -827,7 +827,7 @@ Output for publishing messages to Pusher API (https://pusher.com)
 
 ## `qdrant`
 
-Adds items to a Qdrant^ collection
+Adds items to a Qdrant collection
 
 `connector: qdrant` · URI `connect+qdrant://`
 
@@ -1033,7 +1033,7 @@ Advanced: `tls`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `data_source_name` | string | required | Data source name. |
 | `query` | string | required | The query to execute. |
 | `args_mapping` | string |  | An optional Bloblang mapping which should evaluate to an array of values matching in size to the number of placeholder arguments in the field `query`. |
@@ -1050,7 +1050,7 @@ Inserts a row into an SQL database for each message.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `dsn` | string | required | A Data Source Name to identify the target database. |
 | `table` | string | required | The table to insert to. |
 | `columns` | list of string | required | A list of columns to insert. |
@@ -1070,7 +1070,7 @@ Executes an arbitrary SQL query for each message.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `driver` | string | required | A database &lt;&lt;drivers, driver&gt;&gt; to use. |
+| `driver` | string | required | A database driver to use. |
 | `dsn` | string | required | A Data Source Name to identify the target database. |
 | `query` | string |  | The query to execute. |
 | `args_mapping` | string |  | An optional Bloblang mapping which should evaluate to an array of values matching in size to the number of placeholder arguments in the field `query`. |

@@ -103,8 +103,18 @@ def clean(text):
     """AsciiDoc fragment -> one line that is safe inside a Markdown table cell."""
     text = re.sub(r"(?:xref|link):[^\[\s]*\[([^\]]*)\]", r"\1", text or "")
     text = re.sub(r"https?://[^\[\s]*\[([^\]]*)\]", r"\1", text)
+    text = re.sub(r"<<(?:[^,>]*,\s*)?([^>]*)>>", r"\1", text)
+    text = re.sub(r"(?<=[\w\]])\^", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text.replace("|", "\\|").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def clean_summary(text):
+    text = text or ""
+    if "```" in text:
+        return first_sentence(text)
+    # Upstream glues a second component's summary on without a space (amqp_0_9 output).
+    return clean(re.sub(r"(?<=[A-Za-z]\.)(?=[A-Z][a-z]).*", "", text, flags=re.S))
 
 
 def first_sentence(text):
@@ -136,7 +146,7 @@ def field_default(field):
 def render_component(kind, spec, middlewares):
     name = spec["name"]
     lines = [f"## `{name}`", ""]
-    summary = clean(spec.get("summary")) or first_sentence(spec.get("description"))
+    summary = clean_summary(spec.get("summary")) or first_sentence(spec.get("description"))
     status = spec.get("status", "stable")
     if status != "stable":
         summary = f"**{status.capitalize()}.** {summary}"
