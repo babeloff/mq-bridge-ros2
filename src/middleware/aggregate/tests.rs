@@ -530,7 +530,12 @@ async fn a_sqlite_store_is_shared_and_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("agg.db");
     std::fs::File::create(&path).unwrap();
-    check_shared_store(&format!("sqlite://{}", path.display())).await;
+    // Windows needs the three-slash form and forward slashes.
+    #[cfg(windows)]
+    let url = format!("sqlite:///{}", path.to_string_lossy().replace('\\', "/"));
+    #[cfg(not(windows))]
+    let url = format!("sqlite://{}", path.display());
+    check_shared_store(&url).await;
 }
 
 // Live: MQB_AGG_STORE_URL=postgres://postgres:pw@localhost:55432/t/agg_test (or a
