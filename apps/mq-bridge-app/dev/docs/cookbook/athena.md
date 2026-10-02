@@ -35,8 +35,13 @@ orders_to_s3:
 - Each payload must be a JSON object; its top-level fields become the columns.
 - The sink writes one Parquet file per flushed batch, so `batch_size` sets the file size. Athena
   bills by data scanned and slows down on many small files, so keep batches large.
-- The [`transform`](transform.md) schema coerces types and rejects rows that do not fit, so a
-  column keeps one type across files.
+- The [`transform`](transform.md) schema coerces types (`"42"` becomes `42`) and rejects rows that
+  do not fit, so a column does not flip between string and number across files. A `number`
+  column is still written as a 64-bit integer when a batch holds only whole numbers, so declare
+  it as a float column in the warehouse.
+- A rejected row is dropped and logged. Add a [`dlq`](dlq.md) after the `transform` to keep it.
+- `null` takes the field's `default` if it has one and is rejected otherwise. Mark a column the
+  source can leave empty as `nullable: true` to keep the `null`.
 - The date folders are the write time (UTC), not a field of the record. Write-time names do not
   recognise a replay; drop the last two lines to get replay-safe names in a flat layout instead.
   See [Choose the file layout](duckdb.md#choose-the-file-layout).

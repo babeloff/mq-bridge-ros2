@@ -100,9 +100,9 @@ Every row works from the Rust crate, the Python and Node.js packages, and the ze
 | **Reliability**: retries, dead-letter queue, deduplication, rate limiting | `retry`, `dlq`, `deduplication`, `limiter` middleware · `dedup` for deduplication | [Middleware reference](docs/REFERENCE.md) · [Delivery guarantees](docs/DELIVERY.md) |
 | **Broker-free tests**: run a route or handler against in-memory channels, no Docker | `memory` endpoint · built in | [Embed the library](https://marcomq.github.io/mq-bridge/tutorials/embedding.html) |
 | **ETL without code** | [`mq-bridge-app`](apps/mq-bridge-app): `mqb copy <from> <to>`, YAML routes, desktop UI, MCP server | [Quick start: `mqb copy`](https://marcomq.github.io/mq-bridge/quick-start.html) |
-| **More systems through plugins**: Apache Pulsar, Meilisearch, and Redpanda Connect's inputs, outputs and processors | native plugins · `plugin` | [Plugin endpoints](https://marcomq.github.io/mq-bridge/reference/endpoints.html#plugin-endpoints) |
+| **More systems through plugins**: Apache Pulsar, Meilisearch, and Redpanda Connect's inputs, outputs and processors | native plugins · `plugin` | [Plugin endpoints](https://marcomq.github.io/mq-bridge/reference/endpoints.html#plugin-endpoints) · [Connect plugin](https://marcomq.github.io/mq-bridge/connectors/connect.html): [inputs](https://marcomq.github.io/mq-bridge/connectors/connect-inputs.html), [outputs](https://marcomq.github.io/mq-bridge/connectors/connect-outputs.html), [processors](https://marcomq.github.io/mq-bridge/connectors/connect-processors.html) |
 
-Components reached through the Redpanda Connect plugin keep Redpanda Connect's own licenses, which are not all Apache-2.0; check the license of the component you use.
+The Connect plugin links only Redpanda Connect components free of Redpanda Community License code (bundled code is Apache-2.0 and MIT), so some upstream components, such as its Kafka, AWS and Snowflake ones, are not included; see [what is not included](https://marcomq.github.io/mq-bridge/connectors/connect.html#what-is-not-included).
 
 For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation.
 

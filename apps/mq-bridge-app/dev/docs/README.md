@@ -34,6 +34,14 @@ reference (`REFERENCE.md`, `CONFIGURATION.md`, `ARCHITECTURE.md`, `DELIVERY.md`,
   ```bash
   cargo run -p mq-bridge-app --example gen_url_docs
   ```
+- **Connect plugin components** — `connectors/connect-inputs.md`, `connect-outputs.md`
+  and `connect-processors.md` are generated from the plugin's component specs (do not
+  edit by hand). Regenerate after a plugin release, with a checkout of
+  `mq-bridge-connect` and a Go toolchain:
+
+  ```bash
+  python3 apps/mq-bridge-app/dev/scripts/gen-connect-docs.py ../mq-bridge-connect
+  ```
 - **[MCP Server](./MCP.md)** — `mqb mcp`: running the bridge as an
   MCP server, registering it with a client via `mcp install`, its five tools,
   endpoint/message shapes, and examples.

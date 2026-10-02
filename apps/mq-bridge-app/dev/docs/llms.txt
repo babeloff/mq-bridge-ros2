@@ -36,6 +36,9 @@ Key facts:
 - [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html): S3, GCS, Azure Blob, local directory; Parquet, JSONL, CSV
 - [File](https://marcomq.github.io/mq-bridge/connectors/file.html): CSV and JSONL
 - [HTTP](https://marcomq.github.io/mq-bridge/connectors/http.html) and [gRPC](https://marcomq.github.io/mq-bridge/connectors/grpc.html)
+- [Apache Pulsar](https://marcomq.github.io/mq-bridge/connectors/pulsar.html): input and output, built into `mqb`, a plugin elsewhere
+- [Meilisearch](https://marcomq.github.io/mq-bridge/connectors/meilisearch.html): search-index sink; Postgres CDC to Meilisearch with backfill and deletes
+- [Connect plugin](https://marcomq.github.io/mq-bridge/connectors/connect.html): Redpanda Connect components as endpoints and middleware (Elasticsearch, OpenSearch, Cassandra, Google Pub/Sub, BigQuery, Azure storage, Bloblang, …), a separate install. Full lists with fields: [inputs](https://marcomq.github.io/mq-bridge/connectors/connect-inputs.html), [outputs](https://marcomq.github.io/mq-bridge/connectors/connect-outputs.html), [processors](https://marcomq.github.io/mq-bridge/connectors/connect-processors.html)
 
 ## Cookbook
 
@@ -46,6 +49,13 @@ Key facts:
 - [Dead-letter queues](https://marcomq.github.io/mq-bridge/cookbook/dlq.html)
 - [Checkpoints and resumable copies](https://marcomq.github.io/mq-bridge/cookbook/checkpoints.html)
 - [Content-based routing](https://marcomq.github.io/mq-bridge/cookbook/switch.html)
+- [Enrichment and lookups](https://marcomq.github.io/mq-bridge/cookbook/lookup.html)
+- [Running aggregates](https://marcomq.github.io/mq-bridge/cookbook/aggregate.html): per-key sums, counters, moving averages
+- [Fan-out](https://marcomq.github.io/mq-bridge/cookbook/fanout.html)
+- [Weak join / correlation](https://marcomq.github.io/mq-bridge/cookbook/weak-join.html)
+- [Secrets and interpolation](https://marcomq.github.io/mq-bridge/cookbook/secrets.html)
+- [Encryption at rest](https://marcomq.github.io/mq-bridge/cookbook/encryption.html)
+- [Compression](https://marcomq.github.io/mq-bridge/cookbook/compression.html)
 
 ## Warehouses and analytics (via Parquet)
 

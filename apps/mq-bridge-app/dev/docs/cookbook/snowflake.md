@@ -33,7 +33,12 @@ orders_to_snowflake_stage:
 - Each payload must be a JSON object; its top-level fields become the columns.
 - The sink writes one Parquet file per flushed batch, so `batch_size` sets the file size.
 - The [`transform`](transform.md) schema coerces types (`"42"` becomes `42`) and rejects rows that
-  do not fit, so a column keeps one type across files.
+  do not fit, so a column does not flip between string and number across files. A `number`
+  column is still written as a 64-bit integer when a batch holds only whole numbers, so declare
+  it as a float column in the warehouse.
+- A rejected row is dropped and logged. Add a [`dlq`](dlq.md) after the `transform` to keep it.
+- `null` takes the field's `default` if it has one and is rejected otherwise. Mark a column the
+  source can leave empty as `nullable: true` to keep the `null`.
 - S3 credentials are read from the environment (`AWS_ACCESS_KEY_ID`, …).
 
 ## Schema drift between files

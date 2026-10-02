@@ -3,9 +3,9 @@
 > **Looking for what middleware or structural endpoints exist, and how to configure them?**
 > [REFERENCE.md](docs/REFERENCE.md) is the complete, authoritative list — every middleware
 > (`retry`, `dlq`, `transform`, `id`, `filter`, `deduplication`, `weak_join`, `buffer`, `limiter`, `delay`,
-> `cookie_jar`, `encryption`, `compression`, `pack`, `unpack`, `metrics`, `otel`, `lookup`, `aggregate`, `random_panic`, `custom`) and every
+> `cookie_jar`, `encryption`, `compression`, `pack`, `unpack`, `timeout`, `metrics`, `otel`, `lookup`, `aggregate`, `random_panic`, `custom`) and every
 > structural endpoint (`ref`,
-> `fanout`, `switch`, `request`, `response`, `reader`, `static`, `stream_buffer`, `null`,
+> `fanout`, `switch`, `sequence`, `request`, `response`, `reader`, `static`, `stream_buffer`, `null`,
 > `custom`), each with its fields, defaults, and a working YAML example. Do not infer these
 > from the enum definitions in `models.rs`; the reference records the behaviour and the
 > spelling traps too. Every snippet in it is parsed by `tests/reference_docs_test.rs`.
@@ -41,7 +41,10 @@ src/
 ├── canonical_message.rs   # Unified message format
 ├── traits.rs             # Core traits (MessageConsumer, MessagePublisher, Handler)
 ├── models.rs             # Configuration models (Route, Endpoint, Middleware)
+├── models/               # models.rs submodules: builders, defaults, secrets, serde support
+├── config_file.rs        # Loading routes from YAML/JSON files
 ├── route.rs              # Route execution logic (sequential/concurrent)
+├── shutdown.rs           # Graceful shutdown signalling
 ├── endpoints/            # Endpoint implementations
 │   ├── mod.rs           # Factory functions for creating consumers/publishers
 │   ├── amqp.rs          # AMQP (RabbitMQ) consumer/publisher
@@ -49,12 +52,12 @@ src/
 │   ├── clickhouse.rs    # ClickHouse sink + cursor source
 │   ├── dir_spool/       # Crash-safe directory FIFO queue (payload file + JSON sidecar)
 │   ├── file/            # File-based endpoints
-│   ├── grpc.rs          # gRPC consumer/publisher
+│   ├── grpc/            # gRPC consumer/publisher
 │   ├── http/            # HTTP consumer/publisher (+ streaming)
 │   ├── ibm_mq.rs        # IBM MQ (client loaded at runtime via dlopen)
 │   ├── kafka.rs         # Kafka consumer/publisher
 │   ├── memory/          # In-memory channels + IPC transports
-│   ├── mongodb.rs       # MongoDB consumer/publisher/change streams
+│   ├── mongodb/         # MongoDB consumer/publisher/change streams
 │   ├── mqtt.rs          # MQTT consumer/publisher
 │   ├── nats.rs          # NATS consumer/publisher
 │   ├── object_store.rs  # Cloud object storage (S3 / GCS / Azure)
@@ -68,6 +71,7 @@ src/
 │   └── structural/      # Structural endpoints (no external system)
 │       ├── fanout.rs          # Broadcast to every listed endpoint
 │       ├── switch.rs          # Content-based routing
+│       ├── sequence.rs        # Drain several inputs one after another (backfill, then stream)
 │       ├── request.rs         # Request/reply call, forward the response
 │       ├── response.rs        # Reply to the origin of the current request
 │       ├── reader.rs          # Trigger a pull from a consumer
@@ -77,8 +81,10 @@ src/
 ├── middleware/           # Middleware implementations
 │   ├── aggregate/       # Per-key running state (sums, counters, moving averages)
 │   ├── buffer.rs        # Batch accumulation
+│   ├── compression.rs   # Per-message payload compression
 │   ├── cookie_jar.rs    # Cookie / metadata persistence across requests
-│   ├── deduplication.rs # Message deduplication (sled)
+│   ├── deduplication.rs # Message deduplication
+│   ├── deduplication/   # Dedup stores (sled, memory, SQL, MongoDB)
 │   ├── delay.rs         # Artificial delay
 │   ├── deferred_commit.rs # Hold commits for batches a middleware emptied
 │   ├── dlq.rs           # Dead-letter queue
@@ -89,15 +95,22 @@ src/
 │   ├── lookup.rs        # Enrich from another endpoint's response
 │   ├── metrics.rs       # Metrics collection
 │   ├── otel.rs          # OpenTelemetry spans + traceparent propagation
+│   ├── pack.rs          # pack / unpack: one transport message per batch
 │   ├── random_panic.rs  # Testing middleware
+│   ├── raw_json.rs      # Shared raw-JSON payload helpers
 │   ├── retry.rs         # Exponential backoff retry
+│   ├── timeout.rs       # Bound each send; fail as retryable
 │   ├── transform/       # Declarative JSON mapping + schema coercion
 │   └── weak_join.rs     # Correlation-keyed join
 ├── support/              # Cross-cutting helpers
 │   ├── compression.rs   # gzip / lz4 / zstd
 │   ├── connection_registry.rs # Shared connection reuse
 │   ├── crypto.rs        # AEAD core (used by encryption middleware + at-rest)
-│   └── interpolation.rs # `${namespace:selector}` templating
+│   ├── interpolation.rs # `${namespace:selector}` templating
+│   ├── parquet.rs       # Parquet encode/decode for object_store
+│   ├── source_ranges.rs # Covered-range recovery for replay-safe file/object sinks
+│   ├── pack.rs          # Batch envelope used by pack / unpack
+│   └── plugin_abi.rs    # C ABI shared by host and native plugins
 ├── command_handler.rs    # Command handler wrapper
 ├── event_handler.rs      # Event handler wrapper
 ├── event_store.rs        # In-memory event store
@@ -105,6 +118,7 @@ src/
 ├── publisher.rs          # Standalone publisher API
 ├── checkpoint.rs         # Durable cursor stores (file/s3/postgres/mongodb)
 ├── extensions.rs         # Custom endpoint/middleware factory registration
+├── plugin/               # Native plugin host, SDK and conformance suite
 ├── response.rs           # Ergonomic response helpers
 ├── test_utils.rs         # Shared test helpers
 ├── errors.rs             # Error types

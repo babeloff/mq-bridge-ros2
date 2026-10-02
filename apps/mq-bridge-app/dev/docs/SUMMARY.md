@@ -90,6 +90,12 @@
     - [Parameters](reference/dir-spool.md)
   - [Object storage (local / cloud)](connectors/object-store.md)
     - [Parameters](reference/object-store.md)
+  - [Apache Pulsar](connectors/pulsar.md)
+  - [Meilisearch](connectors/meilisearch.md)
+  - [Connect plugin (Redpanda Connect)](connectors/connect.md)
+    - [Inputs](connectors/connect-inputs.md)
+    - [Outputs](connectors/connect-outputs.md)
+    - [Processors](connectors/connect-processors.md)
 - [URL parameter index](reference/README.md)
 
 # Reference

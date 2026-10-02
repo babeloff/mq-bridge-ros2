@@ -59,3 +59,6 @@ polling, file formats, plugins — is on [Overview & capabilities](../reference/
 - [File (CSV / JSON / JSONL)](./file.md)
 - [Directory spool](./dir-spool.md)
 - [Object storage (local / cloud)](./object-store.md)
+- [Apache Pulsar](./pulsar.md)
+- [Meilisearch](./meilisearch.md)
+- [Connect plugin (Redpanda Connect components)](./connect.md)
