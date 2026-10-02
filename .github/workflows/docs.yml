@@ -43,6 +43,10 @@ jobs:
       - name: Build book
         run: mdbook build apps/mq-bridge-app/dev/docs
 
+      # mdbook copies non-Markdown files from the book source; fail if that ever stops.
+      - name: Check llms.txt is published
+        run: test -s apps/mq-bridge-app/dev/docs/book/llms.txt
+
       # The benchmark dashboard lives on the gh-pages branch. Copy it into the
       # book so this workflow is the only thing that publishes to Pages.
       - name: Checkout benchmark data

@@ -4,12 +4,14 @@ version.workspace = true
 edition = "2021"
 authors = ["Marco Mengelkoch"]
 rust-version = "1.85"  # Base crate MSRV (non-optional uuid 1.24 needs 1.85); optional amqp/mongodb/nats need Rust 1.88.
-description = "An asynchronous message bridging library connecting Kafka, MQTT, AMQP, NATS, MongoDB, HTTP, and more."
+description = "Embeddable async ETL and messaging library: brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 repository = "https://github.com/marcomq/mq-bridge"
+homepage = "https://marcomq.github.io/mq-bridge/"
+documentation = "https://docs.rs/mq-bridge"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-keywords = ["messaging", "kafka", "nats", "amqp", "cqrs"]
-categories = ["asynchronous", "network-programming"]
+keywords = ["kafka", "messaging", "etl", "cdc", "cqrs"]
+categories = ["asynchronous", "network-programming", "database"]
 # Test-only proto; build.rs skips it when absent so downstream builds skip the codegen.
 # `apps/` is a sibling product, not part of the library: cargo only auto-excludes
 # the app's member crates, so the UI, book and benches would ship in the tarball.

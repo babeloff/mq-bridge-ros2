@@ -103,6 +103,39 @@
 //! - `full` — all supported integrations; some require native build tools or
 //!   runtime libraries.
 //!
+//! ## Feature flags
+//!
+//! | Feature | Enables |
+//! | :--- | :--- |
+//! | `kafka`, `nats`, `amqp`, `mqtt` | Kafka, NATS (JetStream), RabbitMQ / AMQP and MQTT endpoints |
+//! | `redis-streams`, `aws`, `zeromq`, `ibm-mq` | Redis Streams, AWS SQS/SNS, ZeroMQ and IBM MQ endpoints |
+//! | `http`, `grpc`, `websocket` | HTTP, gRPC and WebSocket endpoints, as server or client |
+//! | `sqlx` | PostgreSQL, MySQL / MariaDB and SQLite as source or sink |
+//! | `postgres-cdc` | Postgres change data capture (logical replication, `pgoutput`) |
+//! | `mongodb` | MongoDB source and sink, including change streams (CDC) |
+//! | `clickhouse` | ClickHouse bulk insert and cursor reads |
+//! | `object-store` | S3, GCS, Azure Blob and local-directory object storage |
+//! | `parquet` | `format: parquet` on the object-store endpoint |
+//! | `compression`, `encryption` | gzip / lz4 / zstd and AEAD encryption for files, objects and payloads |
+//! | `dedup`, `filter`, `aggregate` | The `deduplication`, `filter` and `aggregate` middlewares |
+//! | `metrics`, `otel` | Metrics and OpenTelemetry span middlewares |
+//! | `avro` | Confluent-framed Avro payloads with a schema registry |
+//! | `yaml` | YAML config files; JSON works without it |
+//! | `plugin`, `plugin-sdk` | Load native endpoint plugins; author one |
+//! | `schema` | JSON Schema for the config models |
+//! | `rustls-ring`, `rustls-aws-lc` | The TLS crypto provider; pick one when using TLS |
+//!
+//! The in-memory endpoint ([`endpoints::memory`]), the file endpoint and the
+//! `retry`, `dlq` and `transform` middlewares need no feature.
+//!
+//! # Capabilities
+//!
+//! The README's [capabilities at a glance](https://github.com/marcomq/mq-bridge#capabilities-at-a-glance)
+//! table maps each capability (brokers, CDC, SQL, Parquet on object storage,
+//! warehouses via Parquet, schema validation, broker-free tests) to its endpoint,
+//! feature and book page. The [book](https://marcomq.github.io/mq-bridge/)
+//! documents this library as well as the zero-code app.
+//!
 //! See the [endpoint capability table](https://marcomq.github.io/mq-bridge/reference/endpoints.html#consumer-vs-subscriber-and-nack-support)
 //! for individual transports, platform requirements, and configuration examples.
 //!

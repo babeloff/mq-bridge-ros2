@@ -81,6 +81,31 @@ mqb copy 'kafka://localhost:9092?topic=orders' 'nats://localhost:4222?subject=or
 ```
 
 
+## Capabilities at a glance
+
+Every row works from the Rust crate, the Python and Node.js packages, and the zero-code app; the Cargo feature is only needed when you build the Rust crate yourself. The linked [book](https://marcomq.github.io/mq-bridge/) documents the library as well as the app.
+
+| Capability | How (endpoint / middleware · Cargo feature) | Docs |
+| :--- | :--- | :--- |
+| **Message brokers**: Kafka, NATS (JetStream), RabbitMQ (AMQP), MQTT, Redis Streams, AWS SQS/SNS, IBM MQ, ZeroMQ | `kafka`, `nats`, `amqp`, `mqtt`, `redis_streams`, `aws`, `ibmmq`, `zeromq` endpoints · features `kafka`, `nats`, `amqp`, `mqtt`, `redis-streams`, `aws`, `ibm-mq`, `zeromq` | [Connectors](https://marcomq.github.io/mq-bridge/connectors/index.html) |
+| **Change Data Capture (CDC)**: stream Postgres or MongoDB changes to Kafka, files, a warehouse, … | `postgres_cdc` (logical replication, `pgoutput`) · `postgres-cdc`; `mongodb` with `consume: capture_all` / `capture_new` (change streams) · `mongodb` | [Postgres CDC tutorial](https://marcomq.github.io/mq-bridge/tutorials/postgres-cdc.html) · [MongoDB](https://marcomq.github.io/mq-bridge/connectors/mongodb.html) |
+| **SQL databases**: PostgreSQL, MySQL, MariaDB, SQLite as source (cursor polling) or sink (insert / upsert) | `sqlx` endpoint · `sqlx` | [PostgreSQL / MySQL / SQLite](https://marcomq.github.io/mq-bridge/connectors/postgres.html) · [Upserts](https://marcomq.github.io/mq-bridge/cookbook/upserts.html) |
+| **MongoDB** as source or sink | `mongodb` endpoint · `mongodb` | [MongoDB](https://marcomq.github.io/mq-bridge/connectors/mongodb.html) |
+| **ClickHouse** bulk insert and resumable reads | `clickhouse` endpoint · `clickhouse` | [ClickHouse](https://marcomq.github.io/mq-bridge/connectors/clickhouse.html) |
+| **Object storage**: S3 (and S3-compatible, e.g. R2), GCS, Azure Blob, or a local directory, as **Parquet** or **JSONL**; **CSV** as input | `object_store` endpoint with `format: parquet \| raw \| json \| csv` · `object-store`, `parquet` | [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html) |
+| **Files**: CSV and JSONL, read and write | `file` endpoint · built in | [File](https://marcomq.github.io/mq-bridge/connectors/file.html) |
+| **Analytics / warehouses**: Snowflake, BigQuery, Databricks / Spark, Athena / Trino, DuckDB **via Parquet on S3/GCS/Azure**. These are not native connectors: mq-bridge writes the Parquet files, the warehouse loads or queries them | `object_store` with `format: parquet` · `parquet` | [Snowflake](https://marcomq.github.io/mq-bridge/cookbook/snowflake.html) · [BigQuery](https://marcomq.github.io/mq-bridge/cookbook/bigquery.html) · [Databricks / Spark](https://marcomq.github.io/mq-bridge/cookbook/databricks.html) · [Athena / Trino](https://marcomq.github.io/mq-bridge/cookbook/athena.html) · [DuckDB](https://marcomq.github.io/mq-bridge/cookbook/duckdb.html) |
+| **HTTP, gRPC, WebSocket** as server or client, including request/reply | `http`, `grpc`, `websocket` endpoints · `http`, `grpc`, `websocket` | [HTTP](https://marcomq.github.io/mq-bridge/connectors/http.html) · [gRPC](https://marcomq.github.io/mq-bridge/connectors/grpc.html) · [Request / reply](https://marcomq.github.io/mq-bridge/tutorials/request-reply.html) |
+| **Schema validation and type coercion** (JSON Schema subset, field mapping) | `transform` middleware · built in | [Transform & schema mapping](https://marcomq.github.io/mq-bridge/cookbook/transform.html) |
+| **Reliability**: retries, dead-letter queue, deduplication, rate limiting | `retry`, `dlq`, `deduplication`, `limiter` middleware · `dedup` for deduplication | [Middleware reference](docs/REFERENCE.md) · [Delivery guarantees](docs/DELIVERY.md) |
+| **Broker-free tests**: run a route or handler against in-memory channels, no Docker | `memory` endpoint · built in | [Embed the library](https://marcomq.github.io/mq-bridge/tutorials/embedding.html) |
+| **ETL without code** | [`mq-bridge-app`](apps/mq-bridge-app): `mqb copy <from> <to>`, YAML routes, desktop UI, MCP server | [Quick start: `mqb copy`](https://marcomq.github.io/mq-bridge/quick-start.html) |
+| **More systems through plugins**: Apache Pulsar, Meilisearch, and Redpanda Connect's inputs, outputs and processors | native plugins · `plugin` | [Plugin endpoints](https://marcomq.github.io/mq-bridge/reference/endpoints.html#plugin-endpoints) |
+
+Components reached through the Redpanda Connect plugin keep Redpanda Connect's own licenses, which are not all Apache-2.0; check the license of the component you use.
+
+For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation.
+
 ## Benchmarks
 
 Throughput is tracked continuously on the public [benchmark dashboard](https://marcomq.github.io/mq-bridge/dev/bench/). Like-for-like ETL comparisons, measured through the zero-code [`mq-bridge-app`](apps/mq-bridge-app):

@@ -7,10 +7,12 @@ build = "build.rs"
 authors = ["Marco Mengelkochs"]
 repository = "https://github.com/marcomq/mq-bridge"
 license = "MIT OR Apache-2.0"
-description = "A message queue bridge application written in Rust, designed to connect different messaging systems like RabbitMQ, Kafka, and NATS."
+description = "Zero-code ETL and message bridge (CLI, server, MCP): brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
+homepage = "https://marcomq.github.io/mq-bridge/"
+documentation = "https://marcomq.github.io/mq-bridge/"
 readme = "../../README.md"
-keywords = ["messaging", "kafka", "nats", "amqp", "cqrs"]
-categories = ["asynchronous", "network-programming"]
+keywords = ["kafka", "messaging", "etl", "cdc", "streaming"]
+categories = ["command-line-utilities", "asynchronous", "network-programming", "database"]
 # With two [[bin]] targets, package-scoped runs still need an explicit default.
 default-run = "mq-bridge-app"
 

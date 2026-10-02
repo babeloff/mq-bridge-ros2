@@ -1,0 +1,1 @@
+apps/mq-bridge-app/dev/docs/llms.txt

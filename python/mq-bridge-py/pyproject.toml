@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "mq-bridge"
 # Version is read from Cargo.toml by maturin
 dynamic = ["version"]
-description = "Python bindings for mq-bridge (full: all brokers incl. Kafka)"
+description = "Async ETL and messaging engine (Rust core): brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -15,9 +15,17 @@ dependencies = [
 
 license = { text = "MIT OR Apache-2.0" }
 license-files = ["LICENSE.python", "LICENSE-MIT.python", "LICENSE-APACHE.python", "THIRD_PARTY_LICENSES.txt"]
-keywords = ["messaging", "tokio", "pyo3", "maturin", "mq-bridge"]
+keywords = [
+  "messaging", "kafka", "nats", "amqp", "rabbitmq", "mqtt", "etl", "cdc", "postgres", "mongodb",
+  "clickhouse", "parquet", "s3", "object-storage", "http", "grpc", "mq-bridge",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Topic :: Database",
+  "Topic :: System :: Networking",
+  "Topic :: System :: Distributed Computing",
+  "Topic :: Software Development :: Libraries",
   "License :: OSI Approved :: MIT License",
   "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
@@ -33,7 +41,9 @@ classifiers = [
 plugin-packaging = ["build>=1", "wheel>=0.45"]
 
 [project.urls]
-Homepage = "https://github.com/marcomq/mq-bridge"
+Homepage = "https://marcomq.github.io/mq-bridge/"
+Documentation = "https://marcomq.github.io/mq-bridge/getting-started/library-quick-start.html"
+Book = "https://marcomq.github.io/mq-bridge/"
 Repository = "https://github.com/marcomq/mq-bridge"
 Issues = "https://github.com/marcomq/mq-bridge/issues"
 

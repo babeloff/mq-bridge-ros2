@@ -7,9 +7,10 @@ authors = ["Marco Mengelkochs"]
 repository = "https://github.com/marcomq/mq-bridge"
 license = "MIT OR Apache-2.0"
 description = "Shared core library for mq-bridge-app."
+homepage = "https://marcomq.github.io/mq-bridge/"
 readme = "../../README.md"
-keywords = ["messaging", "kafka", "nats", "amqp", "cqrs"]
-categories = ["asynchronous", "network-programming"]
+keywords = ["kafka", "messaging", "etl", "cdc", "streaming"]
+categories = ["asynchronous", "network-programming", "database"]
 build = "build.rs"
 
 [lib]

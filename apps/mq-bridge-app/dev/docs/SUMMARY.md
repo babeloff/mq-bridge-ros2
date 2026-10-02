@@ -45,6 +45,11 @@
   - [Compression](cookbook/compression.md)
 - [Analytics]()
   - [Query a stream in DuckDB](cookbook/duckdb.md)
+  - [Load into Snowflake](cookbook/snowflake.md)
+  - [Load into BigQuery](cookbook/bigquery.md)
+  - [Load into Databricks / Spark](cookbook/databricks.md)
+  - [Query from Athena / Trino](cookbook/athena.md)
+  - [ClickHouse: endpoint or s3()](cookbook/clickhouse.md)
 
 # Connectors
 - [Overview & capabilities](reference/endpoints.md)
