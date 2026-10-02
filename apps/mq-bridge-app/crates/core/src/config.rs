@@ -71,6 +71,24 @@ fn unused_config_id(kind: &str, name: &str, known_ids: &HashSet<String>) -> Stri
     id
 }
 
+/// Gives every `(id, name)` entity a unique id. Explicit ids are reserved up front, so a
+/// derived id never takes one from an entity further down the list.
+fn assign_entity_ids<'a>(kind: &str, entities: impl Iterator<Item = (&'a mut String, &'a str)>) {
+    let entities: Vec<_> = entities.collect();
+    let mut reserved_ids: HashSet<String> = entities
+        .iter()
+        .filter(|(id, _)| !id.trim().is_empty())
+        .map(|(id, _)| id.to_string())
+        .collect();
+    let mut explicit_ids = HashSet::new();
+    for (id, name) in entities {
+        if id.trim().is_empty() || !explicit_ids.insert(id.to_string()) {
+            *id = unused_config_id(kind, name, &reserved_ids);
+            reserved_ids.insert(id.to_string());
+        }
+    }
+}
+
 #[derive(
     Debug, serde::Deserialize, serde::Serialize, JsonSchema, Clone, Copy, PartialEq, Eq, Default,
 )]
@@ -982,21 +1000,18 @@ pub fn load_config_at_path(
 
 impl AppConfig {
     pub fn ensure_entity_ids(&mut self) {
-        let mut known_ids = HashSet::new();
-        for publisher in &mut self.publishers {
-            if publisher.id.trim().is_empty() || !known_ids.insert(publisher.id.clone()) {
-                publisher.id = unused_config_id("publisher", &publisher.name, &known_ids);
-                known_ids.insert(publisher.id.clone());
-            }
-        }
-
-        known_ids.clear();
-        for consumer in &mut self.consumers {
-            if consumer.id.trim().is_empty() || !known_ids.insert(consumer.id.clone()) {
-                consumer.id = unused_config_id("consumer", &consumer.name, &known_ids);
-                known_ids.insert(consumer.id.clone());
-            }
-        }
+        assign_entity_ids(
+            "publisher",
+            self.publishers
+                .iter_mut()
+                .map(|publisher| (&mut publisher.id, publisher.name.as_str())),
+        );
+        assign_entity_ids(
+            "consumer",
+            self.consumers
+                .iter_mut()
+                .map(|consumer| (&mut consumer.id, consumer.name.as_str())),
+        );
     }
 
     fn normalize_consumer_publisher_outputs(&mut self) {
@@ -2129,6 +2144,31 @@ consumers:
         let distinct: HashSet<&String> = ids.iter().map(|(_, id)| id).collect();
         assert_eq!(distinct.len(), 4);
         assert!(ids.iter().all(|(_, id)| !id.is_empty()));
+    }
+
+    #[test]
+    fn a_derived_id_never_takes_a_later_explicit_one() {
+        let derived = stable_config_id("publisher", "audit");
+        let mut config: AppConfig = serde_yaml_ng::from_str(&format!(
+            r#"
+publishers:
+  - name: audit
+    endpoint: {{ memory: {{ topic: "a" }} }}
+  - id: {derived}
+    name: explicit
+    endpoint: {{ memory: {{ topic: "b" }} }}
+  - id: {derived}
+    name: duplicate
+    endpoint: {{ memory: {{ topic: "c" }} }}
+"#
+        ))
+        .unwrap();
+        config.ensure_entity_ids();
+
+        let ids: Vec<&String> = config.publishers.iter().map(|p| &p.id).collect();
+        assert_eq!(ids[1], &derived);
+        assert_eq!(ids.iter().collect::<HashSet<_>>().len(), 3);
+        assert!(ids.iter().all(|id| !id.is_empty()));
     }
 
     #[test]
