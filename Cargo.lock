@@ -719,9 +719,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-sns"
-version = "1.114.0"
+version = "1.115.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bcf08ad07e6e6fd437bac65ad73eedd3e2d6c74aa91d7ef13b91900cf96f6c3"
+checksum = "a6581e98bb19f0833a30d207089efdce93221c26d98c7ee2c031c176066dbd3e"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -745,9 +745,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-sqs"
-version = "1.112.0"
+version = "1.113.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2222f7970a8ff4382bc8864f3d5950fa5f866790d32df2bf43ef379d43eb735"
+checksum = "86da1862e37e7d30d47acc7013fd367a93ae1b55391b2b4fbb34067556e7f9fa"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -5476,9 +5476,9 @@ dependencies = [
 
 [[package]]
 name = "redis"
-version = "1.7.0"
+version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acbc41a996f7652b2ddd9dfd98cc4ff602cfd742ae35382f07f608405ab50ed"
+checksum = "ed5b98ae99461e02895c3a96a25dbe4d852a3d5e5b815d31d5d9e4b5344d99e9"
 dependencies = [
  "arc-swap",
  "arcstr",
@@ -6990,9 +6990,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
