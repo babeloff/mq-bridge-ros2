@@ -4635,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4726,7 +4726,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-app"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4754,7 +4754,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-app-core"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4792,7 +4792,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-app-desktop"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "anyhow",
  "getrandom 0.4.3",
