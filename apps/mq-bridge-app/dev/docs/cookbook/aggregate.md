@@ -7,6 +7,33 @@ messages, such as "how many readings did this sensor send so far" or "what is th
 usual reading". No database is asked, so it is much faster than a [`lookup`](lookup.md) that
 lets a database keep the counter.
 
+## Where it fits
+
+mq-bridge moves messages, and a few middlewares keep something about them between
+messages: [`deduplication`](deduplication.md) the keys it has seen, `aggregate` a value
+computed from them. It is meant for a value the pipeline needs while the message is on its
+way: to filter, route or alert on it, to hand it to the receiver, or to thin out what reaches
+an expensive sink. It is kept small on purpose: one state per key, updated message by
+message, in the order the messages arrive.
+
+| You need | Use |
+|---|---|
+| a running value per key that a `filter`, a `switch` or the receiver decides on | `aggregate` |
+| the same, surviving restarts or shared by several instances | `aggregate` with a `store` |
+| a counter that other applications update too | a writing [`lookup`](lookup.md) |
+| totals for reports only, in a database that aggregates on its own | write the raw rows and let the sink aggregate |
+| time windows, event time and late data, joins between streams, exactly-once state | a stream processor, with mq-bridge in front of it or behind it |
+
+Letting the database keep the counter is the obvious alternative, and the slow one: it
+costs a read and a write per message and key. In our measurements a `lookup` that updated
+five keys per message reached about 17k msg/s on PostgreSQL and about 2k on MongoDB. With
+`single_writer`, `aggregate` writes a changed state once per flush instead of once per
+message and reaches 240k on the same PostgreSQL (see [Performance](#performance-and-tuning)).
+
+Windows, event time and joins are out of scope. They need the state and the input position
+committed together, which a bridge between arbitrary endpoints cannot promise; see
+[How this compares to stream processors](#how-this-compares-to-stream-processors).
+
 ## A counter and a sum per key
 
 ```yaml
