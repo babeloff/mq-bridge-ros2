@@ -72,8 +72,10 @@ FROM FILES (
 );
 ```
 
-A wildcard load requires every matched file to have the same schema. Give every optional column a
-`default` so no file lacks it, or load files with differing schemas in separate jobs.
+A wildcard load requires every matched file to have the same schema. A `default` on every optional
+column keeps the column set the same, but not the types: a `number` column is `INT64` in a file
+whose batch held only whole numbers and `FLOAT64` otherwise, and the destination table's schema
+does not reconcile the files. Load files with differing schemas in separate jobs.
 
 A load job appends whatever the URI matches. Running it twice over the same files loads them
 twice, so load each file once (for example by date prefix) or use an external table instead.

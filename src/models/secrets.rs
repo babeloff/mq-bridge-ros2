@@ -594,8 +594,13 @@ impl SecretExtractor for HttpBulkConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
         extract_sensitive_string_map_entries(&mut self.headers, prefix, "HEADERS", secrets);
-        if let Some(val) = self.read.as_mut().and_then(|r| r.checkpoint_store.take()) {
-            secrets.insert(format!("{}__{}", prefix, "READ__CHECKPOINT_STORE"), val);
+        if let Some(read) = self.read.as_mut() {
+            extract_sensitive_optional_url(
+                &mut read.checkpoint_store,
+                prefix,
+                "READ__CHECKPOINT_STORE",
+                secrets,
+            );
         }
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);

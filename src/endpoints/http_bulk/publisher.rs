@@ -3,20 +3,9 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
-//! HTTP APIs that take many JSON documents in one request; the input is in `read`.
-//!
-//! Search engines and similar stores differ in three things only: the body an
-//! upsert carries, how documents are deleted, and how the outcome is reported.
-//! All three are configuration here, so a new target is a recipe, not code.
-//! Messages are sent in order: a batch is cut into runs of upserts and deletes,
-//! and after a request that may be retried nothing later in the batch is sent.
+//! Output for HTTP APIs that take many JSON documents in one request.
 
-mod presets;
-mod read;
-pub use presets::{preset_names, register_preset};
-pub(crate) use read::cursor_checkpoint;
-pub use read::HttpBulkConsumer;
-
+use super::{quoted, Connection, JSON};
 use crate::models::{
     Compression, HttpBulkConfig, HttpBulkDelete, HttpBulkFormat, HttpBulkItems, HttpBulkJob,
     HttpBulkLines, HttpBulkResult,
@@ -31,20 +20,16 @@ use crate::CanonicalMessage;
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_ENCODING, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_ENCODING, CONTENT_TYPE};
 use serde_json::Value;
 use std::ops::Range;
-use std::time::Duration;
 use tracing::{trace, warn};
 
 const IDS: &str = "{ids}";
 const JOB_ID: &str = "{id}";
 const DOCUMENTS: &str = "{documents}";
 const LINE_ID: &str = "{id}";
-const JSON: &str = "application/json";
 const NDJSON: &str = "application/x-ndjson";
-/// Most characters of a response body quoted in an error.
-const QUOTED_RESPONSE_CHARS: usize = 500;
 
 /// A failed request, kept as text so every message it covered gets its own error.
 struct Failure {
@@ -151,87 +136,6 @@ enum DeleteBody {
 struct Chunk {
     body: Vec<u8>,
     indices: Vec<usize>,
-}
-
-/// The client, base URL and headers both directions of the endpoint share.
-struct Connection {
-    http: reqwest::Client,
-    base: String,
-    headers: HeaderMap,
-}
-
-impl Connection {
-    fn new(config: &HttpBulkConfig) -> anyhow::Result<Self> {
-        let url = url::Url::parse(&config.url).context("Invalid http_bulk URL")?;
-        if !url.has_host() || !matches!(url.scheme(), "http" | "https") {
-            bail!("http_bulk URL must be an absolute http(s) URL, e.g. 'http://localhost:7700'");
-        }
-        if url.query().is_some() || url.fragment().is_some() {
-            bail!("http_bulk URL must not carry a query or fragment; put it into the request path");
-        }
-        if config.tls.required && url.scheme() != "https" {
-            bail!("http_bulk tls.required needs an https URL");
-        }
-        let mut headers = HeaderMap::new();
-        for (name, value) in &config.headers {
-            headers.insert(
-                HeaderName::from_bytes(name.as_bytes())
-                    .with_context(|| format!("http_bulk header name '{name}' is not valid"))?,
-                HeaderValue::from_str(value)
-                    .with_context(|| format!("http_bulk header '{name}' has an invalid value"))?,
-            );
-        }
-        // No redirect following: reqwest would resend custom credential headers to another host.
-        let mut builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_millis(
-                config.connect_timeout_ms.unwrap_or(10_000),
-            ));
-        if let Some(ms) = config.request_timeout_ms {
-            builder = builder.timeout(Duration::from_millis(ms));
-        }
-        if config.tls.accept_invalid_certs {
-            builder = builder.danger_accept_invalid_certs(true);
-        }
-        if let Some(ca) = &config.tls.ca_file {
-            let pem = std::fs::read(ca)
-                .with_context(|| format!("Failed to read http_bulk CA file '{ca}'"))?;
-            builder = builder.add_root_certificate(
-                reqwest::Certificate::from_pem(&pem)
-                    .with_context(|| format!("Invalid http_bulk CA certificate '{ca}'"))?,
-            );
-        }
-        if config.tls.cert_password.is_some() {
-            bail!("http_bulk tls.cert_password is not supported; use an unencrypted key");
-        }
-        match (&config.tls.cert_file, &config.tls.key_file) {
-            (Some(cert), key) => {
-                let mut pem = std::fs::read(cert)
-                    .with_context(|| format!("Failed to read http_bulk cert file '{cert}'"))?;
-                if let Some(key) = key {
-                    pem.push(b'\n');
-                    pem.extend(
-                        std::fs::read(key).with_context(|| {
-                            format!("Failed to read http_bulk key file '{key}'")
-                        })?,
-                    );
-                }
-                builder =
-                    builder.identity(reqwest::Identity::from_pem(&pem).with_context(|| {
-                        format!("Invalid http_bulk client certificate '{cert}'")
-                    })?);
-            }
-            (None, Some(_)) => bail!("http_bulk tls.key_file needs tls.cert_file"),
-            (None, None) => {}
-        }
-        Ok(Self {
-            http: builder
-                .build()
-                .context("Failed to build http_bulk client")?,
-            base: url.as_str().trim_end_matches('/').to_string(),
-            headers,
-        })
-    }
 }
 
 pub struct HttpBulkPublisher {
@@ -373,6 +277,9 @@ impl HttpBulkPublisher {
                 } else {
                     body.push(b',');
                 }
+                // One broken element would make the whole array invalid.
+                serde_json::from_slice::<serde::de::IgnoredAny>(payload)
+                    .context("the payload is not valid JSON")?;
                 body.extend_from_slice(payload);
                 Ok(())
             }
@@ -669,13 +576,6 @@ fn record(
     }
 }
 
-fn quoted(text: &str) -> String {
-    match text.char_indices().nth(QUOTED_RESPONSE_CHARS) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_string(),
-    }
-}
-
 fn scalar_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
@@ -904,6 +804,25 @@ mod tests {
             server.requests()[0].header("content-type"),
             Some("application/json")
         );
+    }
+
+    #[tokio::test]
+    async fn a_broken_document_fails_alone_in_a_json_array() {
+        let server = server(|_| (200, String::new())).await;
+        let publisher = publisher(
+            &server,
+            json!({"upsert": {"path": "/docs", "format": "json_array"}}),
+        );
+        let sent = publisher
+            .send_batch(documents(&[r#"{"id":1}"#, r#"{"id":"#, r#"{"id":3}"#]))
+            .await
+            .unwrap();
+
+        let failed = failures(sent);
+        assert_eq!(failed.len(), 1);
+        assert_eq!((failed[0].0.as_str(), failed[0].1), (r#"{"id":"#, false));
+        let bodies: Vec<String> = calls(&server).into_iter().map(|call| call.2).collect();
+        assert_eq!(bodies, [r#"[{"id":1},{"id":3}]"#]);
     }
 
     #[tokio::test]
@@ -1223,61 +1142,6 @@ mod tests {
             body,
             "{\"delete\":{\"_id\":1}}\n{\"delete\":{\"_id\":\"x\"}}\n"
         );
-    }
-
-    #[test]
-    fn the_recipes_in_the_book_are_valid_configurations() {
-        let book = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/apps/mq-bridge-app/dev/docs/connectors/"
-        );
-        for (name, recipes) in [
-            ("http-bulk.md", 7),
-            ("typesense.md", 2),
-            ("elasticsearch.md", 2),
-            ("postgrest.md", 2),
-        ] {
-            // The book is not part of the published crate.
-            let Ok(page) = std::fs::read_to_string(format!("{book}{name}")) else {
-                return;
-            };
-            let blocks = page.split("```yaml\n").skip(1);
-            let mut found = 0;
-            for recipe in blocks.filter_map(|rest| rest.split("```").next()) {
-                let route: Value = serde_yaml_ng::from_str(recipe).expect("yaml");
-                // Either an `input:` or `output:` fragment or a whole named route.
-                let route = match route.get("output").or(route.get("input")) {
-                    Some(_) => &route,
-                    None => route.as_object().unwrap().values().next().unwrap(),
-                };
-                found += 1;
-                // An `input:` fragment is a read recipe; its consumer is built without a server.
-                if let Some(input) = route.get("input").and_then(|i| i.get("http_bulk")) {
-                    let mut config: HttpBulkConfig = serde_json::from_value(input.clone())
-                        .unwrap_or_else(|error| panic!("{name}: {error}"));
-                    if let Some(read) = &mut config.read {
-                        read.checkpoint_store = None;
-                    }
-                    tokio::runtime::Builder::new_current_thread()
-                        .build()
-                        .unwrap()
-                        .block_on(HttpBulkConsumer::new(&config, true))
-                        .unwrap_or_else(|error| panic!("{name}: {error}"));
-                    continue;
-                }
-                let output = &route["output"];
-                let config = match output.get("custom") {
-                    Some(custom) => {
-                        presets::resolve(custom["name"].as_str().unwrap(), &custom["config"])
-                    }
-                    None => serde_json::from_value(output["http_bulk"].clone()).map_err(Into::into),
-                };
-                let config: HttpBulkConfig =
-                    config.unwrap_or_else(|error| panic!("{name}: {error:#}"));
-                HttpBulkPublisher::new(&config).unwrap_or_else(|error| panic!("{name}: {error}"));
-            }
-            assert_eq!(found, recipes, "{name}");
-        }
     }
 
     #[test]

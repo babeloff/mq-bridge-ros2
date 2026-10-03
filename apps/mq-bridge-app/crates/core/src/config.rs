@@ -1876,15 +1876,10 @@ publishers:
                 .any(|variant| variant["required"] == serde_json::json!([name])),
             "the endpoint must be offered as a variant"
         );
-        // Its own `$defs` are lifted under a prefix, and the ref follows.
-        assert!(
-            schema
-                .pointer("/$defs/ConfigSchemaTestEndpointTls")
-                .is_some()
-        );
+        // The engine hands the schema over flat: its own `$defs` are inlined.
         assert_eq!(
-            schema.pointer(&format!("/$defs/{definition}/properties/tls/$ref")),
-            Some(&serde_json::json!("#/$defs/ConfigSchemaTestEndpointTls"))
+            schema.pointer(&format!("/$defs/{definition}/properties/tls")),
+            Some(&serde_json::json!({ "type": "object" }))
         );
     }
 
@@ -1953,7 +1948,11 @@ publishers:
             fn config_schema(&self) -> Option<serde_json::Value> {
                 Some(serde_json::json!({
                     "type": "object",
-                    "$defs": { "Config": { "type": "object" } },
+                    // Recursive, so the definition survives the engine's flattening.
+                    "$defs": { "Config": {
+                        "type": "object",
+                        "properties": { "child": { "$ref": "#/$defs/Config" } }
+                    } },
                     "properties": { "nested": { "$ref": "#/$defs/Config" } },
                     "required": ["nested"]
                 }))
@@ -1993,7 +1992,9 @@ publishers:
         // Its own `Config` collides with the root name it was just given, so it
         // gets a key of its own rather than aliasing it.
         let nested = schema
-            .pointer(&format!("/$defs/{target}/properties/nested/$ref"))
+            .pointer(&format!(
+                "/$defs/{target}/properties/nested/properties/child/$ref"
+            ))
             .and_then(serde_json::Value::as_str)
             .unwrap()
             .to_string();

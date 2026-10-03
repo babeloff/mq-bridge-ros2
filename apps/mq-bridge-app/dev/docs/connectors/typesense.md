@@ -27,6 +27,7 @@ Typesense does not create a collection on import. Create it once:
 ```sh
 curl -X POST http://localhost:8108/collections \
   -H 'X-TYPESENSE-API-KEY: <api key>' \
+  -H 'Content-Type: application/json' \
   -d '{"name": "books", "fields": [
         {"name": "title", "type": "string"},
         {"name": "year", "type": "int32"}]}'

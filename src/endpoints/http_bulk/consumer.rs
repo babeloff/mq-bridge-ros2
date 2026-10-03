@@ -55,9 +55,15 @@ pub struct HttpBulkConsumer {
     source: CursorSource,
     backoff: PollBackoff,
     checkpoint: Option<Arc<dyn CheckpointStore>>,
-    position: Arc<Mutex<Position>>,
+    progress: Arc<Mutex<Progress>>,
     /// A draining route ends on the first empty page, so it does not wait for it.
     exit_on_empty: bool,
+}
+
+/// The read position, and how often a nack has moved it back.
+struct Progress {
+    position: Position,
+    rollbacks: u64,
 }
 
 /// Names the listing in a checkpoint store: host and path, without the query.
@@ -166,7 +172,10 @@ impl HttpBulkConsumer {
                 read.max_polling_interval_ms.map(Duration::from_millis),
             ),
             checkpoint,
-            position: Arc::new(Mutex::new(saved.unwrap_or(Position::At(start)))),
+            progress: Arc::new(Mutex::new(Progress {
+                position: saved.unwrap_or(Position::At(start)),
+                rollbacks: 0,
+            })),
             exit_on_empty: false,
         })
     }
@@ -293,62 +302,87 @@ impl MessageConsumer for HttpBulkConsumer {
         if max_messages == 0 {
             return Ok(ReceivedBatch::empty());
         }
-        let before = self.position.lock().unwrap().clone();
-        let Position::At(cursor) = &before else {
-            return Ok(self.idle().await);
-        };
-        let response = self.page(cursor, max_messages).await?;
-        let items = match response.pointer(&self.items) {
-            Some(Value::Array(items)) => items,
-            _ => {
-                return Err(ConsumerError::Permanent(anyhow!(
-                    "http_bulk read.items '{}' is not an array in the response",
-                    self.items
-                )))
-            }
-        };
-        let mut positions = self.positions(&response, items, cursor)?;
-        if items.is_empty() {
-            if let Some(next) = positions.pop().flatten().filter(|next| *next != before) {
-                save(&self.checkpoint, &next).await;
-                *self.position.lock().unwrap() = next;
-            }
-            return Ok(self.idle().await);
-        }
-        self.backoff.reset();
-
-        let messages: Vec<CanonicalMessage> = items
-            .iter()
-            .map(|item| CanonicalMessage::new(serde_json::to_vec(item).unwrap_or_default(), None))
-            .collect();
-        trace!(count = messages.len(), path = %self.path, "Read documents");
-        // Advance optimistically; the commit rolls back to the last acked document.
-        if let Some(Some(last)) = positions.last() {
-            *self.position.lock().unwrap() = last.clone();
-        }
-
-        let checkpoint = self.checkpoint.clone();
-        let position = self.position.clone();
-        let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
-            Box::pin(async move {
-                let acked = dispositions
-                    .iter()
-                    .take(positions.len())
-                    .take_while(|d| {
-                        matches!(d, MessageDisposition::Ack | MessageDisposition::Reply(_))
-                    })
-                    .count();
-                let boundary = positions[..acked].last().cloned().flatten();
-                if acked < positions.len() {
-                    *position.lock().unwrap() = boundary.clone().unwrap_or(before);
+        loop {
+            let (before, rollbacks) = {
+                let progress = self.progress.lock().unwrap();
+                (progress.position.clone(), progress.rollbacks)
+            };
+            let Position::At(cursor) = &before else {
+                return Ok(self.idle().await);
+            };
+            let response = self.page(cursor, max_messages).await?;
+            let items = match response.pointer(&self.items) {
+                Some(Value::Array(items)) => items,
+                _ => {
+                    return Err(ConsumerError::Permanent(anyhow!(
+                        "http_bulk read.items '{}' is not an array in the response",
+                        self.items
+                    )))
                 }
-                if let Some(boundary) = boundary {
-                    save(&checkpoint, &boundary).await;
+            };
+            let mut positions = self.positions(&response, items, cursor)?;
+            if items.is_empty() {
+                if let Some(next) = positions.pop().flatten().filter(|next| *next != before) {
+                    save(&self.checkpoint, &next).await;
+                    let mut progress = self.progress.lock().unwrap();
+                    if progress.rollbacks == rollbacks {
+                        progress.position = next;
+                    }
                 }
-                Ok(())
-            }) as BoxFuture<'static, anyhow::Result<()>>
-        });
-        Ok(ReceivedBatch { messages, commit })
+                return Ok(self.idle().await);
+            }
+            // Advance optimistically; the commit rolls back to the last acked document.
+            {
+                let mut progress = self.progress.lock().unwrap();
+                if progress.rollbacks != rollbacks {
+                    // A nack moved the cursor back while this page was read.
+                    continue;
+                }
+                if let Some(Some(last)) = positions.last() {
+                    progress.position = last.clone();
+                }
+            }
+            self.backoff.reset();
+
+            let messages: Vec<CanonicalMessage> = items
+                .iter()
+                .map(|item| {
+                    CanonicalMessage::new(serde_json::to_vec(item).unwrap_or_default(), None)
+                })
+                .collect();
+            trace!(count = messages.len(), path = %self.path, "Read documents");
+
+            let checkpoint = self.checkpoint.clone();
+            let progress = self.progress.clone();
+            let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
+                Box::pin(async move {
+                    let acked = dispositions
+                        .iter()
+                        .take(positions.len())
+                        .take_while(|d| {
+                            matches!(d, MessageDisposition::Ack | MessageDisposition::Reply(_))
+                        })
+                        .count();
+                    let boundary = positions[..acked].last().cloned().flatten();
+                    {
+                        let mut progress = progress.lock().unwrap();
+                        // An earlier nack rewound past this page: it is read again.
+                        if progress.rollbacks != rollbacks {
+                            return Ok(());
+                        }
+                        if acked < positions.len() {
+                            progress.position = boundary.clone().unwrap_or(before);
+                            progress.rollbacks += 1;
+                        }
+                    }
+                    if let Some(boundary) = boundary {
+                        save(&checkpoint, &boundary).await;
+                    }
+                    Ok(())
+                }) as BoxFuture<'static, anyhow::Result<()>>
+            });
+            return Ok(ReceivedBatch { messages, commit });
+        }
     }
 
     fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
@@ -462,6 +496,40 @@ mod tests {
         let mut second = consumer(&server, config).await;
         assert!(read(&mut second, 0).await.is_empty());
         assert_eq!(targets(&server).last().unwrap(), "/rows?id=gt.c");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn a_page_read_past_a_nacked_one_does_not_move_the_checkpoint() {
+        let server = server(|request| {
+            let page = match request.target.as_str() {
+                "/docs?offset=0&limit=2" => r#"{"results":[{"id":1},{"id":2}]}"#,
+                "/docs?offset=2&limit=2" => r#"{"results":[{"id":3},{"id":4}]}"#,
+                _ => r#"{"results":[]}"#,
+            };
+            (200, page.to_string())
+        })
+        .await;
+        let (path, url) = store();
+        let config = json!({"read": {
+            "path": "/docs?offset={cursor}&limit={limit}", "items": "/results",
+            "cursor_id": "copy", "checkpoint_store": url,
+        }});
+        let mut first = consumer(&server, config.clone()).await;
+        let earlier = first.receive_batch(2).await.expect("page");
+        let later = first.receive_batch(2).await.expect("page");
+        (earlier.commit)(vec![MessageDisposition::Nack; 2])
+            .await
+            .expect("commit");
+        (later.commit)(vec![MessageDisposition::Ack; 2])
+            .await
+            .expect("commit");
+
+        assert_eq!(read(&mut first, 0).await, [r#"{"id":1}"#, r#"{"id":2}"#]);
+        // The acked later page saved nothing: a restart starts over as well.
+        let mut second = consumer(&server, config).await;
+        assert_eq!(read(&mut second, 0).await.len(), 2);
+        assert_eq!(targets(&server).last().unwrap(), "/docs?offset=0&limit=2");
         let _ = std::fs::remove_file(path);
     }
 

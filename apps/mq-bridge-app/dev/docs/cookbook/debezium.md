@@ -44,7 +44,7 @@ debezium.transforms.unwrap.delete.tombstone.handling.mode=rewrite
 ```yaml
 mysql_orders_to_postgres:
   input:
-    http: { url: "0.0.0.0:8080" }
+    http: { url: "127.0.0.1:8080" }
   output:
     sqlx:
       url: "postgres://user:pass@localhost:5432/warehouse"

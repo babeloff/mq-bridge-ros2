@@ -433,20 +433,10 @@ impl HttpPublisher {
                 error_body_excerpt(&response_bytes)
             );
 
-            if response_status.is_client_error() {
-                // 408 Request Timeout and 429 Too Many Requests are transient: the same
-                // request may well succeed on a later attempt, so let the route retry them.
-                return match response_status.as_u16() {
-                    408 | 429 => Err(PublisherError::Retryable(error)),
-                    _ => Err(PublisherError::NonRetryable(error)),
-                };
-            } else if response_status.is_server_error() {
-                match response_status.as_u16() {
-                    501 | 505 => return Err(PublisherError::NonRetryable(error)),
-                    _ => return Err(PublisherError::Retryable(error)),
-                }
-            }
-            return Err(PublisherError::NonRetryable(error));
+            return Err(crate::support::http_status::publisher_error(
+                response_status.as_u16(),
+                error,
+            ));
         }
 
         trace!(

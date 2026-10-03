@@ -54,7 +54,7 @@ src/
 │   ├── file/            # File-based endpoints
 │   ├── grpc/            # gRPC consumer/publisher
 │   ├── http/            # HTTP consumer/publisher (+ streaming)
-│   ├── http_bulk.rs     # Bulk JSON documents over HTTP (search engines); paged source in http_bulk/read.rs
+│   ├── http_bulk/       # Bulk JSON documents over HTTP (search engines): publisher, paged consumer, presets
 │   ├── ibm_mq.rs        # IBM MQ (client loaded at runtime via dlopen)
 │   ├── kafka.rs         # Kafka consumer/publisher
 │   ├── memory/          # In-memory channels + IPC transports

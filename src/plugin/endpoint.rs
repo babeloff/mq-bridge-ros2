@@ -844,13 +844,14 @@ impl MessagePublisher for PluginPublisher {
     /// does not cross into the plugin's runtime by itself.
     fn on_disconnect_hook(&self) -> Option<crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
         let hook = self.publisher.plugin.table().disconnect_hook()?;
-        let outcome = match crate::traits::disconnect_outcome() {
-            Some(DisconnectOutcome::Completed) => MQB_DISCONNECT_COMPLETED,
-            Some(DisconnectOutcome::Failed) => MQB_DISCONNECT_FAILED,
-            Some(DisconnectOutcome::Stopped) | None => MQB_DISCONNECT_STOPPED,
-        };
         let publisher = Arc::clone(&self.publisher);
         Some(Box::pin(async move {
+            // Read where the hook is awaited: that is the scope the route sets.
+            let outcome = match crate::traits::disconnect_outcome() {
+                Some(DisconnectOutcome::Completed) => MQB_DISCONNECT_COMPLETED,
+                Some(DisconnectOutcome::Failed) => MQB_DISCONNECT_FAILED,
+                Some(DisconnectOutcome::Stopped) | None => MQB_DISCONNECT_STOPPED,
+            };
             tokio::task::spawn_blocking(move || {
                 let mut err = MqbBuffer::EMPTY;
                 let status = unsafe { hook(publisher.handle, outcome, &mut err) };

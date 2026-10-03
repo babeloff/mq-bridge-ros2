@@ -363,8 +363,7 @@ fn subscheme_of(scheme: &str) -> Option<&str> {
 pub fn endpoint_uri_schema(name: &str) -> UriSchema {
     crate::extensions::get_endpoint_factory(name)
         .and_then(|factory| factory.config_schema())
-        .as_ref()
-        .map(UriSchema::from_schema)
+        .map(|schema| UriSchema::from_schema(&flatten(&schema)))
         .unwrap_or_default()
 }
 
@@ -546,14 +545,50 @@ const MAX_REF_DEPTH: usize = 16;
 ///
 /// That is the shape `#[derive(JsonSchema)]` gives an enum field, so a plugin can
 /// derive its schema without hand-writing one per enum. A schema that is already
-/// flat comes back unchanged.
+/// flat comes back unchanged. Only the definitions a cycle still points at are kept.
 pub fn flatten(schema: &Value) -> Value {
     let mut flat = flatten_node(schema, schema, &mut Vec::new());
-    if let Some(object) = flat.as_object_mut() {
-        object.remove("$defs");
-        object.remove("definitions");
+    for key in ["$defs", "definitions"] {
+        let Some(Value::Object(definitions)) = flat.as_object_mut().and_then(|o| o.remove(key))
+        else {
+            continue;
+        };
+        let prefix = format!("#/{key}/");
+        let mut pending = Vec::new();
+        references(&flat, &prefix, &mut pending);
+        let mut kept = Map::new();
+        while let Some(name) = pending.pop() {
+            if kept.contains_key(&name) {
+                continue;
+            }
+            if let Some(definition) = definitions.get(&name) {
+                references(definition, &prefix, &mut pending);
+                kept.insert(name, definition.clone());
+            }
+        }
+        if !kept.is_empty() {
+            flat[key] = Value::Object(kept);
+        }
     }
     flat
+}
+
+/// Collects the definition names `node` refers to under `prefix`.
+fn references(node: &Value, prefix: &str, names: &mut Vec<String>) {
+    match node {
+        Value::Object(object) => {
+            for (key, value) in object {
+                match value.as_str().filter(|_| key == "$ref") {
+                    Some(reference) => {
+                        names.extend(reference.strip_prefix(prefix).map(String::from))
+                    }
+                    None => references(value, prefix, names),
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|i| references(i, prefix, names)),
+        _ => {}
+    }
 }
 
 /// `path` holds the references being expanded; one already on it is a cycle and stays a `$ref`.
@@ -1038,5 +1073,8 @@ mod tests {
             flat["properties"]["node"],
             json!({ "properties": { "next": { "$ref": "#/$defs/Node" } } })
         );
+        // The reference left behind still resolves.
+        assert!(flat.pointer("/$defs/Node/properties/next").is_some());
+        assert!(flat.pointer("/$defs/Missing").is_none());
     }
 }
