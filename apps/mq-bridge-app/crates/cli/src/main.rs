@@ -1405,8 +1405,9 @@ fn throughput(
     let rows = copied.load(std::sync::atomic::Ordering::Relaxed);
     let read = read.load(std::sync::atomic::Ordering::Relaxed);
     let elapsed_s = started.elapsed().as_secs_f64();
+    // `unpack` delivers more rows than it reads, so rate the larger count.
     let rows_per_second = if elapsed_s > 0.0 {
-        (read as f64 / elapsed_s).round() as u64
+        (read.max(rows) as f64 / elapsed_s).round() as u64
     } else {
         0
     };

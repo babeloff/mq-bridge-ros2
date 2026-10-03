@@ -105,6 +105,28 @@ change: secret extraction now covers custom endpoints.
   homepage points at the book instead of the repository.
 - **`AGENTS.md` holds the contributor context** that was in `CLAUDE.md`, which now imports it.
 
+### Fixed
+
+- **Request/reply replies are matched in batches.** A reply from a `static` responder, and from
+  NATS, memory and MongoDB request/reply, kept its own message id. A batch matches replies to
+  requests by id, so in a batch larger than one the reply was dropped and an HTTP caller got
+  `202 Message processed`. Replies now carry the request's id, as HTTP and SQL replies did.
+- **MQTT: the first batch of a QoS 1/2 publisher is no longer sent twice.** The first CONNACK
+  was treated as a session reset, so the batch was reported unconfirmed, retried after 5 s and
+  delivered again.
+- **Kafka: draining a group that is already at the end returns at once** instead of waiting out
+  the 30 s join timeout, and the end-of-partition event is no longer logged as an `ERROR`.
+- **MongoDB: `consume: snapshot` no longer returns the bridge's own `<collection>:sequencer`
+  document** as a row.
+- **A configuration that can never work fails at once with its reason**, instead of being
+  retried for the 5 s start window: an invalid filter expression, a bad encryption key, a
+  middleware on the wrong side, a `limiter` of 0, a directory as a file source.
+- **Clearer errors.** A file sink that cannot be opened shows the OS reason; a start timeout
+  with no recorded cause says an endpoint was still connecting; `${payload:…}` in a `copy` URI
+  explains the `$%7B…%7D` spelling; the NATS publisher no longer warns that `stream` is ignored
+  when it is used.
+- **`mqb copy` reports the rate of delivered rows** after an `unpack`, not of packs read.
+
 ## 0.4.17
 
 ### Added

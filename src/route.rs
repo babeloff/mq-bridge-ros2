@@ -1622,7 +1622,11 @@ impl Route {
                 "Route '{}' failed to start: did not become ready within {}ms{}",
                 name_str,
                 startup_timeout.as_millis(),
-                cause
+                if cause.is_empty() {
+                    ": an endpoint was still connecting and had reported no error"
+                } else {
+                    cause.as_str()
+                }
             ),
         })
     }

@@ -1925,9 +1925,10 @@ fn check_publisher_recursive(
         }
         #[cfg(feature = "nats")]
         EndpointType::Nats(cfg) => {
-            if cfg.stream.is_some() {
+            // A JetStream publisher creates and publishes to `stream`; only Core NATS ignores it.
+            if cfg.stream.is_some() && cfg.no_jetstream {
                 warnings.push(
-                    "Endpoint 'nats' is used as a publisher, but 'stream' is a consumer-only option and will be ignored."
+                    "Endpoint 'nats' is used as a publisher with 'no_jetstream', so 'stream' will be ignored."
                     .to_string()
                 );
             }

@@ -89,7 +89,8 @@ impl MessagePublisher for StaticEndpointPublisher {
                     .map_err(PublisherError::NonRetryable)?,
             ),
         };
-        let mut response_msg = CanonicalMessage::new_bytes(payload, None);
+        // A batch matches each reply to its request by id; a fresh id would lose the reply.
+        let mut response_msg = CanonicalMessage::new_bytes(payload, Some(message.message_id));
         // Attach configured metadata to the response. When this feeds an HTTP
         // response these become headers (e.g. `content-type`), so the server
         // emits them instead of defaulting to `application/octet-stream`.
@@ -261,6 +262,23 @@ mod tests {
             response_msg.metadata.get("server").map(String::as_str),
             Some("mq-bridge")
         );
+    }
+
+    #[tokio::test]
+    async fn batch_replies_carry_their_request_ids() {
+        let publisher = StaticEndpointPublisher::new(&config("ok")).unwrap();
+        let requests: Vec<CanonicalMessage> =
+            (0..3).map(|_| CanonicalMessage::from("req")).collect();
+        let ids: Vec<u128> = requests.iter().map(|m| m.message_id).collect();
+
+        let SentBatch::Partial { responses, failed } =
+            publisher.send_batch(requests).await.unwrap()
+        else {
+            panic!("a static publisher replies to every message");
+        };
+        assert!(failed.is_empty());
+        let reply_ids: Vec<u128> = responses.unwrap().iter().map(|m| m.message_id).collect();
+        assert_eq!(reply_ids, ids);
     }
 
     #[tokio::test]

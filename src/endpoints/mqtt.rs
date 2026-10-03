@@ -883,6 +883,8 @@ async fn run_eventloop(
     // reconnect, which would otherwise let a batch be acked before its own message
     // is truly confirmed. Only used by publishers (`confirm` is `Some`).
     let mut outstanding_pkids: HashSet<u16> = HashSet::new();
+    // Nothing is in flight before the first CONNACK, so it resets no session.
+    let mut connected_before = false;
 
     loop {
         tokio::select! {
@@ -920,7 +922,7 @@ async fn run_eventloop(
                                     if !ack.session_present {
                                         // rumqttc drops its in-flight publishes on a fresh
                                         // session; fail any pending confirmations so they retry.
-                                        if let Some(confirm) = &confirm {
+                                        if let Some(confirm) = confirm.as_ref().filter(|_| connected_before) {
                                             confirm.reset_session();
                                         }
                                         if let Some((client, topic, qos)) = &subscription_info {
@@ -937,6 +939,7 @@ async fn run_eventloop(
                                     } else {
                                         info!("Session present on V3 connection, resuming...");
                                     }
+                                    connected_before = true;
                                 }
                                 rumqttc::Incoming::SubAck(ack) => {
                                     if let Some(tx) = &subscribed_tx {
@@ -998,7 +1001,7 @@ async fn run_eventloop(
                                         if !ack.session_present {
                                             // rumqttc drops its in-flight publishes on a fresh
                                             // session; fail pending confirmations so they retry.
-                                            if let Some(confirm) = &confirm {
+                                            if let Some(confirm) = confirm.as_ref().filter(|_| connected_before) {
                                                 confirm.reset_session();
                                             }
                                             if let Some((client, topic, qos)) = &subscription_info {
@@ -1015,6 +1018,7 @@ async fn run_eventloop(
                                         } else {
                                             info!("Session present on V5 connection, resuming...");
                                         }
+                                        connected_before = true;
                                     }
                                     rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::SubAck(ack)) => {
                                         if let Some(tx) = &subscribed_tx {

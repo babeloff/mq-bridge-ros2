@@ -1007,9 +1007,11 @@ impl MessagePublisher for MongoDbPublisher {
             match reply_collection.find_one_and_delete(filter.clone()).await {
                 Ok(Some(doc)) => {
                     trace!(correlation_id = %correlation_id, "Received MongoDB response");
-                    let response_msg = parse_mongodb_document(doc).map_err(|e| {
+                    let mut response_msg = parse_mongodb_document(doc).map_err(|e| {
                         PublisherError::NonRetryable(anyhow!("Failed to parse response: {}", e))
                     })?;
+                    // A batch matches each reply to its request by id.
+                    response_msg.message_id = message.message_id;
                     return Ok(Sent::Response(response_msg));
                 }
                 Ok(None) => {

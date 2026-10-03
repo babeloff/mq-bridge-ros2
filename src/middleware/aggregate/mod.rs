@@ -575,7 +575,10 @@ impl Aggregate {
             )?);
         }
         if entries.is_empty() {
-            anyhow::bail!("aggregate: set `key`, `expression` and `into`, or list `entries`");
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
+                "aggregate: set `key`, `expression` and `into`, or list `entries`"
+            ))
+            .into());
         }
         // `into` names an entry's states in the store, so two entries cannot share one.
         let paths: HashSet<&[String]> = entries.iter().map(|e| e.into.as_slice()).collect();

@@ -832,8 +832,8 @@ impl FilePublisher {
                 .append(true)
                 .open(&path)
                 .await
-                .with_context(|| {
-                    format!("Failed to open or create file for writing: {}", path_str)
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to open or create file for writing: {path_str}: {e}")
                 })?;
         }
 
@@ -2349,7 +2349,10 @@ fn probe_source_path(path: &str) -> anyhow::Result<Option<String>> {
     // on Unix the open succeeds and only the read fails, which the reader threads
     // report as an ordinary end-of-file.
     if std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
-        anyhow::bail!("file source '{path}' is a directory, not a file");
+        return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
+            "file source '{path}' is a directory, not a file"
+        ))
+        .into());
     }
     match std::fs::File::open(path) {
         Ok(_) => Ok(None),

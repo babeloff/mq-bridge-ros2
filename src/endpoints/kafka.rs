@@ -13,14 +13,14 @@ use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::Offset;
 use rdkafka::{
-    consumer::{CommitMode, Consumer, StreamConsumer},
+    consumer::{CommitMode, Consumer, ConsumerContext},
     error::{KafkaError, RDKafkaErrorCode},
     message::Headers,
-    ClientConfig, Message, TopicPartitionList,
+    ClientConfig, ClientContext, Message, TopicPartitionList,
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{debug, info, trace};
+use tracing::{debug, error, info, trace};
 use uuid::Uuid;
 
 /// Shared rdkafka producer. The flush on `Drop` runs only when the last holder is
@@ -326,6 +326,23 @@ impl MessagePublisher for KafkaPublisher {
     }
 }
 
+/// Keeps the end-of-partition event this consumer asks for out of the error log.
+struct QuietEofContext;
+
+impl ClientContext for QuietEofContext {
+    fn error(&self, error: KafkaError, reason: &str) {
+        if matches!(error, KafkaError::Global(RDKafkaErrorCode::PartitionEOF)) {
+            trace!("librdkafka: {}: {}", error, reason);
+        } else {
+            error!("librdkafka: {}: {}", error, reason);
+        }
+    }
+}
+
+impl ConsumerContext for QuietEofContext {}
+
+type StreamConsumer = rdkafka::consumer::StreamConsumer<QuietEofContext>;
+
 /// Owns a `StreamConsumer` so its close never runs on a caller's thread.
 ///
 /// rdkafka closes the consumer in `Drop` with `while !closed() { poll(100ms) }`, which
@@ -480,7 +497,7 @@ impl KafkaConsumer {
         // in librdkafka or the prefetch task, which used to make a drain silently lose its tail.
         client_config.set("enable.partition.eof", "true");
 
-        let consumer: StreamConsumer = client_config.create()?;
+        let consumer: StreamConsumer = client_config.create_with_context(QuietEofContext)?;
         if !topic.is_empty() {
             consumer.subscribe(&[topic])?
         }
@@ -1042,6 +1059,9 @@ fn capture_partition_eof_position<T>(
 /// Records an EOF only after it has travelled through the same stream as all preceding
 /// records. The position was captured when the stream yielded the EOF, before
 /// `ready_chunks` could fetch later records.
+/// Marks a partition that reported its end before any record was consumed from it.
+const EOF_BEFORE_ANY_RECORD: i64 = -1;
+
 fn record_partition_eof(
     positions: &TopicPartitionList,
     partition: i32,
@@ -1052,10 +1072,14 @@ fn record_partition_eof(
         if elem.partition() != partition {
             continue;
         }
+        let key = (elem.topic().to_string(), partition);
         if let Offset::Offset(offset) = elem.offset() {
-            let key = (elem.topic().to_string(), partition);
             let entry = observed.entry(key).or_insert(offset);
             *entry = (*entry).max(offset);
+        } else {
+            // librdkafka has no position until a record is consumed: the partition was
+            // already at its end when the consumer was assigned.
+            observed.entry(key).or_insert(EOF_BEFORE_ANY_RECORD);
         }
     }
 }
@@ -1404,7 +1428,10 @@ fn drain_readiness(
 /// A librdkafka position is deliberately not accepted here: it advances when a record is
 /// fetched, before mq-bridge's prefetch task has necessarily put that record on its channel.
 fn drain_offset_reached(high: i64, delivered: Option<i64>, eof: Option<i64>) -> bool {
-    high == 0 || delivered.is_some_and(|offset| offset >= high) || eof.is_some_and(|o| o >= high)
+    high == 0
+        || delivered.is_some_and(|offset| offset >= high)
+        || eof.is_some_and(|o| o >= high)
+        || (delivered.is_none() && eof == Some(EOF_BEFORE_ANY_RECORD))
 }
 
 /// Waits for the first record of a batch. `Ok(None)` means the source is drained.
@@ -2003,6 +2030,13 @@ mod tests {
         assert!(drain_offset_reached(120, Some(120), None));
         assert!(drain_offset_reached(120, None, Some(120)));
         assert!(drain_offset_reached(0, None, None));
+        // A group that had already consumed the partition gets an EOF and no position.
+        assert!(drain_offset_reached(120, None, Some(EOF_BEFORE_ANY_RECORD)));
+        assert!(!drain_offset_reached(
+            120,
+            Some(112),
+            Some(EOF_BEFORE_ANY_RECORD)
+        ));
     }
 
     /// `ready_chunks` polls every immediately-ready item before yielding the chunk. Capture

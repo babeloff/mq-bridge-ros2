@@ -161,6 +161,7 @@ impl MessagePublisher for NatsPublisher {
         }
 
         if self.request_reply {
+            let request_id = message.message_id;
             let response = tokio::time::timeout(
                 self.request_timeout,
                 self.core_client.request_with_headers(
@@ -173,7 +174,9 @@ impl MessagePublisher for NatsPublisher {
             .map_err(|_| PublisherError::Retryable(anyhow!("NATS request timed out")))?
             .map_err(|e| PublisherError::Retryable(anyhow!("NATS request failed: {}", e)))?;
 
-            let response_msg = create_nats_canonical_message(&response, None, false, false);
+            // A batch matches each reply to its request by id.
+            let mut response_msg = create_nats_canonical_message(&response, None, false, false);
+            response_msg.message_id = request_id;
             return Ok(Sent::Response(response_msg));
         }
 

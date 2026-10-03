@@ -6,6 +6,7 @@
 //! Enriches each message with the responses of other, request-capable endpoints.
 
 use crate::endpoints::create_publisher_from_route;
+use crate::errors::InvalidConfig;
 use crate::models::{Endpoint, LookupMiddleware};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
@@ -183,14 +184,22 @@ impl Lookup {
                 entries.push(Entry::new(from, &config.metadata, payload, into, route_name).await?);
             }
             (None, None) if config.metadata.is_empty() && config.payload.is_none() => {}
-            _ => anyhow::bail!("lookup: `from` and `into` must be set together"),
+            _ => {
+                return Err(InvalidConfig(anyhow::anyhow!(
+                    "lookup: `from` and `into` must be set together"
+                ))
+                .into())
+            }
         }
         for e in &config.entries {
             let payload = e.payload.as_deref();
             entries.push(Entry::new(&e.from, &e.metadata, payload, &e.into, route_name).await?);
         }
         if entries.is_empty() {
-            anyhow::bail!("lookup: set `from` and `into`, or list `entries`");
+            return Err(InvalidConfig(anyhow::anyhow!(
+                "lookup: set `from` and `into`, or list `entries`"
+            ))
+            .into());
         }
         Ok(Self {
             entries,

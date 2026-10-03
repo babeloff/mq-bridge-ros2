@@ -104,6 +104,8 @@ mqb copy \
 | `--resume` | off | Configure the source's safe native resume mechanism, or fail before route startup. |
 | `--no-resume` | off | Ignore optional cursor/checkpoint resume state, including its warnings and errors. Conflicts with `--resume`; native queue/CDC offsets are unchanged. |
 | `--drain` | off | Exit once the source yields an empty batch. Without it, `copy` runs as a continuous bridge until Ctrl-C. |
+| `--wait <secs>` | off | Wait up to that long for the source to produce something, then drain and exit. |
+| `-v`, `--verbose` | off | Log endpoints, connections and shutdown. Without it only warnings and errors are logged. |
 | `--concurrency <N>` | `4` | Route concurrency. |
 | `--batch-size <N>` | `1024` | Batch size. |
 
@@ -230,9 +232,9 @@ mqb copy \
   --drain
 ```
 
-- Names: `retry`, `metrics`, `dlq`, `deduplication`, `transform`, `delay`, `timeout`, `limiter`,
-  `buffer`, `weak_join`, `cookie_jar`, `random_panic`, `compression`, `encryption`, `pack`,
-  `unpack`, `custom`
+- Names: `retry`, `metrics`, `dlq`, `deduplication`, `transform`, `id`, `filter`, `delay`,
+  `timeout`, `limiter`, `buffer`, `weak_join`, `cookie_jar`, `lookup`, `aggregate`, `otel`,
+  `random_panic`, `compression`, `encryption`, `pack`, `unpack`, `custom`
   (`-` is accepted for `_`).
 - `encryption`'s `key` is a shell-visible argument; prefer `${env:VAR}` to keep it out of the
   process list and shell history: `|encryption?key=$%7Benv:MQB_KEY%7D`.
@@ -295,9 +297,8 @@ mqb copy \
   --to   'fanout:?mirror=http://staging.internal/&to=http://prod.internal/'
 ```
 
-> The engine does not forward a branch's response through a fan-out yet, so the caller currently
-> gets `202 Accepted` rather than production's body. The mirroring half works today; a single
-> `--to http://prod.internal/` (no fan-out) does reply with the real response.
+> The caller gets production's response: a fan-out answers with its first `to` branch in the
+> order written, and a `mirror` branch that is down does not change it.
 
 An HTTP source is a listener, so `--from http://0.0.0.0:8080` binds that address, and `https://`
 makes it a TLS listener. Its certificate is the `tls` field, which takes a JSON literal:

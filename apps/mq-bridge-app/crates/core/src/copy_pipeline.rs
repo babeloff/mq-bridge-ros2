@@ -358,6 +358,13 @@ pub fn expand_uri_variables(uri: &str) -> anyhow::Result<String> {
     })
     .into_owned();
 
+    // `${payload:id}` is a message template the engine fills in, not a variable.
+    if let Some(template) = missing.iter().find(|name| name.contains(':')) {
+        bail!(
+            "`${{{template}}}` in endpoint URI is a message template, not an environment variable; \
+             write it as `$%7B{template}%7D` so it reaches the endpoint unexpanded"
+        );
+    }
     if !missing.is_empty() {
         bail!(
             "undefined environment variable `{}` in endpoint URI (write a literal `$` as `%24`)",
