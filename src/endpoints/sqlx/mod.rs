@@ -406,6 +406,28 @@ fn build_sqlx_url_with_tls(config: &SqlxConfig) -> anyhow::Result<String> {
     Ok(url.to_string())
 }
 
+/// For a SQLite sink whose file does not exist and whose URL names no `mode`: the URL
+/// with `mode=rwc`, so the sink creates the file instead of failing to open it.
+fn sqlite_url_creating_missing_file(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("sqlite:")?;
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let path = path.strip_prefix("//").unwrap_or(path);
+    if path.is_empty() || path.contains(":memory:") {
+        return None;
+    }
+    if query
+        .split('&')
+        .any(|p| p.starts_with("mode=") || p == "immutable=true")
+    {
+        return None;
+    }
+    if std::path::Path::new(path).exists() {
+        return None;
+    }
+    let separator = if query.is_empty() { '?' } else { '&' };
+    Some(format!("{url}{separator}mode=rwc"))
+}
+
 async fn create_sqlx_pool(config: &SqlxConfig) -> anyhow::Result<AnyPool> {
     let url = build_sqlx_url_with_tls(config)?;
     let mut pool_options = AnyPoolOptions::new();
@@ -871,6 +893,14 @@ impl SqlxPublisher {
                 config.table
             ));
         }
+        let creating = sqlite_url_creating_missing_file(&config.url);
+        let config = &match creating {
+            Some(url) => SqlxConfig {
+                url,
+                ..config.clone()
+            },
+            None => config.clone(),
+        };
         let shared_pool = create_shared_sqlx_pool(config).await?;
         let pool = (*shared_pool).clone();
         let table = config.table.clone();
@@ -2730,6 +2760,7 @@ pub struct SqlxCursorReader {
     backoff: PollBackoff,
     checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>>,
     last_value: Arc<Mutex<Option<SqlCursor>>>,
+    run_position: Option<(crate::route::RunPositions, String)>,
     /// Page queries, built once: only the bound cursor and limit vary between polls.
     sql_first: String,
     sql_next: String,
@@ -2819,6 +2850,17 @@ impl SqlxCursorReader {
             None
         };
 
+        // Without a durable checkpoint the position still survives a reconnect of this run.
+        let run_position = match &checkpoint {
+            Some(_) => None,
+            None => crate::route::RUN_POSITIONS
+                .try_with(Arc::clone)
+                .ok()
+                .map(|positions| {
+                    let key = format!("sqlx\n{}\n{}\n{}", config.url, config.table, cursor_column);
+                    (positions, key)
+                }),
+        };
         let last_value = match &checkpoint {
             Some(cp) => cp.load().await?.and_then(|s| {
                 let decoded = SqlCursor::decode(&s);
@@ -2827,7 +2869,10 @@ impl SqlxCursorReader {
                 }
                 decoded
             }),
-            None => None,
+            None => run_position.as_ref().and_then(|(positions, key)| {
+                let saved = positions.lock().unwrap().get(key).cloned();
+                saved.and_then(|s| SqlCursor::decode(&s))
+            }),
         };
         info!(table = %config.table, cursor_id = ?config.cursor_id, has_checkpoint = %last_value.is_some(), "SQLx cursor reader initialized");
 
@@ -2862,6 +2907,7 @@ impl SqlxCursorReader {
             ),
             checkpoint,
             last_value: Arc::new(Mutex::new(last_value)),
+            run_position,
             source_metadata,
         })
     }
@@ -3033,6 +3079,7 @@ impl MessageConsumer for SqlxCursorReader {
         trace!(count = messages.len(), "Received batch of SQLx cursor rows");
 
         let checkpoint = self.checkpoint.clone();
+        let run_position = self.run_position.clone();
         let last_value = self.last_value.clone();
         let resume_from = last; // cursor value before this batch (for rollback on nack)
         let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
@@ -3056,6 +3103,9 @@ impl MessageConsumer for SqlxCursorReader {
                 // (at-least-once) instead of being skipped until a restart.
                 if acked < cursors.len() {
                     *last_value.lock().unwrap() = boundary.clone();
+                }
+                if let (Some(cur), Some((positions, key))) = (&boundary, run_position) {
+                    positions.lock().unwrap().insert(key, cur.encode());
                 }
                 if let (Some(cur), Some(cp)) = (boundary, checkpoint) {
                     if let Err(e) = cp.save(&cur.encode()).await {

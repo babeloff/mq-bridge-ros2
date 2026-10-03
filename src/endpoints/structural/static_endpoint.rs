@@ -130,6 +130,9 @@ pub struct StaticRequestConsumer {
     /// Precomputed payload for a template with no tokens (the common case).
     static_payload: Option<Bytes>,
     metadata: std::collections::HashMap<String, String>,
+    /// Under `exit_on_empty` the source ends after one `receive` or one full batch.
+    exit_on_empty: bool,
+    emitted: bool,
 }
 
 impl StaticRequestConsumer {
@@ -147,6 +150,8 @@ impl StaticRequestConsumer {
             template: Arc::new(template),
             static_payload,
             metadata: config.metadata.clone(),
+            exit_on_empty: false,
+            emitted: false,
         })
     }
 
@@ -166,7 +171,13 @@ impl MessageConsumer for StaticRequestConsumer {
     fn commit_requires_order(&self) -> bool {
         false
     }
+    fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
+        self.exit_on_empty = exit_on_empty;
+    }
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
+        if self.exit_on_empty && std::mem::replace(&mut self.emitted, true) {
+            return Err(ConsumerError::EndOfStream);
+        }
         let mut message = CanonicalMessage::new_bytes(self.next_payload(), None);
         message.metadata = self.metadata.clone();
         trace!(message_id = %format!("{:032x}", message.message_id), "Producing static message");
@@ -180,6 +191,9 @@ impl MessageConsumer for StaticRequestConsumer {
         &mut self,
         _max_messages: usize,
     ) -> Result<ReceivedBatch, ConsumerError> {
+        if self.exit_on_empty && std::mem::replace(&mut self.emitted, true) {
+            return Err(ConsumerError::EndOfStream);
+        }
         // To properly utilize batching, we generate `_max_messages` here.
         // Each message still involves cloning the payload and generating a new UUID.
         let mut messages = Vec::with_capacity(_max_messages);

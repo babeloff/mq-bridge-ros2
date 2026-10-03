@@ -144,7 +144,10 @@ impl MessagePublisher for DlqPublisher {
                 let mut message = message;
                 tag_dlq_failure(&mut message, &error_msg, &self.route_name);
                 match self.dlq_publisher.send(message).await {
-                    Ok(_) => Ok(Sent::Ack),
+                    Ok(_) => {
+                        super::note_dead_lettered(1);
+                        Ok(Sent::Ack)
+                    }
                     Err(dlq_error) => {
                         // If the DLQ itself has a connection error, we must propagate it to trigger a route restart.
                         // Otherwise, the message would be lost.
@@ -209,14 +212,19 @@ impl MessagePublisher for DlqPublisher {
 
                 let final_failed = still_retryable;
 
+                let dlq_len = messages_to_dlq.len();
                 match self.dlq_publisher.send_batch(messages_to_dlq).await {
-                    Ok(SentBatch::Ack) => Ok(SentBatch::Partial {
-                        responses,
-                        failed: final_failed,
-                    }),
+                    Ok(SentBatch::Ack) => {
+                        super::note_dead_lettered(dlq_len);
+                        Ok(SentBatch::Partial {
+                            responses,
+                            failed: final_failed,
+                        })
+                    }
                     Ok(SentBatch::Partial {
                         failed: dlq_failed, ..
                     }) => {
+                        super::note_dead_lettered(dlq_len.saturating_sub(dlq_failed.len()));
                         let mut final_failed = final_failed;
                         error!(
                             "DLQ bulk send partially failed. {} messages could not be sent to DLQ.",
@@ -273,14 +281,17 @@ impl MessagePublisher for DlqPublisher {
                 for msg in &mut messages {
                     tag_dlq_failure_at(msg, &error_msg, &self.route_name, &now);
                 }
+                let dlq_len = messages.len();
                 match self.dlq_publisher.send_batch(messages).await {
                     Ok(SentBatch::Ack) => {
+                        super::note_dead_lettered(dlq_len);
                         debug!("Batch successfully sent to DLQ after complete primary failure.");
                         Ok(SentBatch::Ack)
                     }
                     Ok(SentBatch::Partial {
                         failed: dlq_failed, ..
                     }) => {
+                        super::note_dead_lettered(dlq_len.saturating_sub(dlq_failed.len()));
                         error!(
                             "DLQ bulk send partially failed. {} messages could not be sent to DLQ.",
                             dlq_failed.len()

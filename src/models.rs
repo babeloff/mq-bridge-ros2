@@ -1544,6 +1544,7 @@ pub enum SpoolClaim {
 /// progress is persisted to `checkpoint_store` (the last processed object key) so a
 /// restart resumes without re-emitting. Objects are never mutated or deleted in place.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ObjectStoreConfig {
     /// Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`,

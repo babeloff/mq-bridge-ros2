@@ -133,6 +133,10 @@ impl<'de> Deserialize<'de> for Endpoint {
                     }
                 }
 
+                if let Some(serde_json::Value::Object(file)) = temp_map.get("file") {
+                    reject_unknown_file_keys(file).map_err(serde::de::Error::custom)?;
+                }
+
                 // Deserialize the rest of the map into the flattened EndpointType.
                 let temp_val = serde_json::Value::Object(temp_map);
                 let endpoint_type: EndpointType = match serde_json::from_value(temp_val.clone()) {
@@ -179,6 +183,37 @@ impl<'de> Deserialize<'de> for Endpoint {
         }
 
         deserializer.deserialize_any(EndpointVisitor)
+    }
+}
+
+/// `FileConfig` flattens its mode, which rules out serde's `deny_unknown_fields`.
+const FILE_CONFIG_KEYS: &[&str] = &[
+    "path",
+    "name_by",
+    "idempotency",
+    "delimiter",
+    "mode",
+    "delete",
+    "group_id",
+    "read_from_tail",
+    "format",
+    "compression",
+    "encryption",
+    "source_metadata",
+];
+
+fn reject_unknown_file_keys(
+    file: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    match file
+        .keys()
+        .find(|key| !FILE_CONFIG_KEYS.contains(&key.as_str()))
+    {
+        Some(key) => Err(format!(
+            "unknown field `{key}` in file endpoint, expected one of {}",
+            FILE_CONFIG_KEYS.join(", ")
+        )),
+        None => Ok(()),
     }
 }
 

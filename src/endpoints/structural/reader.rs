@@ -57,7 +57,7 @@ impl MessagePublisher for ReaderPublisher {
         }))
     }
 
-    async fn send(&self, _message: CanonicalMessage) -> Result<Sent, PublisherError> {
+    async fn send(&self, trigger: CanonicalMessage) -> Result<Sent, PublisherError> {
         let mut consumer = self.consumer.lock().await;
         // We ignore the incoming message payload and just read from the consumer.
         // The incoming message acts purely as a trigger.
@@ -72,7 +72,10 @@ impl MessagePublisher for ReaderPublisher {
                         e
                     )));
                 }
-                Ok(Sent::Response(received.message))
+                Ok(Sent::Response(as_reply_to(
+                    received.message,
+                    trigger.message_id,
+                )))
             }
             Err(e) => match e {
                 ConsumerError::EndOfStream | ConsumerError::Permanent(_) => {
@@ -91,6 +94,7 @@ impl MessagePublisher for ReaderPublisher {
         if count == 0 {
             return Ok(SentBatch::Ack);
         }
+        let request_ids: Vec<u128> = messages.iter().map(|m| m.message_id).collect();
 
         let mut consumer = self.consumer.lock().await;
         match consumer.receive_batch(count).await {
@@ -113,8 +117,14 @@ impl MessagePublisher for ReaderPublisher {
 
                 // Surface the read messages as responses, mirroring `send`'s
                 // `Sent::Response`, so the route can dispatch them instead of dropping them.
+                let responses = batch
+                    .messages
+                    .into_iter()
+                    .zip(request_ids)
+                    .map(|(message, request_id)| as_reply_to(message, request_id))
+                    .collect();
                 Ok(SentBatch::Partial {
-                    responses: Some(batch.messages),
+                    responses: Some(responses),
                     failed: Vec::new(),
                 })
             }
@@ -130,6 +140,20 @@ impl MessagePublisher for ReaderPublisher {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Metadata key holding the id the read message had before it became a reply.
+pub const READER_MESSAGE_ID_KEY: &str = "mqb.reader.message_id";
+
+/// A route matches replies to requests by id, so the read message takes the request's
+/// id and keeps its own in metadata.
+fn as_reply_to(mut message: CanonicalMessage, request_id: u128) -> CanonicalMessage {
+    message.metadata.insert(
+        READER_MESSAGE_ID_KEY.to_string(),
+        format!("{:032x}", message.message_id),
+    );
+    message.message_id = request_id;
+    message
 }
 
 #[cfg(test)]

@@ -636,6 +636,14 @@ fn apply_server_failure_policy(
     }
 }
 
+/// Read positions of sources without a durable checkpoint, kept for one route run so a
+/// reconnect continues where it was instead of starting over.
+pub(crate) type RunPositions = Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
+
+tokio::task_local! {
+    pub(crate) static RUN_POSITIONS: RunPositions;
+}
+
 /// Records a batch the route discarded after a permanent sink rejection.
 ///
 /// Dropping is deliberate — it is what stops a poison message from wedging the
@@ -1405,6 +1413,7 @@ impl Route {
             // flapping, and reporting it `healthy` the moment it connects again hides
             // exactly the failure an operator is looking for.
             let mut consecutive_failures = 0usize;
+            let run_positions = RunPositions::default();
             'reconnect: loop {
                 let route_arc = Arc::clone(&route);
                 let name_arc = Arc::clone(&name);
@@ -1419,7 +1428,8 @@ impl Route {
                 // The actual route logic is in `run_until_err`.
                 let drops_run = Arc::clone(&drops);
                 let sends_run = Arc::clone(&sends_loop);
-                let mut run_task = tokio::spawn(async move {
+                let positions = Arc::clone(&run_positions);
+                let mut run_task = tokio::spawn(RUN_POSITIONS.scope(positions, async move {
                     route_arc
                         .run_until_err_reporting_to(
                             &name_arc,
@@ -1430,7 +1440,7 @@ impl Route {
                             no_resume,
                         )
                         .await
-                });
+                }));
 
                 // Inner loop: process ready + result events for this connection attempt.
                 loop {

@@ -126,6 +126,9 @@ change: secret extraction now covers custom endpoints.
   explains the `$%7B…%7D` spelling; the NATS publisher no longer warns that `stream` is ignored
   when it is used.
 - **`mqb copy` reports the rate of delivered rows** after an `unpack`, not of packs read.
+- **The `compression` middleware uses every core.** Batches of 256 messages and more are
+  compressed and decompressed on the blocking pool, in order: zstd 316k → 1.29M rows/s, gzip
+  160k → 400k, lz4 1.9M → 3.9M. The output is byte-identical.
 
 ## 0.4.17
 

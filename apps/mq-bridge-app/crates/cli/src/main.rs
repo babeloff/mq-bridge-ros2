@@ -574,6 +574,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // The UI saves to this path, and an init source fills it; otherwise a missing file is a typo.
+    if let Some(path) = &args.config {
+        let has_other_source = args.ui
+            || args.init_config.is_some()
+            || args.init_config_str.is_some()
+            || args.config_str.is_some()
+            || ["INIT_CONFIG_FILE", "INIT_CONFIG_STRING", "CONFIG_STRING"]
+                .iter()
+                .any(|name| std::env::var_os(name).is_some());
+        if !has_other_source && !std::path::Path::new(path).exists() {
+            anyhow::bail!("configuration file '{path}' does not exist");
+        }
+    }
     let (mut config, config_file_path): (AppConfig, String) = load_config(
         args.config,
         args.init_config,
@@ -1058,6 +1071,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
 
     let (from, to) = copy_endpoints(&args)?;
     let (mut input, output) = copy_route_endpoints(from, to)?;
+    warn_about_surprising_copy(&input, &output);
     let resume = if args.resume {
         Some(copy_pipeline::configure_resume(
             &mut input,
@@ -1238,6 +1252,27 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     }
 }
 
+/// Warns about two combinations that run without an error and move less than expected.
+fn warn_about_surprising_copy(input: &mq_bridge::models::Endpoint, output: &mq_bridge::models::Endpoint) {
+    let source = input.endpoint_type.name();
+    if output.endpoint_type.name() == "response"
+        && matches!(
+            source,
+            "file" | "sqlx" | "object_store" | "static" | "clickhouse" | "dir_spool"
+        )
+    {
+        warn!("`response:` replies to the source, and a {source} source takes no replies: every row is read and discarded");
+    }
+    if source == "sqlx" {
+        let config = serde_json::to_value(&input.endpoint_type).unwrap_or_default();
+        let sqlx = &config["sqlx"];
+        let unset = |field: &str| matches!(&sqlx[field], serde_json::Value::Null | serde_json::Value::Bool(false));
+        if unset("cursor_column") && unset("delete_after_read") && unset("select_query") {
+            warn!("the source table is read as a work queue: rows are leased and left in place, so a repeated copy first finds nothing and later copies them again. Set `cursor_column` or `delete_after_read=true`");
+        }
+    }
+}
+
 /// Builds a copy's source and destination. `checkpoint` shares it, so both derive
 /// the same resume identity from the same URIs.
 fn copy_route_endpoints(
@@ -1332,6 +1367,10 @@ struct Throughput {
     /// Messages taken off the source, filtered or not. The rate is derived from
     /// this, since the elapsed time covers reading all of them.
     read: u64,
+    /// Rows a source middleware rejected: failed to decrypt or transform.
+    rejected: u64,
+    /// Rows a `dlq` middleware diverted to its dead-letter target.
+    dead_lettered: u64,
     elapsed_s: f64,
     rows_per_second: u64,
 }
@@ -1340,11 +1379,17 @@ impl Throughput {
     /// `copied 333_495 of 1_000_000 rows` when a filter dropped some, plain
     /// `copied 1_000_000 rows` when nothing was dropped.
     fn rows_display(&self) -> String {
-        if self.read > self.rows {
-            format!("{} of {} rows", grouped(self.rows), grouped(self.read))
+        // Dead-lettered rows left the source like any other but did not reach the target.
+        let rows = self.rows.saturating_sub(self.dead_lettered);
+        let mut display = if self.read > self.rows {
+            format!("{} of {} rows", grouped(rows), grouped(self.read))
         } else {
-            format!("{} rows", grouped(self.rows))
+            format!("{} rows", grouped(rows))
+        };
+        if self.dead_lettered > 0 {
+            display.push_str(&format!(", dead-lettered {}", grouped(self.dead_lettered)));
         }
+        display
     }
 
     /// Sub-second runs read as milliseconds: `0.07s` hides whether a copy took
@@ -1414,6 +1459,8 @@ fn throughput(
     Throughput {
         rows,
         read,
+        rejected: mq_bridge::middleware::rejected_input_messages(),
+        dead_lettered: mq_bridge::middleware::dead_lettered_messages(),
         elapsed_s,
         rows_per_second,
     }
@@ -1449,6 +1496,14 @@ fn copy_result(
     if let Some(cause) = error {
         anyhow::bail!(
             "copy did not deliver every row it read ({}): {cause}",
+            moved.rows_display()
+        );
+    }
+
+    if moved.rejected > 0 {
+        anyhow::bail!(
+            "copy rejected {} of the rows it read ({}): see the errors above",
+            grouped(moved.rejected),
             moved.rows_display()
         );
     }
@@ -2543,13 +2598,28 @@ fn coerce_scalar(s: String, ty: FieldType) -> serde_json::Value {
 /// restores the detail.
 fn init_copy_logging(color: ColorChoice, verbose: bool) {
     use std::io::IsTerminal;
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
     let default = if verbose { "info" } else { "warn" };
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    // stderr, so stdout carries only the summary line; `MQB_LOG_STDOUT` restores the old stream.
+    let to_stdout = std::env::var_os("MQB_LOG_STDOUT").is_some_and(|v| !v.is_empty() && v != "0");
+    let (writer, is_terminal) = if to_stdout {
+        (
+            BoxMakeWriter::new(std::io::stdout),
+            std::io::stdout().is_terminal(),
+        )
+    } else {
+        (
+            BoxMakeWriter::new(std::io::stderr),
+            std::io::stderr().is_terminal(),
+        )
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
-        .with_ansi(color.enabled(std::io::stdout().is_terminal(), no_color_requested()))
+        .with_writer(writer)
+        .with_ansi(color.enabled(is_terminal, no_color_requested()))
         .try_init();
 }
 
@@ -2698,6 +2768,8 @@ mod copy_result_tests {
         Throughput {
             rows,
             read: rows,
+            rejected: 0,
+            dead_lettered: 0,
             elapsed_s: 1.0,
             rows_per_second: rows,
         }
@@ -2725,6 +2797,8 @@ mod copy_result_tests {
         let filtered = Throughput {
             rows: 333_495,
             read: 1_000_000,
+            rejected: 0,
+            dead_lettered: 0,
             elapsed_s: 1.05,
             rows_per_second: 952_380,
         };

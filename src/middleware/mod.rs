@@ -9,7 +9,32 @@ use crate::models::{Endpoint, Middleware};
 use crate::traits::CustomMiddlewareFactory;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static REJECTED_INPUT_MESSAGES: AtomicU64 = AtomicU64::new(0);
+
+/// Input messages a consumer middleware rejected and acked (failed to decrypt or
+/// transform), process-wide. A one-shot job reads it to tell a lossy run from a clean one.
+pub fn rejected_input_messages() -> u64 {
+    REJECTED_INPUT_MESSAGES.load(Ordering::Relaxed)
+}
+
+static DEAD_LETTERED_MESSAGES: AtomicU64 = AtomicU64::new(0);
+
+/// Messages a `dlq` middleware delivered to its dead-letter target, process-wide.
+pub fn dead_lettered_messages() -> u64 {
+    DEAD_LETTERED_MESSAGES.load(Ordering::Relaxed)
+}
+
+pub(crate) fn note_dead_lettered(count: usize) {
+    DEAD_LETTERED_MESSAGES.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[allow(dead_code)]
+pub(crate) fn note_rejected_input_message() {
+    REJECTED_INPUT_MESSAGES.fetch_add(1, Ordering::Relaxed);
+}
 
 #[cfg(feature = "aggregate")]
 pub(crate) mod aggregate;

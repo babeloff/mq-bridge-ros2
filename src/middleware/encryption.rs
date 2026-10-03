@@ -174,10 +174,13 @@ impl MessageConsumer for EncryptionConsumer {
                         kept_indices.push(index);
                         kept.push(message);
                     }
-                    Err(error) => tracing::error!(
-                        message_id = format_args!("{:032x}", message.message_id),
-                        "Rejecting message that failed to decrypt: {error}"
-                    ),
+                    Err(error) => {
+                        super::note_rejected_input_message();
+                        tracing::error!(
+                            message_id = format_args!("{:032x}", message.message_id),
+                            "Rejecting message that failed to decrypt: {error}"
+                        )
+                    }
                 }
             }
 
