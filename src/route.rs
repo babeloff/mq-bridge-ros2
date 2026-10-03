@@ -636,6 +636,49 @@ fn apply_server_failure_policy(
     }
 }
 
+/// Rejected credentials (or a server that can never serve the request): retrying a one-shot
+/// job against them only delays the error. A continuous route keeps retrying, since
+/// credentials can be rotated under it.
+fn is_authentication_failure(error: &anyhow::Error) -> bool {
+    const MARKERS: &[&str] = &[
+        "password authentication failed",
+        "access_refused",
+        "authentication failed",
+        "access denied for user",
+        "invalid username or password",
+        "wrongpass",
+        "needs a replica set",
+    ];
+    let text = format!("{error:#}").to_ascii_lowercase();
+    let generic_marker_counts = !is_other_grpc_status(error);
+    MARKERS.iter().any(|marker| {
+        text.contains(marker) && (generic_marker_counts || *marker != "authentication failed")
+    })
+}
+
+/// A gRPC status other than `Unauthenticated`, whose message may only quote a peer's failure.
+#[cfg(feature = "grpc")]
+fn is_other_grpc_status(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::endpoints::grpc::GrpcStatusError>()
+            .is_some_and(|status| status.code() != tonic::Code::Unauthenticated)
+    })
+}
+
+#[cfg(not(feature = "grpc"))]
+fn is_other_grpc_status(_error: &anyhow::Error) -> bool {
+    false
+}
+
+/// Read positions of sources without a durable checkpoint, kept for one route run so a
+/// reconnect continues where it was instead of starting over.
+pub(crate) type RunPositions = Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
+
+tokio::task_local! {
+    pub(crate) static RUN_POSITIONS: RunPositions;
+}
+
 /// Records a batch the route discarded after a permanent sink rejection.
 ///
 /// Dropping is deliberate — it is what stops a poison message from wedging the
@@ -1405,6 +1448,7 @@ impl Route {
             // flapping, and reporting it `healthy` the moment it connects again hides
             // exactly the failure an operator is looking for.
             let mut consecutive_failures = 0usize;
+            let run_positions = RunPositions::default();
             'reconnect: loop {
                 let route_arc = Arc::clone(&route);
                 let name_arc = Arc::clone(&name);
@@ -1419,7 +1463,8 @@ impl Route {
                 // The actual route logic is in `run_until_err`.
                 let drops_run = Arc::clone(&drops);
                 let sends_run = Arc::clone(&sends_loop);
-                let mut run_task = tokio::spawn(async move {
+                let positions = Arc::clone(&run_positions);
+                let mut run_task = tokio::spawn(RUN_POSITIONS.scope(positions, async move {
                     route_arc
                         .run_until_err_reporting_to(
                             &name_arc,
@@ -1430,7 +1475,7 @@ impl Route {
                             no_resume,
                         )
                         .await
-                });
+                }));
 
                 // Inner loop: process ready + result events for this connection attempt.
                 loop {
@@ -1489,6 +1534,7 @@ impl Route {
                                         e.downcast_ref::<ProcessingError>().is_some_and(|pe| matches!(pe, ProcessingError::NonRetryable(_)))
                                         || e.downcast_ref::<ConsumerError>().is_some_and(|ce| matches!(ce, ConsumerError::Permanent(_)))
                                         || e.is::<crate::errors::InvalidConfig>()
+                                        || (exit_on_empty && is_authentication_failure(&e))
                                         || is_end_of_stream;
 
                                     // EndOfStream is a clean terminal, not a failure, so
@@ -1622,7 +1668,11 @@ impl Route {
                 "Route '{}' failed to start: did not become ready within {}ms{}",
                 name_str,
                 startup_timeout.as_millis(),
-                cause
+                if cause.is_empty() {
+                    ": an endpoint was still connecting and had reported no error"
+                } else {
+                    cause.as_str()
+                }
             ),
         })
     }
@@ -2635,6 +2685,36 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn authentication_failures_are_told_apart_from_unreachable_hosts() {
+        let auth = anyhow::anyhow!("connect").context(
+            "error returned from database: password authentication failed for user \"app\"",
+        );
+        assert!(is_authentication_failure(&auth));
+        assert!(is_authentication_failure(&anyhow::anyhow!(
+            "ACCESS_REFUSED - Login was refused"
+        )));
+        assert!(!is_authentication_failure(&anyhow::anyhow!(
+            "Connection refused (os error 61)"
+        )));
+    }
+
+    #[cfg(feature = "grpc")]
+    #[test]
+    fn a_grpc_status_is_an_authentication_failure_only_when_unauthenticated() {
+        use crate::endpoints::grpc::GrpcStatusError;
+        let status = |status: tonic::Status| anyhow::Error::new(GrpcStatusError::from(status));
+        assert!(is_authentication_failure(&status(
+            tonic::Status::unauthenticated("authentication failed")
+        )));
+        assert!(!is_authentication_failure(
+            &status(tonic::Status::unavailable("upstream authentication failed")).context("send")
+        ));
+        assert!(is_authentication_failure(&status(
+            tonic::Status::unavailable("ACCESS_REFUSED - Login was refused")
+        )));
+    }
     use crate::models::{
         Endpoint, EndpointType, FaultMode, FileConfig, MemoryConfig, Middleware, MongoDbConfig,
         NameBy, RandomPanicMiddleware, RouteOptions, SqlxConfig,

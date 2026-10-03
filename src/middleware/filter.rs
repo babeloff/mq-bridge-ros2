@@ -873,7 +873,10 @@ impl FilterConsumer {
     pub fn new(inner: Box<dyn MessageConsumer>, expression: &str) -> anyhow::Result<Self> {
         Ok(Self {
             inner,
-            filter: Arc::new(CompiledFilter::new(expression).context("invalid filter expression")?),
+            filter: Arc::new(
+                CompiledFilter::new(expression)
+                    .map_err(|e| anyhow!("invalid filter expression: {e:#}"))?,
+            ),
             deferred: DeferredCommits::new(),
         })
     }
@@ -1106,7 +1109,10 @@ impl FilterPublisher {
     pub fn new(inner: Box<dyn MessagePublisher>, expression: &str) -> anyhow::Result<Self> {
         Ok(Self {
             inner,
-            filter: Arc::new(CompiledFilter::new(expression).context("invalid filter expression")?),
+            filter: Arc::new(
+                CompiledFilter::new(expression)
+                    .map_err(|e| anyhow!("invalid filter expression: {e:#}"))?,
+            ),
         })
     }
 }

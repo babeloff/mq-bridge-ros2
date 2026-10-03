@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3704,6 +3704,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-sns",
  "aws-sdk-sqs",
+ "aws-sigv4",
  "base64 0.23.1",
  "byteorder",
  "bytes",
@@ -3791,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-bindings-common"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "anyhow",
  "fast-uuid-v7",
@@ -3805,7 +3806,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-node"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3830,6 +3831,7 @@ name = "mq-bridge-plugin-fixture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "async-trait",
  "cbindgen",
  "libloading",
@@ -3859,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-py"
-version = "0.4.17"
+version = "0.4.18"
 dependencies = [
  "anyhow",
  "async-trait",

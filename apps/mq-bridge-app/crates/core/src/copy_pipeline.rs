@@ -196,6 +196,19 @@ pub fn configure_resume(
             config.cursor_id.get_or_insert_with(|| state_id.clone());
             Ok(ResumeCapability::ExternalCheckpoint)
         }
+        EndpointType::HttpBulk(config) => {
+            let Some(read) = config
+                .read
+                .as_mut()
+                .filter(|r| r.checkpoint_store.is_some())
+            else {
+                bail!(
+                    "source `http_bulk` needs an external `read.checkpoint_store` for resumable copy"
+                );
+            };
+            read.cursor_id.get_or_insert_with(|| state_id.clone());
+            Ok(ResumeCapability::ExternalCheckpoint)
+        }
         EndpointType::File(config) => match config.mode {
             Some(FileConsumerMode::GroupSubscribe { .. }) => bail!(
                 "source `file` has offset state, but resumable copy is not enabled because its current batch commit is not safe across partial failures"
@@ -345,6 +358,13 @@ pub fn expand_uri_variables(uri: &str) -> anyhow::Result<String> {
     })
     .into_owned();
 
+    // `${payload:id}` is a message template the engine fills in, not a variable.
+    if let Some(template) = missing.iter().find(|name| name.contains(':')) {
+        bail!(
+            "`${{{template}}}` in endpoint URI is a message template, not an environment variable; \
+             write it as `$%7B{template}%7D` so it reaches the endpoint unexpanded"
+        );
+    }
     if !missing.is_empty() {
         bail!(
             "undefined environment variable `{}` in endpoint URI (write a literal `$` as `%24`)",

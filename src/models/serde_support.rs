@@ -133,6 +133,10 @@ impl<'de> Deserialize<'de> for Endpoint {
                     }
                 }
 
+                if let Some(serde_json::Value::Object(file)) = temp_map.get("file") {
+                    reject_unknown_file_keys(file).map_err(serde::de::Error::custom)?;
+                }
+
                 // Deserialize the rest of the map into the flattened EndpointType.
                 let temp_val = serde_json::Value::Object(temp_map);
                 let endpoint_type: EndpointType = match serde_json::from_value(temp_val.clone()) {
@@ -179,6 +183,37 @@ impl<'de> Deserialize<'de> for Endpoint {
         }
 
         deserializer.deserialize_any(EndpointVisitor)
+    }
+}
+
+/// `FileConfig` flattens its mode, which rules out serde's `deny_unknown_fields`.
+const FILE_CONFIG_KEYS: &[&str] = &[
+    "path",
+    "name_by",
+    "idempotency",
+    "delimiter",
+    "mode",
+    "delete",
+    "group_id",
+    "read_from_tail",
+    "format",
+    "compression",
+    "encryption",
+    "source_metadata",
+];
+
+fn reject_unknown_file_keys(
+    file: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    match file
+        .keys()
+        .find(|key| !FILE_CONFIG_KEYS.contains(&key.as_str()))
+    {
+        Some(key) => Err(format!(
+            "unknown field `{key}` in file endpoint, expected one of {}",
+            FILE_CONFIG_KEYS.join(", ")
+        )),
+        None => Ok(()),
     }
 }
 
@@ -662,5 +697,43 @@ mod tests {
 
         let error = deserialize_middlewares_from_value(value).unwrap_err();
         assert!(error.to_string().contains("found 'typo'"));
+    }
+
+    #[test]
+    fn every_serialized_file_config_key_is_accepted_by_the_endpoint() {
+        let modes = [
+            FileConsumerMode::Consume { delete: true },
+            FileConsumerMode::Subscribe { delete: true },
+            FileConsumerMode::GroupSubscribe {
+                group_id: "group".to_string(),
+                read_from_tail: true,
+            },
+        ];
+        for mode in modes {
+            let config = FileConfig {
+                path: "messages.jsonl".to_string(),
+                idempotency: Some(true),
+                delimiter: Some("\n".to_string()),
+                mode: Some(mode),
+                source_metadata: true,
+                ..Default::default()
+            };
+            let file = serde_json::to_value(&config).unwrap();
+            let endpoint: Endpoint = serde_json::from_value(serde_json::json!({ "file": file }))
+                .unwrap_or_else(|error| panic!("{file}: {error}"));
+            let EndpointType::File(parsed) = endpoint.endpoint_type else {
+                panic!("{file} did not parse as a file endpoint");
+            };
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), file);
+        }
+    }
+
+    #[test]
+    fn file_endpoint_rejects_an_unknown_key() {
+        let error = serde_json::from_value::<Endpoint>(serde_json::json!({
+            "file": { "path": "messages.jsonl", "delet": true }
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `delet`"));
     }
 }

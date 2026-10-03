@@ -20,7 +20,9 @@ use mq_bridge::traits::{
     CustomEndpointFactory, MessageConsumer, MessageDisposition, MessagePublisher,
 };
 use mq_bridge::{CanonicalMessage, SentBatch};
-use mq_bridge_plugin_fixture::{commit_log_queue, drop_log_queue, FixtureFactory};
+use mq_bridge_plugin_fixture::{
+    commit_log_queue, disconnect_log_queue, drop_log_queue, FixtureFactory,
+};
 use serde_json::{json, Value};
 
 const WORKSPACE: &str = env!("CARGO_MANIFEST_DIR");
@@ -216,6 +218,44 @@ async fn a_freed_publisher_is_dropped_inside_the_plugin_runtime() {
     let mut drops = consumer(&*factory, json!({ "queue": drop_log_queue("freed") })).await;
     let logged = receive_one_batch(&mut *drops, WAIT).await.messages;
     assert_eq!(payload_texts(&logged), ["in-runtime"]);
+}
+
+/// The outcome is a task-local in the host, so it has to cross the ABI as a value.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loaded_publisher_learns_how_its_route_ended() {
+    let factory = plugin_factory();
+    let route = |queue: &str, input: Value| {
+        let custom = |config: Value| {
+            Endpoint::new(EndpointType::Custom {
+                name: "fixture".to_string(),
+                config,
+            })
+        };
+        Route::new(custom(input), custom(json!({ "queue": queue })))
+    };
+    let outcome = |queue: &'static str| {
+        let factory = Arc::clone(&factory);
+        async move {
+            let config = json!({ "queue": disconnect_log_queue(queue) });
+            let mut log = consumer(&*factory, config).await;
+            payload_texts(&receive_one_batch(&mut *log, WAIT).await.messages)
+        }
+    };
+
+    let drained = json!({ "queue": "ended-in", "fail_receive": "end_of_stream" });
+    let ended = route("ended-out", drained);
+    let ended = ended.run_until_err("ended", None, None).await;
+    assert!(!ended.unwrap(), "an ended input completes the route");
+    assert_eq!(outcome("ended-out").await, ["completed"]);
+
+    let (stop, stopped) = async_channel::bounded(1);
+    let running = route("stopped-out", json!({ "queue": "stopped-in" }));
+    let running =
+        tokio::spawn(async move { running.run_until_err("stopped", Some(stopped), None).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    stop.send(()).await.unwrap();
+    running.await.unwrap().unwrap();
+    assert_eq!(outcome("stopped-out").await, ["stopped"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

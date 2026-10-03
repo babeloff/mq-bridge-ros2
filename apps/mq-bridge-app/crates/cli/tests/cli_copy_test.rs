@@ -81,9 +81,8 @@ fn assert_failure_contains(output: &Output, case: &str, expected: &str) {
 
 /// Everything the run wrote, both streams.
 ///
-/// The tracing layer writes to **stdout** — warnings and per-row rejections
-/// included — while only the final `Error:` reaches stderr. A log assertion
-/// that reads one stream sees half the run.
+/// The summary line goes to stdout, log lines and the final `Error:` to stderr
+/// (to stdout too under `MQB_LOG_STDOUT`).
 fn logged(output: &Output) -> String {
     format!(
         "{}{}",
@@ -888,7 +887,7 @@ fn the_summary_survives_the_default_error_level_and_verbose_adds_the_chatter() {
         &[],
     );
     assert_success(&quiet, "default copy");
-    let report = String::from_utf8_lossy(&quiet.stdout).to_string();
+    let report = logged(&quiet);
     assert!(
         report.contains("copied 2 rows"),
         "the summary must print at the default level: {report}"
@@ -906,7 +905,7 @@ fn the_summary_survives_the_default_error_level_and_verbose_adds_the_chatter() {
         &["--verbose"],
     );
     assert_success(&loud, "verbose copy");
-    let loud_report = String::from_utf8_lossy(&loud.stdout).to_string();
+    let loud_report = logged(&loud);
     assert!(
         loud_report.contains("File sink opened") && loud_report.contains("copied 2 rows"),
         "verbose must add the chatter and keep the summary: {loud_report}"
@@ -3475,6 +3474,11 @@ fn a_dlq_captures_the_rows_a_sink_permanently_rejects() {
         "every rejected row must reach the dlq endpoint",
     );
     assert_eq!(fixture.requests(), rows.len(), "one attempt per row");
+    let summary = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        summary.contains("copied 0 rows, dead-lettered 4"),
+        "the summary must not count dead-lettered rows as copied: {summary}"
+    );
 }
 
 /// Extra fields cannot be kept -- there is no column for them -- but losing

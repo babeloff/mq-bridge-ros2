@@ -70,15 +70,16 @@ use crate::support::plugin_abi::{
     MqbBatchHandle, MqbBuffer, MqbCompletion, MqbConsumerHandle, MqbFactoryHandle, MqbFilterHandle,
     MqbMessage, MqbMiddlewareHandle, MqbPluginVTable, MqbPublisherHandle, MqbResponsesHandle,
     MqbSlice, MqbStatus, MQB_CAP_CONSUMER, MQB_CAP_MIDDLEWARE, MQB_CAP_PUBLISHER,
-    MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DISPOSITION_NACK,
-    MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG,
-    MQB_ERR_PANIC, MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_MIDDLEWARE_RECEIVE, MQB_OK,
-    MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT, MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR,
-    MQB_PLUGIN_ABI_MINOR, MQB_SCHEMA_ENDPOINT, MQB_SCHEMA_MIDDLEWARE,
+    MQB_DELIVERY_ACKNOWLEDGES, MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DISCONNECT_COMPLETED,
+    MQB_DISCONNECT_FAILED, MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY, MQB_END_OF_STREAM,
+    MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC, MQB_ERR_PERMANENT,
+    MQB_ERR_RETRYABLE, MQB_MIDDLEWARE_RECEIVE, MQB_OK, MQB_OUTCOME_OK, MQB_OUTCOME_PERMANENT,
+    MQB_OUTCOME_RETRYABLE, MQB_PLUGIN_ABI_MAJOR, MQB_PLUGIN_ABI_MINOR, MQB_SCHEMA_ENDPOINT,
+    MQB_SCHEMA_MIDDLEWARE,
 };
 use crate::traits::{
-    BatchCommitFunc, CustomEndpointFactory, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher,
+    BatchCommitFunc, CustomEndpointFactory, DisconnectOutcome, EndpointStatus, MessageConsumer,
+    MessageDisposition, MessagePublisher,
 };
 use crate::{CanonicalMessage, SentBatch};
 
@@ -285,6 +286,9 @@ struct PublisherState {
     /// back into the publisher on every query would cross the ABI for a value
     /// that cannot change.
     requires_ordered_publish: bool,
+    /// Set once `publisher_disconnect` ran, so `publisher_close` does not
+    /// repeat the flush and the hook.
+    disconnected: std::sync::atomic::AtomicBool,
 }
 
 struct ResponsesState {
@@ -957,6 +961,7 @@ unsafe extern "C" fn publisher_create(
                 publisher: Arc::from(publisher),
                 runtime,
                 requires_ordered_publish,
+                disconnected: std::sync::atomic::AtomicBool::new(false),
             }))
         };
         MQB_OK
@@ -1273,23 +1278,75 @@ unsafe extern "C" fn publisher_close(
         let Some(state) = (unsafe { borrow::<PublisherState>(publisher.0) }) else {
             return MQB_OK;
         };
-        let shared = Arc::clone(&state.publisher);
-        let closed = block_on(&state.runtime, async move {
-            shared.flush().await?;
-            if let Some(hook) = shared.on_disconnect_hook() {
-                hook.await?;
-            }
-            Ok::<_, anyhow::Error>(())
-        });
-        match closed {
-            Ok(Ok(())) => MQB_OK,
-            Ok(Err(error)) => {
-                unsafe { set_error(err, format!("{error:#}")) };
-                MQB_ERR_RETRYABLE
-            }
-            Err(failure) => unsafe { task_failed(err, failure) },
+        // A 1.3 host already ran the disconnect work, with the outcome.
+        if state
+            .disconnected
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return MQB_OK;
         }
+        unsafe { disconnect(state, None, err) }
     })
+}
+
+unsafe extern "C" fn publisher_disconnect(
+    publisher: MqbPublisherHandle,
+    outcome: u32,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    guarded(err, || {
+        let Some(state) = (unsafe { borrow::<PublisherState>(publisher.0) }) else {
+            return MQB_OK;
+        };
+        if state
+            .disconnected
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return MQB_OK;
+        }
+        let outcome = match outcome {
+            MQB_DISCONNECT_COMPLETED => DisconnectOutcome::Completed,
+            MQB_DISCONNECT_FAILED => DisconnectOutcome::Failed,
+            _ => DisconnectOutcome::Stopped,
+        };
+        unsafe { disconnect(state, Some(outcome), err) }
+    })
+}
+
+/// Flushes and runs the disconnect hook, with `disconnect_outcome()` set when
+/// the host said how the route ended.
+unsafe fn disconnect(
+    state: &PublisherState,
+    outcome: Option<DisconnectOutcome>,
+    err: *mut MqbBuffer,
+) -> MqbStatus {
+    let shared = Arc::clone(&state.publisher);
+    let teardown = async move {
+        // The hook releases resources, so a failed flush must not skip it.
+        let flushed = shared.flush().await;
+        let hooked = match shared.on_disconnect_hook() {
+            Some(hook) => hook.await,
+            None => Ok(()),
+        };
+        flushed?;
+        hooked?;
+        Ok::<_, anyhow::Error>(())
+    };
+    let closed = match outcome {
+        Some(outcome) => block_on(
+            &state.runtime,
+            crate::traits::with_disconnect_outcome(outcome, teardown),
+        ),
+        None => block_on(&state.runtime, teardown),
+    };
+    match closed {
+        Ok(Ok(())) => MQB_OK,
+        Ok(Err(error)) => {
+            unsafe { set_error(err, format!("{error:#}")) };
+            MQB_ERR_RETRYABLE
+        }
+        Err(failure) => unsafe { task_failed(err, failure) },
+    }
 }
 
 unsafe extern "C" fn publisher_free(publisher: MqbPublisherHandle) {
@@ -1660,6 +1717,7 @@ where
         publisher_flush_async,
         plugin_init: super::forward::plugin_init,
         factory_delivery,
+        publisher_disconnect,
     })
 }
 

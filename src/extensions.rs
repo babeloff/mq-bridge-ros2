@@ -48,8 +48,23 @@ pub fn endpoint_config_schemas() -> BTreeMap<String, serde_json::Value> {
         return BTreeMap::new();
     };
     map.iter()
-        .filter_map(|(name, factory)| Some((name.clone(), factory.config_schema()?)))
+        .filter_map(|(name, factory)| {
+            let schema = factory.config_schema()?;
+            Some((
+                name.clone(),
+                crate::support::config_schema::flatten(&schema),
+            ))
+        })
         .collect()
+}
+
+/// The batch size the endpoint registered under `name` asks a host to use when
+/// the user chose none: the `x-mqb-default-batch-size` integer at the top of its
+/// configuration schema. Only a hint; a route's own `batch_size` always wins.
+pub fn endpoint_default_batch_size(name: &str) -> Option<usize> {
+    let schema = get_endpoint_factory(name)?.config_schema()?;
+    let size = schema.get("x-mqb-default-batch-size")?.as_u64()?;
+    usize::try_from(size).ok().filter(|size| *size > 0)
 }
 
 /// Removes the endpoint factory registered under `name`, freeing the name for
@@ -106,7 +121,11 @@ pub fn middleware_config_schemas() -> BTreeMap<String, Option<serde_json::Value>
         return BTreeMap::new();
     };
     map.iter()
-        .map(|(name, factory)| (name.clone(), factory.config_schema()))
+        .map(|(name, factory)| {
+            let schema = factory.config_schema();
+            let flat = schema.as_ref().map(crate::support::config_schema::flatten);
+            (name.clone(), flat)
+        })
         .collect()
 }
 
@@ -149,6 +168,30 @@ mod tests {
 
         assert!(error.to_string().contains("already registered"));
         assert!(Arc::ptr_eq(&first, &get_endpoint_factory(name).unwrap()));
+    }
+
+    #[test]
+    fn an_endpoint_states_its_default_batch_size_in_its_schema() {
+        #[derive(Debug)]
+        struct Bulk(serde_json::Value);
+        impl CustomEndpointFactory for Bulk {
+            fn config_schema(&self) -> Option<serde_json::Value> {
+                Some(self.0.clone())
+            }
+        }
+        let register = |name: &str, hint: serde_json::Value| {
+            let schema = serde_json::json!({ "type": "object", "x-mqb-default-batch-size": hint });
+            register_endpoint_factory(name, Arc::new(Bulk(schema))).unwrap();
+        };
+        register("extensions-test-batch-hint", 30_000.into());
+        register("extensions-test-batch-zero", 0.into());
+        register_endpoint_factory("extensions-test-batch-none", Arc::new(EndpointFactory)).unwrap();
+
+        let hint = endpoint_default_batch_size;
+        assert_eq!(hint("extensions-test-batch-hint"), Some(30_000));
+        assert_eq!(hint("extensions-test-batch-zero"), None);
+        assert_eq!(hint("extensions-test-batch-none"), None);
+        assert_eq!(hint("extensions-test-batch-unregistered"), None);
     }
 
     #[test]

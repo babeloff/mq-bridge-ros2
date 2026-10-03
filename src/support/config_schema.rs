@@ -363,8 +363,7 @@ fn subscheme_of(scheme: &str) -> Option<&str> {
 pub fn endpoint_uri_schema(name: &str) -> UriSchema {
     crate::extensions::get_endpoint_factory(name)
         .and_then(|factory| factory.config_schema())
-        .as_ref()
-        .map(UriSchema::from_schema)
+        .map(|schema| UriSchema::from_schema(&flatten(&schema)))
         .unwrap_or_default()
 }
 
@@ -407,7 +406,7 @@ pub fn check_endpoint_config(name: &str, config: &Value) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
-    match validate_config(&schema, config) {
+    match validate_config(&flatten(&schema), config) {
         Ok(()) => Ok(()),
         Err(Unenforceable(why)) => {
             tracing::warn!(
@@ -536,6 +535,120 @@ pub fn validate(schema: &Value) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// How deep [`flatten`] follows references before giving up on a cyclic schema.
+const MAX_REF_DEPTH: usize = 16;
+
+/// Rewrites a schema into the flat form a host reads: local `$ref`s are replaced
+/// by what they point to, and a `oneOf`/`anyOf` of `const`s becomes an `enum`.
+///
+/// That is the shape `#[derive(JsonSchema)]` gives an enum field, so a plugin can
+/// derive its schema without hand-writing one per enum. A schema that is already
+/// flat comes back unchanged. Only the definitions a cycle still points at are kept.
+pub fn flatten(schema: &Value) -> Value {
+    let mut flat = flatten_node(schema, schema, &mut Vec::new());
+    for key in ["$defs", "definitions"] {
+        let Some(Value::Object(definitions)) = flat.as_object_mut().and_then(|o| o.remove(key))
+        else {
+            continue;
+        };
+        let prefix = format!("#/{key}/");
+        let mut pending = Vec::new();
+        references(&flat, &prefix, &mut pending);
+        let mut kept = Map::new();
+        while let Some(name) = pending.pop() {
+            if kept.contains_key(&name) {
+                continue;
+            }
+            if let Some(definition) = definitions.get(&name) {
+                references(definition, &prefix, &mut pending);
+                kept.insert(name, definition.clone());
+            }
+        }
+        if !kept.is_empty() {
+            flat[key] = Value::Object(kept);
+        }
+    }
+    flat
+}
+
+/// Collects the definition names `node` refers to under `prefix`.
+fn references(node: &Value, prefix: &str, names: &mut Vec<String>) {
+    match node {
+        Value::Object(object) => {
+            for (key, value) in object {
+                match value.as_str().filter(|_| key == "$ref") {
+                    // A pointer into a definition still needs the whole definition.
+                    Some(reference) => names.extend(
+                        reference
+                            .strip_prefix(prefix)
+                            .and_then(|rest| rest.split('/').next())
+                            .map(|name| name.replace("~1", "/").replace("~0", "~")),
+                    ),
+                    None => references(value, prefix, names),
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|i| references(i, prefix, names)),
+        _ => {}
+    }
+}
+
+/// `path` holds the references being expanded; one already on it is a cycle and stays a `$ref`.
+fn flatten_node<'a>(node: &'a Value, root: &'a Value, path: &mut Vec<&'a str>) -> Value {
+    let object = match node {
+        Value::Object(object) => object,
+        Value::Array(items) => {
+            return Value::Array(items.iter().map(|i| flatten_node(i, root, path)).collect())
+        }
+        other => return other.clone(),
+    };
+    let mut out = Map::new();
+    let target = object
+        .get("$ref")
+        .and_then(Value::as_str)
+        .filter(|reference| path.len() < MAX_REF_DEPTH && !path.contains(reference))
+        .and_then(|reference| Some((reference, local_definition(root, reference)?)));
+    if let Some((reference, definition)) = target {
+        path.push(reference);
+        if let Value::Object(resolved) = flatten_node(definition, root, path) {
+            out = resolved;
+        }
+        path.pop();
+    }
+    for (key, value) in object {
+        if key == "$ref" && target.is_some() {
+            continue;
+        }
+        // A sibling of `$ref`, such as the field's own description, wins.
+        out.insert(key.clone(), flatten_node(value, root, path));
+    }
+    for key in ["oneOf", "anyOf"] {
+        let Some(constants) = out.get(key).and_then(constants_of) else {
+            continue;
+        };
+        if constants.iter().all(Value::is_string) {
+            out.entry("type").or_insert_with(|| Value::from("string"));
+        }
+        out.remove(key);
+        out.insert("enum".to_string(), Value::Array(constants));
+    }
+    Value::Object(out)
+}
+
+/// The values of a union whose every branch is a `const`, else `None`.
+fn constants_of(union: &Value) -> Option<Vec<Value>> {
+    let branches = union.as_array().filter(|branches| !branches.is_empty())?;
+    branches.iter().map(|b| b.get("const").cloned()).collect()
+}
+
+fn local_definition<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let pointer = reference.strip_prefix('#')?;
+    ["/$defs/", "/definitions/"]
+        .iter()
+        .any(|prefix| pointer.starts_with(prefix))
+        .then(|| root.pointer(pointer))?
 }
 
 #[cfg(test)]
@@ -893,5 +1006,103 @@ mod tests {
         assert!(validate(&json!([1, 2])).is_err());
         assert!(validate(&json!({ "type": "string" })).is_err());
         assert!(validate(&json!({ "type": "object", "properties": 7 })).is_err());
+    }
+
+    /// The schema `#[derive(JsonSchema)]` gives a struct with a documented enum field.
+    fn derived_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "method": {
+                    "description": "How an upsert is written.",
+                    "$ref": "#/$defs/WriteMethod",
+                    "default": "replace",
+                },
+                "compression": { "$ref": "#/$defs/Compression" },
+            },
+            "$defs": {
+                "WriteMethod": {
+                    "description": "The enum's own text.",
+                    "oneOf": [
+                        { "type": "string", "const": "replace", "description": "Replace." },
+                        { "type": "string", "const": "update", "description": "Merge." },
+                    ],
+                },
+                "Compression": { "type": "string", "enum": ["none", "gzip"] },
+            },
+        })
+    }
+
+    #[test]
+    fn a_derived_enum_is_flattened_to_the_form_a_host_reads() {
+        let flat = flatten(&derived_schema());
+
+        assert_eq!(
+            flat,
+            json!({
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "description": "How an upsert is written.",
+                        "type": "string",
+                        "enum": ["replace", "update"],
+                        "default": "replace",
+                    },
+                    "compression": { "type": "string", "enum": ["none", "gzip"] },
+                },
+            })
+        );
+        validate_config(&flat, &json!({ "method": "update" })).expect("a listed value");
+        assert!(validate_config(&flat, &json!({ "method": "merge" })).is_err());
+    }
+
+    #[test]
+    fn a_flat_schema_is_left_as_it_is() {
+        let schema = strict_schema();
+        assert_eq!(flatten(&schema), schema);
+    }
+
+    #[test]
+    fn a_cyclic_or_unknown_reference_is_kept_rather_than_followed_forever() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "node": { "$ref": "#/$defs/Node" },
+                "other": { "$ref": "#/$defs/Missing" },
+            },
+            "$defs": { "Node": { "properties": { "next": { "$ref": "#/$defs/Node" } } } },
+        });
+        let flat = flatten(&schema);
+        assert_eq!(flat["properties"]["other"]["$ref"], "#/$defs/Missing");
+        assert_eq!(
+            flat["properties"]["node"],
+            json!({ "properties": { "next": { "$ref": "#/$defs/Node" } } })
+        );
+        // The reference left behind still resolves.
+        assert!(flat.pointer("/$defs/Node/properties/next").is_some());
+        assert!(flat.pointer("/$defs/Missing").is_none());
+    }
+
+    #[test]
+    fn a_reference_into_a_definition_resolves_and_keeps_the_definition_a_cycle_needs() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "left": { "$ref": "#/$defs/Pair/properties/left" },
+                "loop": { "$ref": "#/$defs/Node/properties/next" },
+            },
+            "$defs": {
+                "Pair": { "properties": { "left": { "type": "integer" } } },
+                "Node": { "properties": { "next": { "$ref": "#/$defs/Node/properties/next" } } },
+            },
+        });
+        let flat = flatten(&schema);
+        assert_eq!(flat["properties"]["left"], json!({ "type": "integer" }));
+        assert_eq!(
+            flat["properties"]["loop"]["$ref"],
+            "#/$defs/Node/properties/next"
+        );
+        assert!(flat.pointer("/$defs/Node/properties/next").is_some());
+        assert!(flat.pointer("/$defs/Pair").is_none());
     }
 }

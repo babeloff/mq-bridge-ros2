@@ -45,6 +45,29 @@ impl SentBatch {
             }
         }
     }
+
+    /// Builds the result from one outcome per message, in batch order: `None`
+    /// for a message that was sent, `Some(error)` for one that was not. A count
+    /// that differs from the messages' is an error, so none is acknowledged unseen.
+    pub fn from_outcomes(
+        messages: Vec<CanonicalMessage>,
+        outcomes: impl IntoIterator<Item = Option<PublisherError>>,
+    ) -> Result<Self, PublisherError> {
+        let outcomes: Vec<_> = outcomes.into_iter().collect();
+        if outcomes.len() != messages.len() {
+            return Err(PublisherError::NonRetryable(anyhow::anyhow!(
+                "{} outcomes for {} messages",
+                outcomes.len(),
+                messages.len()
+            )));
+        }
+        let failed = messages
+            .into_iter()
+            .zip(outcomes)
+            .filter_map(|(message, outcome)| Some((message, outcome?)))
+            .collect();
+        Ok(Self::from_failures(failed))
+    }
 }
 
 /// A successfully received single message.
@@ -104,6 +127,27 @@ mod tests {
             SentBatch::from_failures(failed),
             SentBatch::Partial { responses: None, failed } if failed.len() == 1
         ));
+    }
+
+    #[test]
+    fn outcomes_by_position_keep_only_the_failed_messages() {
+        let messages = || vec![CanonicalMessage::from("a"), CanonicalMessage::from("b")];
+        assert!(matches!(
+            SentBatch::from_outcomes(messages(), [None, None]),
+            Ok(SentBatch::Ack)
+        ));
+        assert!(SentBatch::from_outcomes(messages(), [None]).is_err());
+        assert!(SentBatch::from_outcomes(messages(), [None, None, None]).is_err());
+        let outcomes = [
+            None,
+            Some(PublisherError::NonRetryable(anyhow::anyhow!("bad"))),
+        ];
+        let Ok(SentBatch::Partial { failed, .. }) = SentBatch::from_outcomes(messages(), outcomes)
+        else {
+            panic!("expected a partial result");
+        };
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0.payload.as_ref(), b"b");
     }
 
     #[test]

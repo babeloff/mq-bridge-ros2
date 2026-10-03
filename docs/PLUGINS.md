@@ -180,9 +180,10 @@ virtualenv — which is why the search covers `HOMEBREW_PREFIX` and
 
 ### Replacing an endpoint `mqb` already has
 
-Some endpoints are compiled into `mqb` itself — Pulsar and Meilisearch are
-separate crates linked into the `full` build — and a registered factory is found
-before the search above ever runs. The built-in copy therefore wins by default,
+Some endpoints are compiled into `mqb` itself — Pulsar is a separate crate
+linked into the `full` build, and `meilisearch`, `typesense` and `elasticsearch`
+are built on `http_bulk` — and a registered factory is found before the search
+above ever runs. The built-in copy therefore wins by default,
 so one binary behaves the same wherever it runs.
 
 `MQB_PLUGIN_OVERRIDE` reverses that, which is how such an endpoint is updated
@@ -202,6 +203,23 @@ than a flag or a config key because endpoints are registered once per process,
 before any config is read — a `mqb copy` between two URIs never loads a config
 file at all, and two routes in one process cannot use different versions of the
 same endpoint.
+
+**`--plugin` and `plugins:` cannot replace a built-in endpoint.** They load a
+library next to what is already registered, so naming a library for `pulsar` or
+`meilisearch` stops `mqb` at startup with `` `meilisearch` … is already
+registered by another factory ``, with or without `MQB_PLUGIN_OVERRIDE`. The
+override only takes a library found on the [search path](#installing-a-plugin-by-name).
+To try a build that is not installed, point `MQB_PLUGIN_DIR` at its directory:
+
+```console
+MQB_PLUGIN_DIR=$PWD/target/release MQB_PLUGIN_OVERRIDE=meilisearch \
+  mqb copy -v 'postgres://…/orders' 'meilisearch://localhost:7700?index=orders'
+```
+
+The directory must pass the ownership check described above, and the file must
+keep its build name (`libmq_bridge_meilisearch.so`, `.dylib` on macOS). With
+`-v`, startup logs ``using the installed `meilisearch` plugin … instead of the
+built-in copy``; without that line the built-in copy is in use.
 
 When a plugin is installed but *not* preferred, startup says so rather than
 ignoring it silently, naming the file and the variable that would use it. And
@@ -279,7 +297,7 @@ way. A 1.0/1.1 host sees only the first entry.
 
 ### Shared helpers
 
-Three things most endpoints need, so a plugin doesn't write them itself:
+Things most endpoints need, so a plugin doesn't write them itself:
 
 - **`mq_bridge::errors::InvalidConfig`.** Return a config error wrapped in it from
   `create_consumer` or `create_publisher`, and the route stops instead of
@@ -293,6 +311,29 @@ Three things most endpoints need, so a plugin doesn't write them itself:
   report the error on the next call.
 - **`SentBatch::from_failures`.** `Ack` when nothing failed, otherwise a
   `Partial` naming the failed messages.
+- **`SentBatch::from_outcomes`.** The same from one `Option<PublisherError>` per
+  message in batch order, for a sink that tracks failures by position.
+- **`mq_bridge::support::ndjson::chunk`.** Frames JSON payloads as NDJSON request
+  bodies and starts a new body before one exceeds a byte limit, for a sink that
+  takes documents in bulk over HTTP.
+- **`mq_bridge::support::http_status`.** `is_retryable(status)` is true for 408,
+  429 and the 5xx codes a retry can help with; `publisher_error(status, error)`
+  wraps an error as `Retryable` or `NonRetryable` on that basis.
+- **`mq_bridge::support::poll_job::poll_until`.** Polls a job the remote system
+  runs asynchronously until it reports an end, backing off from 10 ms to 250 ms.
+  A callback fires every 60 s so the endpoint can log that it is still waiting,
+  and after 5 minutes it answers `None`. All four durations are set through
+  `PollSchedule`.
+- **`mq_bridge::support::change_op::ChangeOp`.** `ChangeOp::classify(operation,
+  delete_values)` maps a change record's operation name onto `Upsert`, `Delete`
+  or `Truncate`, for a sink fed by a CDC source.
+- **`mq_bridge::support::interpolation::CompiledTemplate`.** Compiles a
+  `${metadata:…}` or `${payload:…}` config value once and renders it per message,
+  for a field such as a routed index name or a change operation.
+- **`mq_bridge::checkpoint`.** `parse_checkpoint_store` and `build_external_store`
+  turn a `checkpoint_store` spec into a store for a source's read position. The
+  file backend needs no feature; the SQL, MongoDB and object-store ones need the
+  matching `mq-bridge` feature in the plugin.
 
 A batch's commit function gets exactly one disposition per message, so it needn't
 count them; the plugin host rejects any other count before calling it.
@@ -400,6 +441,12 @@ and a plugin written in another language just emits the document. `title`,
 `description` and `default` are what a host shows, so they are worth filling in;
 `models.rs` doc comments serve the same purpose for built-in endpoints.
 
+A derived schema spells an enum field as a `$ref` into `$defs`, and a documented
+enum as a `oneOf` of `const`s. The host flattens both
+(`mq_bridge::support::config_schema::flatten`) before it renders a form or
+checks a configuration, so derive the enum like any other field. Hosts older
+than 0.4.18 read only a flat `{"type": "string", "enum": [...]}`.
+
 `MiddlewareFactory::config_schema` does the same for the middleware half. A
 middleware is never addressed by a URI, so only the form applies.
 
@@ -486,8 +533,9 @@ batch_size, group, topic, url
 It is off by default on purpose. The schema is yours, not the route's, and the
 host checks only the subset the `transform` middleware already validates against
 — `type`, `required`, `enum`, `items`, nested `properties`, plus unknown
-top-level fields when you set `additionalProperties: false`. A schema using more
-than that (`oneOf`, `$ref` to a remote document, `patternProperties`) is logged
+top-level fields when you set `additionalProperties: false`. A local `$ref` and
+a `oneOf` of constants are resolved first. A schema using more than that (a
+`oneOf` of shapes, `$ref` to a remote document, `patternProperties`) is logged
 as uncheckable and passed through rather than rejected, so describing yourself
 richly for the sake of a form never costs you a working endpoint.
 
@@ -512,6 +560,37 @@ override `CustomEndpointFactory::idempotent_sink` or `acknowledges` instead; bot
 receive the endpoint's `config`. Since ABI 1.2 the host asks a loaded plugin the
 same way (`factory_delivery`); a 1.0/1.1 plugin is judged by its schema alone. Claim idempotency
 only for a write keyed on something replay-stable: the route trusts it.
+
+### Asking for a batch size
+
+`mqb copy` sends 1,024 messages per batch unless `--batch-size` says otherwise. A
+sink that is much faster with larger batches states its own default with a
+top-level schema annotation:
+
+```json
+{ "type": "object", "x-mqb-default-batch-size": 10000, "properties": { "...": {} } }
+```
+
+`mqb copy` and the MCP server's `start_route` use it when the output is that
+endpoint and no batch size was given. Routes in a config file are not affected:
+they take `batch_size` from the file. Larger batches hold more messages in
+memory at once, so pick the value from a measurement.
+
+### Learning how the route ended
+
+A publisher's `on_disconnect_hook` can read `mq_bridge::traits::disconnect_outcome()`
+to learn whether the route `Completed` (its input ended), was `Stopped`, or
+`Failed`. Since **ABI 1.3** this also works in a loaded plugin, with mq-bridge
+0.4.18 or later as the host: the host calls `publisher_disconnect` with the
+outcome before it closes the publisher.
+
+In an older host the hook still runs when the publisher closes, but
+`disconnect_outcome()` returns `None`. Treat `None` as `Stopped`. An action that
+is only safe after a complete run, such as swapping a freshly loaded table into
+place, must be skipped then.
+
+An error returned from the hook is logged as a warning. It does not fail the
+route, and `mqb copy` still exits successfully.
 
 ### Ordered publishing
 
@@ -637,6 +716,11 @@ broker delays redelivery beyond a test's patience, and the metadata check off
 
 `build_plugin_cdylib` builds the package and reads the artifact path back out of
 cargo, so tests do not hard-code target-directory layout or file extensions.
+
+For an endpoint that talks HTTP, `test_support::StubHttpServer` stands in for the
+remote system without Docker. `StubHttpServer::start(|request| (200, body))`
+listens on a free local port, answers every request through the closure, and
+`requests()` returns what it received: method, target, headers and body.
 
 ### Writing one in C or C++
 
@@ -793,6 +877,11 @@ python -m mq_bridge.plugin_packaging --package python/my_plugin --out dist
 mq-bridge-package-plugin --package node --pack --out npm
 ```
 
+[`examples/plugin-template`](../examples/plugin-template) is a complete plugin
+repository to copy: a small working endpoint, the npm and Python packages, the
+conda recipe, the Homebrew formula script, and the CI and release workflows. Its
+README lists the accounts and secrets the release workflow needs.
+
 ---
 
 ## Loading without writing code
@@ -817,6 +906,10 @@ or per run:
 ```console
 mq-bridge-app --plugin ./libmq_bridge_pulsar.so --config mq-bridge.yaml
 ```
+
+Both forms need a build of the app without Pulsar compiled in; the released
+`mqb` has it built in and refuses the library, see
+[Replacing an endpoint `mqb` already has](#replacing-an-endpoint-mqb-already-has).
 
 Paths go through the app's usual `${VAR}` expansion, which is what keeps a
 config portable across machines that install libraries in different places.
@@ -847,6 +940,7 @@ Minor versions so far:
 | 1.0 | The initial table. |
 | 1.1 | `publisher_requires_ordered_publish`, so a plugin sink can ask the route to keep its sends in source order; `publisher_send_batch_outcomes`, so a partly failed batch reports which messages failed; and `factory_config_schema`, so a plugin describes its configuration as a JSON Schema for a host to render and to map a URI onto. |
 | 1.2 | `publisher_send_batch_responses` and `responses_free`, so publish responses reach the route; `batch_commit_replies` with `MQB_DISPOSITION_REPLY`, so a plugin consumer receives the reply to send; `consumer_status` / `publisher_status`, so `status()` reports the plugin's own state; and `*_async` twins of receive, commit, send and flush that finish through an `MqbCompletion` callback instead of blocking a host thread; `plugin_init` hands the plugin an `MqbHostVTable`, through which its logs and metrics reach the host and it registers a crash handler; the optional `mq_bridge_plugin_v1_at` symbol exports several tables from one library; `factory_delivery` answers `idempotent_sink` / `acknowledges` per config. |
+| 1.3 | `publisher_disconnect`, which hands a publisher the route's outcome (`MQB_DISCONNECT_COMPLETED`, `_STOPPED`, `_FAILED`) before it is closed, so `disconnect_outcome()` works inside a loaded plugin. |
 
 Publish the supported ABI range in your package metadata, and test each packaged
 plugin against the oldest and newest mq-bridge you claim to support.

@@ -9,18 +9,21 @@
 //! custom endpoint declares about itself, and the endpoint-plugin C ABI.
 
 pub mod base64_engine;
+pub mod change_op;
 #[cfg(feature = "compression")]
 pub(crate) mod compression;
-#[cfg(any(feature = "compression", feature = "http"))]
+#[cfg(any(feature = "compression", feature = "http", feature = "http-bulk"))]
 pub(crate) mod compression_pool;
 pub mod config_schema;
 pub mod connection_registry;
 #[cfg(feature = "encryption")]
 pub mod crypto;
 pub(crate) mod crypto_envelope;
+pub mod http_status;
 pub mod interpolation;
 #[cfg(any(feature = "sqlx", feature = "clickhouse", feature = "mongodb"))]
 pub(crate) mod lookup_batch;
+pub mod ndjson;
 pub(crate) mod pack;
 pub(crate) mod parallel;
 #[cfg(feature = "parquet")]
@@ -28,5 +31,6 @@ pub(crate) mod parquet;
 /// The stable C ABI shared with dynamically loaded endpoint plugins.
 #[cfg(feature = "plugin")]
 pub mod plugin_abi;
+pub mod poll_job;
 pub mod source_ranges;
 pub mod stream_batch;

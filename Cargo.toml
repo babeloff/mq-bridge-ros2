@@ -4,12 +4,14 @@ version.workspace = true
 edition = "2021"
 authors = ["Marco Mengelkoch"]
 rust-version = "1.85"  # Base crate MSRV (non-optional uuid 1.24 needs 1.85); optional amqp/mongodb/nats need Rust 1.88.
-description = "An asynchronous message bridging library connecting Kafka, MQTT, AMQP, NATS, MongoDB, HTTP, and more."
+description = "Embeddable async ETL and messaging library: brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
 repository = "https://github.com/marcomq/mq-bridge"
+homepage = "https://marcomq.github.io/mq-bridge/"
+documentation = "https://docs.rs/mq-bridge"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
-keywords = ["messaging", "kafka", "nats", "amqp", "cqrs"]
-categories = ["asynchronous", "network-programming"]
+keywords = ["kafka", "messaging", "etl", "cdc", "cqrs"]
+categories = ["asynchronous", "network-programming", "database"]
 # Test-only proto; build.rs skips it when absent so downstream builds skip the codegen.
 # `apps/` is a sibling product, not part of the library: cargo only auto-excludes
 # the app's member crates, so the UI, book and benches would ship in the tarball.
@@ -29,7 +31,7 @@ members = [
     "tests/fixtures/grpc-config-compat",
 ]
 # apps/mq-bridge-app is its own workspace with its own Cargo.lock; see its manifest.
-exclude = ["apps"]
+exclude = ["apps", "examples/plugin-template"]
 resolver = "2"
 
 # Lints that are off by default in rustc/clippy and mark code that was never meant to
@@ -46,7 +48,7 @@ dbg_macro = "warn"
 exit = "warn"
 
 [workspace.package]
-version = "0.4.17"
+version = "0.4.18"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -222,6 +224,9 @@ tokio-websockets = { version = "0.13", optional = true, default-features = false
 aws-config = { version = "1.10", optional = true, default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 aws-sdk-sqs = { version = "1.105", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-sns = { version = "1.107", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
+# Signs `http_bulk` requests (managed OpenSearch). Already in the tree through aws-config.
+# A low floor: 1.6 needs aws-smithy-types 1.8, which a dependent may pin below.
+aws-sigv4 = { version = "1.4", optional = true }
 
 # SQLx
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "any", "sqlite-bundled"], optional = true }
@@ -287,7 +292,7 @@ middleware = ["metrics", "otel", "dedup", "compression", "encryption", "filter",
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
 # moved through a JSON payload). Enable if bit-exact float round-tripping matters.
 float-roundtrip = ["serde_json/float_roundtrip"]
-full-common = ["middleware", "yaml", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
+full-common = ["middleware", "yaml", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "http-bulk", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
 
 # ibm-mq (dlopen) is safe to include: it needs no IBM SDK at build, and at
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
@@ -323,7 +328,7 @@ vendored-protoc = ["dep:protoc-bin-vendored"]
 # kafka (librdkafka), sqlx (libsqlite3-sys), grpc (protoc), ibm-mq/ibm-mq-static
 # (IBM C client). postgres-cdc is excluded too: its wire protocol is pure Rust
 # but it pulls in sqlx (C).
-portable = ["metrics", "otel", "dedup", "yaml", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "websocket", "object-store", "rustls-aws-lc"]
+portable = ["metrics", "otel", "dedup", "yaml", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "http-bulk", "websocket", "object-store", "rustls-aws-lc"]
 
 # Functionality features
 # YAML config files for Route/Publisher::from_file and deploy_file; JSON works without it.
@@ -383,7 +388,7 @@ mongodb = ["dep:mongodb"]
 mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile"]
 http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
 websocket = ["dep:tokio-websockets"]
-aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns"]
+aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns", "aws-sigv4"]
 # Runtime-loaded IBM MQ client via dlopen: builds with no SDK present; the IBM
 # redistributable client is only needed at runtime, and only if an ibm-mq
 # endpoint is actually used.
@@ -406,6 +411,8 @@ redis-streams = ["dep:redis"]
 grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "vendored-protoc"]
 sqlx = ["dep:sqlx"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:percent-encoding"]
+# Generic bulk document sink over HTTP (search engines and similar APIs).
+http-bulk = ["dep:reqwest", "dep:percent-encoding", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
 object-store = ["dep:object_store"]
 # `format: parquet` on object_store. Column codecs reuse the `compression` crates.

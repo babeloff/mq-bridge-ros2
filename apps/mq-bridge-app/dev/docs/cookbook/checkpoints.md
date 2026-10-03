@@ -87,7 +87,7 @@ mqb copy \
 ```bash
 # MongoDB bulk read that survives a restart mid-copy.
 mqb copy \
-  --from 'mongodb://localhost:27017/app?collection=orders&consume=capture_all&cursor_id=orders_dump' \
+  --from 'mongodb://localhost:27017?database=app&collection=orders&consume=capture_all&cursor_id=orders_dump' \
   --to   'file:///data/orders.jsonl'
 ```
 

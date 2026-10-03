@@ -99,6 +99,7 @@ impl EndpointType {
             EndpointType::Grpc(_) => "grpc",
             EndpointType::Sqlx(_) => "sqlx",
             EndpointType::ClickHouse(_) => "clickhouse",
+            EndpointType::HttpBulk(_) => "http_bulk",
             EndpointType::PostgresCdc(_) => "postgres_cdc",
             EndpointType::Fanout(_) => "fanout",
             EndpointType::Sequence(_) => "sequence",

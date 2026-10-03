@@ -3,12 +3,38 @@
 //  Licensed under MIT OR Apache-2.0, see LICENSE file for more details
 //  git clone https://github.com/marcomq/mq-bridge
 
+use crate::errors::InvalidConfig;
 use crate::extensions::get_middleware_factory;
 use crate::models::{Endpoint, Middleware};
 use crate::traits::CustomMiddlewareFactory;
 use crate::traits::{MessageConsumer, MessagePublisher};
 use anyhow::Result;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+static REJECTED_INPUT_MESSAGES: AtomicU64 = AtomicU64::new(0);
+
+/// Input messages the `encryption` middleware could not decrypt and acked, process-wide.
+/// A one-shot job reads it to tell a lossy run from a clean one.
+pub fn rejected_input_messages() -> u64 {
+    REJECTED_INPUT_MESSAGES.load(Ordering::Relaxed)
+}
+
+static DEAD_LETTERED_MESSAGES: AtomicU64 = AtomicU64::new(0);
+
+/// Messages a `dlq` middleware delivered to its dead-letter target, process-wide.
+pub fn dead_lettered_messages() -> u64 {
+    DEAD_LETTERED_MESSAGES.load(Ordering::Relaxed)
+}
+
+pub(crate) fn note_dead_lettered(count: usize) {
+    DEAD_LETTERED_MESSAGES.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+#[allow(dead_code)]
+pub(crate) fn note_rejected_input_message() {
+    REJECTED_INPUT_MESSAGES.fetch_add(1, Ordering::Relaxed);
+}
 
 #[cfg(feature = "aggregate")]
 pub(crate) mod aggregate;
@@ -103,6 +129,11 @@ fn otel_inactive(route_name: &str) -> Result<()> {
     }
 }
 
+/// A middleware config that cannot work stops the route instead of reconnecting.
+fn invalid<T>(result: Result<T>) -> Result<T> {
+    result.map_err(|e| InvalidConfig(e).into())
+}
+
 /// Wraps a `MessageConsumer` with the middlewares specified in the endpoint configuration.
 ///
 /// Middlewares are applied in reverse order of the configuration list.
@@ -115,7 +146,7 @@ pub async fn apply_middlewares_to_consumer(
 ) -> Result<Box<dyn MessageConsumer>> {
     for middleware in endpoint.middlewares.iter().rev() {
         consumer = match middleware {
-            Middleware::Id(template) => Box::new(IdConsumer::new(consumer, template)?),
+            Middleware::Id(template) => Box::new(invalid(IdConsumer::new(consumer, template))?),
             #[cfg(feature = "dedup")]
             Middleware::Deduplication(cfg) => {
                 Box::new(DeduplicationConsumer::new(consumer, cfg, route_name).await?)
@@ -136,20 +167,20 @@ pub async fn apply_middlewares_to_consumer(
             Middleware::Delay(cfg) => Box::new(DelayConsumer::new(consumer, cfg)),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicConsumer::new(consumer, cfg)),
             Middleware::WeakJoin(cfg) => Box::new(WeakJoinConsumer::new(consumer, cfg)),
-            Middleware::Limiter(cfg) => Box::new(LimiterConsumer::new(consumer, cfg)?),
-            Middleware::Buffer(cfg) => Box::new(BufferConsumer::new(consumer, cfg)?),
+            Middleware::Limiter(cfg) => Box::new(invalid(LimiterConsumer::new(consumer, cfg))?),
+            Middleware::Buffer(cfg) => Box::new(invalid(BufferConsumer::new(consumer, cfg))?),
             Middleware::CookieJar(cfg) => Box::new(CookieJarConsumer::new(consumer, cfg)),
-            Middleware::Transform(cfg) => Box::new(TransformConsumer::new(consumer, cfg)?),
+            Middleware::Transform(cfg) => Box::new(invalid(TransformConsumer::new(consumer, cfg))?),
             #[cfg(feature = "encryption")]
-            Middleware::Encryption(cfg) => Box::new(EncryptionConsumer::new(consumer, cfg)?),
+            Middleware::Encryption(cfg) => Box::new(invalid(EncryptionConsumer::new(consumer, cfg))?),
             #[cfg(feature = "compression")]
             Middleware::Compression(cfg) => Box::new(CompressionConsumer::new(consumer, cfg)),
             Middleware::Unpack(cfg) => Box::new(UnpackConsumer::new(consumer, cfg)),
             // Output-only: packing is what a transport writes, not what it reads.
             Middleware::Pack(_) => {
-                return Err(anyhow::anyhow!(
+                return Err(InvalidConfig(anyhow::anyhow!(
                     "[middleware:{route_name}] `pack` is an output-only middleware. Put `pack` on the route's output endpoint and `unpack` on its input."
-                ))
+                )).into())
             }
             Middleware::Lookup(cfg) => {
                 Box::new(lookup::LookupConsumer::new(consumer, cfg, route_name).await?)
@@ -157,22 +188,22 @@ pub async fn apply_middlewares_to_consumer(
             #[cfg(feature = "aggregate")]
             Middleware::Aggregate(cfg) => Box::new(aggregate::AggregateConsumer::new(consumer, cfg, route_name).await?),
             Middleware::Timeout(_) => {
-                return Err(anyhow::anyhow!(
+                return Err(InvalidConfig(anyhow::anyhow!(
                     "[middleware:{route_name}] `timeout` bounds sends and is output-only. Move it to the route's output endpoint."
-                ))
+                )).into())
             }
             #[cfg(feature = "filter")]
-            Middleware::Filter(expression) => Box::new(FilterConsumer::new(consumer, expression)?),
+            Middleware::Filter(expression) => Box::new(invalid(FilterConsumer::new(consumer, expression))?),
             Middleware::Custom { name, config } => {
                 let factory = custom_middleware_factory(name)?;
                 factory.apply_consumer(consumer, route_name, config).await?
             }
             #[allow(unreachable_patterns)]
             _ => {
-                return Err(anyhow::anyhow!(
+                return Err(InvalidConfig(anyhow::anyhow!(
                     "[middleware:{}] Unsupported consumer middleware",
                     route_name
-                ))
+                )).into())
             }
         };
     }
@@ -210,9 +241,9 @@ pub async fn apply_middlewares_to_publisher(
             // Consumer-only: identity is derived where a record enters the pipeline, so that
             // everything downstream — dedup, sink keying, handlers — sees the same value.
             Middleware::Id(_) => {
-                return Err(anyhow::anyhow!(
+                return Err(InvalidConfig(anyhow::anyhow!(
                     "[middleware:{route_name}] `id` is a consumer-only middleware and does nothing on an output endpoint. Move it to the route's input endpoint."
-                ))
+                )).into())
             }
             Middleware::Dlq(cfg) => Box::new(DlqPublisher::new(publisher, cfg, route_name).await?),
             Middleware::Otel(_) => otel_publisher(publisher, route_name)?,
@@ -229,31 +260,31 @@ pub async fn apply_middlewares_to_publisher(
             // left a route un-deduplicated; `weak_join` already fails fast the same way.
             #[cfg(feature = "dedup")]
             Middleware::Deduplication(_) => {
-                return Err(anyhow::anyhow!(
+                return Err(InvalidConfig(anyhow::anyhow!(
                     "[middleware:{route_name}] deduplication is a consumer-only middleware and does nothing on an output endpoint. Move it to the route's input endpoint."
-                ))
+                )).into())
             }
             Middleware::Retry(cfg) => Box::new(RetryPublisher::new(publisher, cfg.clone())),
             Middleware::Delay(cfg) => Box::new(DelayPublisher::new(publisher, cfg)),
             Middleware::Timeout(cfg) => Box::new(TimeoutPublisher::new(publisher, cfg)),
             Middleware::RandomPanic(cfg) => Box::new(RandomPanicPublisher::new(publisher, cfg)),
-            Middleware::Limiter(cfg) => Box::new(LimiterPublisher::new(publisher, cfg)?),
-            Middleware::Buffer(cfg) => Box::new(BufferPublisher::new(publisher, cfg)?),
+            Middleware::Limiter(cfg) => Box::new(invalid(LimiterPublisher::new(publisher, cfg))?),
+            Middleware::Buffer(cfg) => Box::new(invalid(BufferPublisher::new(publisher, cfg))?),
             Middleware::CookieJar(cfg) => Box::new(CookieJarPublisher::new(publisher, cfg)),
-            Middleware::Transform(cfg) => Box::new(TransformPublisher::new(publisher, cfg)?),
+            Middleware::Transform(cfg) => Box::new(invalid(TransformPublisher::new(publisher, cfg))?),
             #[cfg(feature = "encryption")]
-            Middleware::Encryption(cfg) => Box::new(EncryptionPublisher::new(publisher, cfg)?),
+            Middleware::Encryption(cfg) => Box::new(invalid(EncryptionPublisher::new(publisher, cfg))?),
             #[cfg(feature = "compression")]
             Middleware::Compression(cfg) => Box::new(CompressionPublisher::new(publisher, cfg)),
-            Middleware::Pack(cfg) => Box::new(PackPublisher::new(publisher, cfg)?),
+            Middleware::Pack(cfg) => Box::new(invalid(PackPublisher::new(publisher, cfg))?),
             // Input-only: unpacking is what a transport reads, not what it writes.
             Middleware::Unpack(_) => {
-                return Err(anyhow::anyhow!(
+                return Err(InvalidConfig(anyhow::anyhow!(
                     "[middleware:{route_name}] `unpack` is an input-only middleware. Put `unpack` on the route's input endpoint and `pack` on its output."
-                ))
+                )).into())
             }
             #[cfg(feature = "filter")]
-            Middleware::Filter(expression) => Box::new(FilterPublisher::new(publisher, expression)?),
+            Middleware::Filter(expression) => Box::new(invalid(FilterPublisher::new(publisher, expression))?),
             Middleware::Custom { name, config } => {
                 let factory = custom_middleware_factory(name)?;
                 factory
@@ -262,10 +293,10 @@ pub async fn apply_middlewares_to_publisher(
             }
             #[allow(unreachable_patterns)]
             _ => {
-                return Err(anyhow::anyhow!(
+                return Err(InvalidConfig(anyhow::anyhow!(
                     "[middleware:{}] Unsupported publisher middleware",
                     route_name
-                ))
+                )).into())
             }
         };
     }

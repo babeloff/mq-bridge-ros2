@@ -1751,7 +1751,7 @@ async fn test_file_csv_round_trip() {
     drop(sink);
 
     let content = tokio::fs::read_to_string(&file_path).await.unwrap();
-    assert_eq!(content, "age,name\n30,alice\n25,bob\n");
+    assert_eq!(content, "name,age\nalice,30\nbob,25\n");
 
     let mut source = FileConsumer::new(&config).await.unwrap();
     let received1 = source.receive().await.unwrap();
@@ -2379,7 +2379,7 @@ async fn test_file_csv_escaped_keys_fallback() {
     drop(sink);
 
     let content = tokio::fs::read_to_string(&file_path).await.unwrap();
-    assert_eq!(content, "plain,\"we\"\"ird\"\nx,1\n");
+    assert_eq!(content, "\"we\"\"ird\",plain\n1,x\n");
 }
 
 #[tokio::test]
@@ -2805,7 +2805,7 @@ async fn test_file_csv_compressed_roundtrip() {
     .unwrap();
     assert_eq!(
         String::from_utf8(decoded).unwrap(),
-        "age,name\n30,alice\n25,bob\n41,carol\n"
+        "name,age\nalice,30\nbob,25\ncarol,41\n"
     );
 
     let mut source = FileConsumer::new(&config).await.unwrap();
@@ -2937,7 +2937,7 @@ async fn test_file_csv_compressed_restart_writes_no_second_header() {
     .unwrap();
     assert_eq!(
         String::from_utf8(decoded).unwrap(),
-        "age,name\n30,alice\n25,bob\n"
+        "name,age\nalice,30\nbob,25\n"
     );
 }
 

@@ -164,7 +164,7 @@ mis-parsed as config), skip decomposition entirely and pass it verbatim with
 
 ```bash
 mqb copy \
-  --from 'mongodb://_/?url=mongodb%3A%2F%2Fuser%3Apass%40host%2Fdb%3Ftls%3Dtrue&collection=orders' \
+  --from 'mongodb://_/?url=mongodb%3A%2F%2Fuser%3Apass%40host%2Fdb%3Ftls%3Dtrue&database=db&collection=orders' \
   --to null:
 ```
 

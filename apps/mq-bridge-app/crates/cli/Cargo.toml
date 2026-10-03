@@ -7,10 +7,12 @@ build = "build.rs"
 authors = ["Marco Mengelkochs"]
 repository = "https://github.com/marcomq/mq-bridge"
 license = "MIT OR Apache-2.0"
-description = "A message queue bridge application written in Rust, designed to connect different messaging systems like RabbitMQ, Kafka, and NATS."
+description = "Zero-code ETL and message bridge (CLI, server, MCP): brokers (Kafka, NATS, AMQP, MQTT), databases incl. Postgres/MongoDB CDC, Parquet on S3/GCS/Azure object storage, HTTP/gRPC."
+homepage = "https://marcomq.github.io/mq-bridge/"
+documentation = "https://marcomq.github.io/mq-bridge/"
 readme = "../../README.md"
-keywords = ["messaging", "kafka", "nats", "amqp", "cqrs"]
-categories = ["asynchronous", "network-programming"]
+keywords = ["kafka", "messaging", "etl", "cdc", "streaming"]
+categories = ["command-line-utilities", "asynchronous", "network-programming", "database"]
 # With two [[bin]] targets, package-scoped runs still need an explicit default.
 default-run = "mq-bridge-app"
 
@@ -63,6 +65,8 @@ pidlock = "0.2.2"
 schemars = "1.2.2"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# Reads the `http-bulk:?config=` endpoint config; the core crate already builds it.
+serde_yaml_ng = "0.10.0"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "net"] }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
@@ -91,8 +95,8 @@ arm64-cross-compile = ["mq_bridge_app/arm64-cross-compile"]
 # The extension features are named again rather than left to `mq_bridge_app/full`:
 # that enables them on the core crate, but this crate's own `cfg` — the scheme
 # list in an unsupported-scheme error — reads the flags declared here.
-full = ["mq_bridge_app/full", "otel", "mimalloc", "rustls-aws-lc", "pulsar", "meilisearch"]
-full-dynamic = ["mq_bridge_app/full-dynamic", "otel", "mimalloc", "rustls-aws-lc", "pulsar", "meilisearch"]
+full = ["mq_bridge_app/full", "otel", "mimalloc", "rustls-aws-lc", "pulsar", "http-bulk"]
+full-dynamic = ["mq_bridge_app/full-dynamic", "otel", "mimalloc", "rustls-aws-lc", "pulsar", "http-bulk"]
 middleware = ["mq_bridge_app/middleware"]
 otel = ["mq_bridge_app/otel"]
 compression = ["mq_bridge_app/compression"]
@@ -113,6 +117,7 @@ amqp = ["mq_bridge_app/amqp"]
 redis-streams = ["mq_bridge_app/redis-streams"]
 pulsar = ["mq_bridge_app/pulsar"]
 meilisearch = ["mq_bridge_app/meilisearch"]
+http-bulk = ["mq_bridge_app/http-bulk"]
 
 [dev-dependencies]
 metrics = "0.24.6"

@@ -5,7 +5,7 @@
 
 //! `mqb checkpoint`: inspect and edit a source's durable resume position.
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use mq_bridge::checkpoint::{CheckpointEntry, CheckpointStore, VersionedCheckpoint};
 use mq_bridge::models::Endpoint;
 use mq_bridge_app::{config::load_config, copy_pipeline, mq_bridge};

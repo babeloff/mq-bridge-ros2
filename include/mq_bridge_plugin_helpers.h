@@ -161,6 +161,15 @@ static inline MqbStatus mqb_stub_send_async(MqbPublisherHandle publisher,
                                             MqbCompletion completion) {
     return MQB_ERR_UNSUPPORTED;
 }
+/* Leaves the teardown to publisher_close, which the host calls afterwards. */
+static inline MqbStatus mqb_stub_disconnect(MqbPublisherHandle publisher, uint32_t outcome,
+                                            MqbBuffer *err) {
+    (void)publisher;
+    (void)outcome;
+    (void)err;
+    return MQB_OK;
+}
+
 static inline MqbStatus mqb_stub_flush_async(MqbPublisherHandle publisher, MqbBuffer *err,
                                              MqbCompletion completion) {
     return MQB_ERR_UNSUPPORTED;
@@ -211,7 +220,8 @@ static inline MqbStatus mqb_stub_middleware_apply(MqbMiddlewareHandle middleware
     .publisher_send_batch_responses = mqb_stub_send_responses,                              \
     .responses_free = mqb_stub_free, .publisher_status = mqb_stub_status,                   \
     .publisher_send_batch_async = mqb_stub_send_async,                                      \
-    .publisher_flush_async = mqb_stub_flush_async
+    .publisher_flush_async = mqb_stub_flush_async,                                          \
+    .publisher_disconnect = mqb_stub_disconnect
 
 /* The optional publisher entries: the host then calls publisher_send_batch and
  * publisher_flush on a blocking thread. Set create, the two, close and free. */
@@ -221,7 +231,8 @@ static inline MqbStatus mqb_stub_middleware_apply(MqbMiddlewareHandle middleware
     .publisher_send_batch_responses = mqb_stub_send_responses,                              \
     .responses_free = mqb_stub_free, .publisher_status = mqb_stub_status,                   \
     .publisher_send_batch_async = mqb_stub_send_async,                                      \
-    .publisher_flush_async = mqb_stub_flush_async
+    .publisher_flush_async = mqb_stub_flush_async,                                          \
+    .publisher_disconnect = mqb_stub_disconnect
 
 #define MQB_NO_MIDDLEWARE                                                                   \
     .middleware_create = mqb_stub_middleware_create,                                        \

@@ -700,6 +700,8 @@ stream. File compression/encryption supports only the default `consume` mode. `c
 too: the header row is written into the first member, so the decoded stream is a normal CSV
 file.
 
+A `csv` sink takes its columns from the first row it writes, in that row's field order.
+
 A file **source** must declare the same `compression`/`encryption` the data was written with.
 A mismatch (wrong key, wrong codec, or a missing field) is a permanent decode failure: the
 route ends `failed` with the error in its status, rather than completing as if the file were
@@ -944,7 +946,7 @@ whether they were found. On an input, the handler already sees the enriched mess
   response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
   `false`, for a following [`switch`](#switch).
 - `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
-  `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, or `grpc` to an
+  `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, `http_bulk` with `query`, or `grpc` to an
   mq-bridge `grpc` input whose route replies. An endpoint that only acknowledges fails the
   message as non-retryable.
 - `mongodb.find` is an Extended-JSON filter template and answers with the first matching
@@ -997,6 +999,25 @@ query answers the whole batch instead of one query per message:
         collection: "customers"
         find: '{"_id": "${payload:customer_id}"}'
     into: customer
+```
+An `http_bulk` endpoint with `query` batches too: one HTTP request answers every message
+of the batch, matched by position. An entry that reports an error makes it ask again one
+message at a time, so only that message fails.
+
+```yaml middleware
+- lookup:
+    from:
+      http_bulk:
+        url: "http://localhost:9200"
+        query:
+          path: /books/_mget
+          format: json_array
+          request: '{"_id":"${payload:isbn}"}'
+          envelope: '{"docs":{requests}}'
+          responses: /docs
+          value: /_source
+          found: /found
+    into: book
 ```
 - HTTP 408, 429 and 5xx fail the message as retryable, other statuses as non-retryable.
   Without `pass_through_status: true` the `http` endpoint already fails on any non-2xx
@@ -1612,6 +1633,9 @@ The value is a single nested endpoint, which must be valid as a **consumer**. Th
 is acknowledged immediately, before the caller has necessarily received it — so a crash in
 between loses it. Use it for polling APIs, not for guaranteed delivery.
 
+The reply carries the triggering request's message id, which is what matches it to its caller.
+The id of the message that was read is in the metadata `mqb.reader.message_id`.
+
 ### `sequence`
 
 Reads several inputs one after another. Each is drained before the next begins, and the last
@@ -1747,6 +1771,9 @@ output:
 
 `raw: true` sends `body` byte-for-byte; the default JSON-encodes it as a string. Like
 `response`, a `static` output enables the HTTP inline fast path.
+
+As an input it produces the message without end. In a drain (`mqb copy --drain`,
+`exit_on_empty`) it emits one batch and ends.
 
 #### Placeholders
 

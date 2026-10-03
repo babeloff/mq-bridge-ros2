@@ -194,6 +194,35 @@ impl<'a> CsvPayloadRow<'a> {
     }
 }
 
+/// The payload's top-level keys in the order the producer wrote them. Runs once per
+/// file, for the row that establishes the header.
+fn keys_in_payload_order(payload: &[u8]) -> Option<Vec<String>> {
+    struct Keys;
+    impl<'de> serde::de::Visitor<'de> for Keys {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Vec<String>, A::Error> {
+            let mut keys: Vec<String> = Vec::new();
+            while let Some(key) = map.next_key::<String>()? {
+                map.next_value::<serde::de::IgnoredAny>()?;
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
+            }
+            Ok(keys)
+        }
+    }
+    use serde::Deserializer;
+    serde_json::Deserializer::from_slice(payload)
+        .deserialize_map(Keys)
+        .ok()
+}
+
 fn invalid_data(message: String) -> serde_json::Error {
     serde_json::Error::io(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -202,7 +231,7 @@ fn invalid_data(message: String) -> serde_json::Error {
 }
 
 /// Encodes `msg`'s JSON-object payload as a CSV row into `row_buf` (cleared first),
-/// establishing the column order from its sorted keys when `hdr` is still unset. Returns
+/// establishing the column order from its keys as written when `hdr` is still unset. Returns
 /// `true` when this call established the header, so the caller can emit the header
 /// line for a new file. Shared by the plain-append and member (compressed/encrypted)
 /// write paths. A payload that fails leaves `hdr` untouched.
@@ -220,7 +249,9 @@ fn csv_encode_message(
         ));
     };
 
-    let new_cols = hdr.is_none().then(|| row.sorted_keys());
+    let new_cols = hdr
+        .is_none()
+        .then(|| keys_in_payload_order(&msg.payload).unwrap_or_else(|| row.sorted_keys()));
     let cols = match (&new_cols, &*hdr) {
         (Some(cols), _) | (None, Some(cols)) => cols,
         (None, None) => unreachable!("header is either set or being established"),
@@ -832,8 +863,8 @@ impl FilePublisher {
                 .append(true)
                 .open(&path)
                 .await
-                .with_context(|| {
-                    format!("Failed to open or create file for writing: {}", path_str)
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to open or create file for writing: {path_str}: {e}")
                 })?;
         }
 
@@ -2349,7 +2380,10 @@ fn probe_source_path(path: &str) -> anyhow::Result<Option<String>> {
     // on Unix the open succeeds and only the read fails, which the reader threads
     // report as an ordinary end-of-file.
     if std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
-        anyhow::bail!("file source '{path}' is a directory, not a file");
+        return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
+            "file source '{path}' is a directory, not a file"
+        ))
+        .into());
     }
     match std::fs::File::open(path) {
         Ok(_) => Ok(None),

@@ -1129,8 +1129,11 @@ impl AppConfig {
 
             for (route_name, route_config) in routes {
                 let normalized_route_name = route_name.trim().to_string();
+                // A `null` output that carries middlewares still runs them, so it stays a publisher.
                 let output =
-                    if matches!(route_config.route.output.endpoint_type, EndpointType::Null) {
+                    if matches!(route_config.route.output.endpoint_type, EndpointType::Null)
+                        && route_config.route.output.middlewares.is_empty()
+                    {
                         ConsumerOutputConfig::None
                     } else if let Some(existing) = self.publishers.iter().find(|publisher| {
                         endpoint_value(&publisher.endpoint)
@@ -1876,15 +1879,10 @@ publishers:
                 .any(|variant| variant["required"] == serde_json::json!([name])),
             "the endpoint must be offered as a variant"
         );
-        // Its own `$defs` are lifted under a prefix, and the ref follows.
-        assert!(
-            schema
-                .pointer("/$defs/ConfigSchemaTestEndpointTls")
-                .is_some()
-        );
+        // The engine hands the schema over flat: its own `$defs` are inlined.
         assert_eq!(
-            schema.pointer(&format!("/$defs/{definition}/properties/tls/$ref")),
-            Some(&serde_json::json!("#/$defs/ConfigSchemaTestEndpointTls"))
+            schema.pointer(&format!("/$defs/{definition}/properties/tls")),
+            Some(&serde_json::json!({ "type": "object" }))
         );
     }
 
@@ -1953,7 +1951,11 @@ publishers:
             fn config_schema(&self) -> Option<serde_json::Value> {
                 Some(serde_json::json!({
                     "type": "object",
-                    "$defs": { "Config": { "type": "object" } },
+                    // Recursive, so the definition survives the engine's flattening.
+                    "$defs": { "Config": {
+                        "type": "object",
+                        "properties": { "child": { "$ref": "#/$defs/Config" } }
+                    } },
                     "properties": { "nested": { "$ref": "#/$defs/Config" } },
                     "required": ["nested"]
                 }))
@@ -1993,7 +1995,9 @@ publishers:
         // Its own `Config` collides with the root name it was just given, so it
         // gets a key of its own rather than aliasing it.
         let nested = schema
-            .pointer(&format!("/$defs/{target}/properties/nested/$ref"))
+            .pointer(&format!(
+                "/$defs/{target}/properties/nested/properties/child/$ref"
+            ))
             .and_then(serde_json::Value::as_str)
             .unwrap()
             .to_string();
@@ -2109,6 +2113,40 @@ output:
     }
 
     #[test]
+    fn a_null_output_keeps_its_middlewares() {
+        let mut config: AppConfig = serde_yaml_ng::from_str(
+            r#"
+routes:
+  plain:
+    input:
+      memory: { topic: "a" }
+    output: "null"
+  limited:
+    input:
+      memory: { topic: "b" }
+    output:
+      "null": null
+      middlewares:
+        - limiter: { messages_per_second: 5 }
+"#,
+        )
+        .unwrap();
+        config.migrate_legacy_routes();
+
+        let output = |name: &str| {
+            let consumer = config.consumers.iter().find(|c| c.name == name).unwrap();
+            consumer.output.clone()
+        };
+        assert!(matches!(output("plain"), ConsumerOutputConfig::None));
+        assert!(matches!(
+            output("limited"),
+            ConsumerOutputConfig::Publisher { .. }
+        ));
+        assert_eq!(config.publishers.len(), 1);
+        assert_eq!(config.publishers[0].endpoint.middlewares.len(), 1);
+    }
+
+    #[test]
     fn entities_without_an_id_get_the_same_one_on_every_load() {
         let load = || {
             let mut config: AppConfig = serde_yaml_ng::from_str(
@@ -2131,7 +2169,12 @@ consumers:
                 .consumers
                 .iter()
                 .map(|c| (c.name.clone(), c.id.clone()))
-                .chain(config.publishers.iter().map(|p| (p.name.clone(), p.id.clone())))
+                .chain(
+                    config
+                        .publishers
+                        .iter()
+                        .map(|p| (p.name.clone(), p.id.clone())),
+                )
                 .collect();
             ids.sort();
             ids
@@ -2498,6 +2541,79 @@ publishers:
                 }
             }
             assert_eq!(loaded.publishers[0].headers[0].value, "Bearer rt_token");
+        }
+    }
+
+    #[test]
+    fn test_balanced_custom_endpoint_secrets_survive_reload() {
+        let yaml = r#"
+config_security:
+  mode: balanced
+routes:
+  rt_custom_route:
+    input:
+      memory: { topic: "rt_custom_in" }
+    output:
+      custom:
+        name: "rt_custom"
+        config:
+          connector: "amqp_0_9"
+          urls: ["amqp://rt_user:rt_url_pass@localhost:5672/"]
+          sasl: { user: "rt_user", password: "rt_sasl_pass" }
+publishers:
+  - name: "rt_custom_pub"
+    endpoint:
+      custom:
+        name: "rt_custom"
+        config:
+          connector: "elasticsearch_v8"
+          api_key: "rt_api_key"
+"#;
+        let config: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let secret_store = RecordingSecretStore::default();
+        let path = std::env::temp_dir().join("mqb-config-balanced-custom-reload.yml");
+        let path_str = path.to_str().unwrap().to_string();
+        config
+            .save_with_secret_store(&path_str, &secret_store)
+            .unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        for secret in ["rt_url_pass", "rt_sasl_pass", "rt_api_key"] {
+            assert!(!saved.contains(secret), "{secret} left in {saved}");
+        }
+
+        let stored = secret_store.stored.lock().unwrap()[0].clone();
+        let _env = env_lock();
+        let _vars = EnvVarsGuard::capture(stored.keys().cloned());
+        unsafe {
+            for (key, value) in &stored {
+                std::env::set_var(key, value);
+            }
+        }
+        let cli = load_config_internal(Some(path_str.clone()), None, None, None, false, true);
+        let desktop = load_config_at_path(path_str);
+        let _ = std::fs::remove_file(path);
+
+        let custom_config = |endpoint: &Endpoint| match &endpoint.endpoint_type {
+            EndpointType::Custom { config, .. } => Some(config.clone()),
+            _ => None,
+        };
+        // Loading migrates the route's output into a publisher.
+        for (loaded, _) in [cli.unwrap(), desktop.unwrap()] {
+            let reloaded: Vec<_> = loaded
+                .publishers
+                .iter()
+                .filter_map(|publisher| custom_config(&publisher.endpoint))
+                .collect();
+            for original in [
+                &config.routes["rt_custom_route"].route.output,
+                &config.publishers[0].endpoint,
+            ] {
+                let original = custom_config(original).unwrap();
+                assert!(
+                    reloaded.contains(&original),
+                    "{original} not in {reloaded:?}"
+                );
+            }
         }
     }
 

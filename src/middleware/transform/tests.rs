@@ -1587,6 +1587,8 @@ mod fast_path_equivalence {
         // Just past i64::MAX but still a u64: accepted by both.
         assert_same(scalars(), r#"{"i":9223372036854775808}"#);
         assert_same(scalars(), r#"{"i":18446744073709551615}"#);
+        // `-0` is the float -0.0 in a `Value`, so it is not an `integer` either.
+        assert_same(scalars(), r#"{"i":-0}"#);
     }
 
     #[test]

@@ -112,16 +112,15 @@ impl MessageConsumer for MongoDbIdReader {
         // docs is skipped-with-progress rather than stalling the reader or exiting early.
         loop {
             let last = self.last_id.lock().unwrap().clone();
+            // Never snapshot the bridge's own sequencer bookkeeping doc.
             let mut filter = match &last {
-                Some(v) => doc! { "_id": { "$gt": v.clone() } },
-                None => doc! {},
+                Some(v) => {
+                    doc! { "_id": { "$gt": v.clone() }, "seq_counter": { "$exists": false } }
+                }
+                None => doc! { "seq_counter": { "$exists": false } },
             };
             if let Some(extra) = &self.receive_query {
-                filter = if filter.is_empty() {
-                    extra.clone()
-                } else {
-                    doc! { "$and": [filter, extra.clone()] }
-                };
+                filter = doc! { "$and": [filter, extra.clone()] };
             }
 
             let find_options = FindOptions::builder()

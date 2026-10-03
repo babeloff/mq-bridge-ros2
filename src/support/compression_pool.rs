@@ -78,7 +78,7 @@ pub(crate) fn gzip_http(data: &[u8]) -> std::io::Result<Vec<u8>> {
 
 /// gzip at `Compression::default()` — the level the batch codecs write members at.
 /// Byte-identical to what `GzEncoder` produced at the same level.
-#[cfg(feature = "compression")]
+#[cfg(any(feature = "compression", feature = "http-bulk"))]
 pub(crate) fn gzip_default(data: &[u8]) -> std::io::Result<Vec<u8>> {
     thread_local! {
         static POOL: RefCell<flate2::Compress> =

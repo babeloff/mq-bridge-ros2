@@ -9,18 +9,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mq_bridge_app::mq_bridge::{
-    CanonicalMessage, Handled, Publisher, Sent, SentBatch,
     models::{Endpoint, EndpointType, Route},
     route::{RouteHandle, RouteOutcome},
+    CanonicalMessage, Handled, Publisher, Sent, SentBatch,
 };
 use mq_bridge_app::route_metrics::{
-    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY, MessageCapture, RouteMetrics, RouteTiming,
-    format_capture_time, is_redelivery,
+    format_capture_time, is_redelivery, MessageCapture, RouteMetrics, RouteTiming,
+    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY,
 };
 use mq_bridge_app::status_registry::{
     InstanceKind, StatusEntity, StatusLease, StatusRoute, StatusSnapshot, StatusSummary,
@@ -28,10 +28,9 @@ use mq_bridge_app::status_registry::{
 use mq_bridge_app::ui_app::{ConsumerStatusSnapshot, EndpointStatusSnapshot, RouteOutcomeSnapshot};
 use rmcp::schemars;
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -158,7 +157,8 @@ struct StartRouteArgs {
     #[serde(default)]
     concurrency: Option<usize>,
     /// Batch size. Overrides `batch_size` inside `route` if both are given; if
-    /// neither is given the app default (1024) applies, not the library's 512.
+    /// neither is given, the output endpoint's own schema default applies if it
+    /// declares one, else the app default (1024), not the library's 512.
     #[serde(default)]
     batch_size: Option<usize>,
     /// Keep the last N messages that flow through this route, readable with
@@ -755,7 +755,7 @@ impl BridgeMcp {
         route.options.batch_size = args
             .batch_size
             .or(in_route_batch_size)
-            .unwrap_or(crate::DEFAULT_BATCH_SIZE);
+            .unwrap_or_else(|| crate::default_batch_size(&route.output));
 
         let mut route = serde_json::to_value(route)
             .map_err(|error| internal(format!("failed to serialize route: {error}")))?;
@@ -784,7 +784,7 @@ impl BridgeMcp {
             e.g. `{\"sqlx\": {...}, \"middlewares\": [{\"retry\": {\"max_attempts\": 3}}]}`. \
             `concurrency`/`batch_size` may be given inside `route` or as top-level arguments \
             — the top-level argument wins, and an unset value becomes the app default \
-            (4 / 1024). Returns the route name for use with wait_route / route_status / \
+            (4 / 1024, or the batch size the output endpoint's schema declares). Returns the route name for use with wait_route / route_status / \
             stop_route, plus the tuning that took effect.",
         annotations(destructive_hint = true, read_only_hint = false)
     )]
@@ -817,7 +817,7 @@ impl BridgeMcp {
         let batch_size = args
             .batch_size
             .or(in_route_batch_size)
-            .unwrap_or(crate::DEFAULT_BATCH_SIZE);
+            .unwrap_or_else(|| crate::default_batch_size(&route.output));
         route.options.concurrency = concurrency;
         route.options.batch_size = batch_size;
         let exit_on_empty = route.options.exit_on_empty;
@@ -1295,7 +1295,8 @@ impl ServerHandler for BridgeMcp {
     }
 }
 
-const INSTRUCTIONS: &str = "mq-bridge: a universal, protocol-agnostic message and data bridge. Move data between \
+const INSTRUCTIONS: &str =
+    "mq-bridge: a universal, protocol-agnostic message and data bridge. Move data between \
      any of the supported endpoints (postgres, kafka, nats, mqtt, mongodb, redis, ibm-mq, \
      http, files, and more) ad hoc. `publish` and `start_route` take the endpoint(s) \
      inline as JSON keyed by type, e.g. {\"kafka\": {\"url\": \"...\", \"topic\": \
@@ -1314,7 +1315,8 @@ const INSTRUCTIONS: &str = "mq-bridge: a universal, protocol-agnostic message an
      (`latest`) only sees messages published after the subscription is created.";
 
 /// Appended to the instructions above only when `--agent-bus` is on.
-const AGENT_BUS_INSTRUCTIONS: &str = " Agents on one machine can also message each other: `agent_send` delivers to a named \
+const AGENT_BUS_INSTRUCTIONS: &str =
+    " Agents on one machine can also message each other: `agent_send` delivers to a named \
      peer and is always available, while `agent_listen` opens this server's own inbox and \
      is off until called — so nothing reaches this agent unless it opts in. Once \
      listening, collect mail with `route_messages` on route `agent-inbox`. `server_info` \
@@ -1543,7 +1545,7 @@ async fn run_http(server: BridgeMcp, bind: String) -> anyhow::Result<()> {
         service::TowerToHyperService,
     };
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpService, session::local::LocalSessionManager,
+        session::local::LocalSessionManager, StreamableHttpService,
     };
 
     // One shared server across all sessions, so routes, publishers and metrics
@@ -1902,12 +1904,10 @@ mod tool_tests {
         assert_eq!(stopped["discarded_captured_messages"], 0, "{stopped}");
 
         // A stopped route is gone from every reporting surface.
-        assert!(
-            server
-                .route_status(params(json!({ "name": "drain-lifecycle" })))
-                .await
-                .is_err()
-        );
+        assert!(server
+            .route_status(params(json!({ "name": "drain-lifecycle" })))
+            .await
+            .is_err());
         let listed = result_json(&server.list_routes().await.expect("list_routes succeeds"));
         assert_eq!(listed.as_array().expect("an array").len(), 0, "{listed}");
     }
@@ -2025,12 +2025,10 @@ mod tool_tests {
         assert!(server.route_status(params(name.clone())).await.is_err());
         assert!(server.stop_route(params(name.clone())).await.is_err());
         assert!(server.route_messages(params(name.clone())).await.is_err());
-        assert!(
-            server
-                .wait_route(params(json!({ "name": "never-started" })))
-                .await
-                .is_err()
-        );
+        assert!(server
+            .wait_route(params(json!({ "name": "never-started" })))
+            .await
+            .is_err());
     }
 
     /// A route that discarded messages explains itself in `wait_route`, not only

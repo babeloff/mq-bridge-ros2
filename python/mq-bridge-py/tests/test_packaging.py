@@ -16,6 +16,7 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1]
 ALLOWED_DIVERGENT = {
     ("project", "name"),
     ("project", "description"),
+    ("project", "keywords"),
     ("tool", "maturin", "features"),
 }
 

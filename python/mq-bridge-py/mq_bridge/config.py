@@ -20,6 +20,19 @@ EncryptionConfig = dict
 Endpoint = dict
 FileConfig = dict
 GrpcConfig = dict
+HttpBulkAuth = dict
+HttpBulkAwsSigV4 = dict
+HttpBulkConfig = dict
+HttpBulkCursor = dict
+HttpBulkDelete = dict
+HttpBulkItems = dict
+HttpBulkJob = dict
+HttpBulkLines = dict
+HttpBulkOAuth2 = dict
+HttpBulkQuery = dict
+HttpBulkRead = dict
+HttpBulkResult = dict
+HttpBulkUpsert = dict
 HttpConfig = dict
 IbmMqConfig = dict
 IbmTlsConfig = dict
@@ -64,6 +77,7 @@ DatePartitionStyle = str
 DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
+HttpBulkFormat = str
 HttpServerProtocol = str
 IdHash = str
 MappingRule = str
@@ -118,6 +132,20 @@ __all__ = [
     "FileConfig",
     "FileFormat",
     "GrpcConfig",
+    "HttpBulkAuth",
+    "HttpBulkAwsSigV4",
+    "HttpBulkConfig",
+    "HttpBulkCursor",
+    "HttpBulkDelete",
+    "HttpBulkFormat",
+    "HttpBulkItems",
+    "HttpBulkJob",
+    "HttpBulkLines",
+    "HttpBulkOAuth2",
+    "HttpBulkQuery",
+    "HttpBulkRead",
+    "HttpBulkResult",
+    "HttpBulkUpsert",
     "HttpConfig",
     "HttpServerProtocol",
     "IbmMqConfig",

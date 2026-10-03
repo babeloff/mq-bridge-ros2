@@ -37,6 +37,18 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// bulk-move value the app applies on top.
 pub(crate) const DEFAULT_BATCH_SIZE: usize = 1024;
 
+/// The batch size for a run that names none: what the sink's schema asks for
+/// (`x-mqb-default-batch-size`), else [`DEFAULT_BATCH_SIZE`].
+pub(crate) fn default_batch_size(output: &mq_bridge::models::Endpoint) -> usize {
+    match &output.endpoint_type {
+        mq_bridge::models::EndpointType::Custom { name, .. } => {
+            mq_bridge::extensions::endpoint_default_batch_size(name)
+        }
+        _ => None,
+    }
+    .unwrap_or(DEFAULT_BATCH_SIZE)
+}
+
 /// App-level default route concurrency for headless routes (`copy`, MCP) when the
 /// caller does not specify one. See [`DEFAULT_BATCH_SIZE`].
 pub(crate) const DEFAULT_CONCURRENCY: usize = 4;
@@ -89,7 +101,9 @@ struct Args {
     /// Path to a native plugin library to load before starting (repeatable).
     ///
     /// The plugin registers an endpoint — and possibly a middleware — under its
-    /// own name, usable in routes like any built-in one. Also loadable from the
+    /// own name, usable in routes like any built-in one. It cannot replace an
+    /// endpoint this binary already has (pulsar, meilisearch): install the
+    /// plugin and set `MQB_PLUGIN_OVERRIDE=<name>` instead. Also loadable from the
     /// config file's `plugins:` list. Either way the paths are read only at
     /// startup: changing them needs a restart, and the UI rejects a config that
     /// asks for a different set.
@@ -384,7 +398,7 @@ struct CopyArgs {
     #[arg(long)]
     concurrency: Option<usize>,
 
-    /// Batch size (defaults to 1024).
+    /// Batch size (defaults to 1024, or to what the destination asks for).
     #[arg(long)]
     batch_size: Option<usize>,
 
@@ -560,6 +574,19 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // The UI saves to this path, and an init source fills it; otherwise a missing file is a typo.
+    if let Some(path) = &args.config {
+        let has_other_source = args.ui
+            || args.init_config.is_some()
+            || args.init_config_str.is_some()
+            || args.config_str.is_some()
+            || ["INIT_CONFIG_FILE", "INIT_CONFIG_STRING", "CONFIG_STRING"]
+                .iter()
+                .any(|name| std::env::var_os(name).is_some());
+        if !has_other_source && !std::path::Path::new(path).exists() {
+            anyhow::bail!("configuration file '{path}' does not exist");
+        }
+    }
     let (mut config, config_file_path): (AppConfig, String) = load_config(
         args.config,
         args.init_config,
@@ -1044,6 +1071,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
 
     let (from, to) = copy_endpoints(&args)?;
     let (mut input, output) = copy_route_endpoints(from, to)?;
+    warn_about_surprising_copy(&input, &output);
     let resume = if args.resume {
         Some(copy_pipeline::configure_resume(
             &mut input,
@@ -1074,7 +1102,9 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     let drain = drains(&args) && stop_when == StopWhen::SourceDrained;
     let options = RouteOptions {
         concurrency: args.concurrency.unwrap_or(DEFAULT_CONCURRENCY),
-        batch_size: args.batch_size.unwrap_or(DEFAULT_BATCH_SIZE),
+        batch_size: args
+            .batch_size
+            .unwrap_or_else(|| default_batch_size(&output)),
         exit_on_empty: drain,
         ..Default::default()
     };
@@ -1222,6 +1252,39 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     }
 }
 
+/// Warns about two combinations that run without an error and move less than expected.
+fn warn_about_surprising_copy(
+    input: &mq_bridge::models::Endpoint,
+    output: &mq_bridge::models::Endpoint,
+) {
+    let source = input.endpoint_type.name();
+    if output.endpoint_type.name() == "response"
+        && matches!(
+            source,
+            "file" | "sqlx" | "object_store" | "static" | "clickhouse" | "dir_spool"
+        )
+    {
+        warn!(
+            "`response:` replies to the source, and a {source} source takes no replies: every row is read and discarded"
+        );
+    }
+    if source == "sqlx" {
+        let config = serde_json::to_value(&input.endpoint_type).unwrap_or_default();
+        let sqlx = &config["sqlx"];
+        let unset = |field: &str| {
+            matches!(
+                &sqlx[field],
+                serde_json::Value::Null | serde_json::Value::Bool(false)
+            )
+        };
+        if unset("cursor_column") && unset("delete_after_read") && unset("select_query") {
+            warn!(
+                "the source table is read as a work queue: rows are leased and left in place, so a repeated copy first finds nothing and later copies them again. Set `cursor_column` or `delete_after_read=true`"
+            );
+        }
+    }
+}
+
 /// Builds a copy's source and destination. `checkpoint` shares it, so both derive
 /// the same resume identity from the same URIs.
 fn copy_route_endpoints(
@@ -1316,6 +1379,10 @@ struct Throughput {
     /// Messages taken off the source, filtered or not. The rate is derived from
     /// this, since the elapsed time covers reading all of them.
     read: u64,
+    /// Rows the source could not decrypt.
+    rejected: u64,
+    /// Rows a `dlq` middleware diverted to its dead-letter target.
+    dead_lettered: u64,
     elapsed_s: f64,
     rows_per_second: u64,
 }
@@ -1324,11 +1391,17 @@ impl Throughput {
     /// `copied 333_495 of 1_000_000 rows` when a filter dropped some, plain
     /// `copied 1_000_000 rows` when nothing was dropped.
     fn rows_display(&self) -> String {
-        if self.read > self.rows {
-            format!("{} of {} rows", grouped(self.rows), grouped(self.read))
+        // Dead-lettered rows left the source like any other but did not reach the target.
+        let rows = self.rows.saturating_sub(self.dead_lettered);
+        let mut display = if self.read > self.rows {
+            format!("{} of {} rows", grouped(rows), grouped(self.read))
         } else {
-            format!("{} rows", grouped(self.rows))
+            format!("{} rows", grouped(rows))
+        };
+        if self.dead_lettered > 0 {
+            display.push_str(&format!(", dead-lettered {}", grouped(self.dead_lettered)));
         }
+        display
     }
 
     /// Sub-second runs read as milliseconds: `0.07s` hides whether a copy took
@@ -1389,14 +1462,17 @@ fn throughput(
     let rows = copied.load(std::sync::atomic::Ordering::Relaxed);
     let read = read.load(std::sync::atomic::Ordering::Relaxed);
     let elapsed_s = started.elapsed().as_secs_f64();
+    // `unpack` delivers more rows than it reads, so rate the larger count.
     let rows_per_second = if elapsed_s > 0.0 {
-        (read as f64 / elapsed_s).round() as u64
+        (read.max(rows) as f64 / elapsed_s).round() as u64
     } else {
         0
     };
     Throughput {
         rows,
         read,
+        rejected: mq_bridge::middleware::rejected_input_messages(),
+        dead_lettered: mq_bridge::middleware::dead_lettered_messages(),
         elapsed_s,
         rows_per_second,
     }
@@ -1432,6 +1508,14 @@ fn copy_result(
     if let Some(cause) = error {
         anyhow::bail!(
             "copy did not deliver every row it read ({}): {cause}",
+            moved.rows_display()
+        );
+    }
+
+    if moved.rejected > 0 {
+        anyhow::bail!(
+            "copy could not decrypt {} of the rows it read ({}): see the errors above",
+            grouped(moved.rejected),
             moved.rows_display()
         );
     }
@@ -1624,8 +1708,13 @@ fn custom_middleware(
     tag: &str,
 ) -> anyhow::Result<Option<(String, Option<serde_json::Value>)>> {
     let registered = |candidate: &str| {
-        mq_bridge::extensions::get_middleware_factory(candidate)
-            .map(|factory| (candidate.to_string(), factory.config_schema()))
+        mq_bridge::extensions::get_middleware_factory(candidate).map(|factory| {
+            let schema = factory.config_schema();
+            let flat = schema
+                .as_ref()
+                .map(mq_bridge::support::config_schema::flatten);
+            (candidate.to_string(), flat)
+        })
     };
     if let Some(found) = registered(name).or_else(|| registered(tag)) {
         return Ok(Some(found));
@@ -1733,6 +1822,12 @@ fn extension_schemes() -> String {
     if cfg!(feature = "meilisearch") {
         names.push("meilisearch");
     }
+    #[cfg(feature = "http-bulk")]
+    for name in mq_bridge::endpoints::http_bulk::preset_names() {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
     if names.is_empty() {
         return String::new();
     }
@@ -1766,6 +1861,51 @@ fn plugin_of(scheme: &str) -> &str {
     scheme.split_once('+').map_or(scheme, |(plugin, _)| plugin)
 }
 
+fn http_bulk_endpoint(parsed: &url::Url, uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
+    use serde_json::Value;
+
+    let mut text = None;
+    let mut url = None;
+    for (key, value) in parsed.query_pairs() {
+        let slot = match key.as_ref() {
+            "config" | "config_file" => &mut text,
+            "url" => &mut url,
+            other => anyhow::bail!(
+                "unsupported query param '{other}' in http-bulk URI '{uri}'. Supported: config_file, config, url"
+            ),
+        };
+        if slot.is_some() {
+            anyhow::bail!("http-bulk URI '{uri}' gives '{key}' or its alternative twice");
+        }
+        *slot = Some(match key.as_ref() {
+            "config_file" => std::fs::read_to_string(value.as_ref())
+                .with_context(|| format!("failed to read http-bulk config_file '{value}'"))?,
+            _ => value.into_owned(),
+        });
+    }
+    let Some(text) = text else {
+        anyhow::bail!(
+            "http-bulk URI '{uri}' needs 'config_file=<path>' or 'config=<YAML or JSON>' holding the http_bulk fields"
+        );
+    };
+    let mut config: Value = serde_yaml_ng::from_str(&text)
+        .with_context(|| format!("http-bulk config in URI '{uri}' is not valid YAML or JSON"))?;
+    // A recipe copied with its `http_bulk:` key is taken as well.
+    if let Some(inner) = config.as_object_mut().filter(|map| map.len() == 1)
+        && let Some(inner) = inner
+            .remove("http_bulk")
+            .or_else(|| inner.remove("http-bulk"))
+    {
+        config = inner;
+    }
+    if let (Some(url), Some(fields)) = (url, config.as_object_mut()) {
+        fields.insert("url".into(), Value::String(url));
+    }
+    let endpoint_type = serde_json::from_value(serde_json::json!({ "http_bulk": config }))
+        .with_context(|| format!("could not build an 'http_bulk' endpoint from URI '{uri}'"))?;
+    Ok(mq_bridge::models::Endpoint::new(endpoint_type))
+}
+
 fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoint> {
     use anyhow::bail;
     use mq_bridge::models::{
@@ -1784,6 +1924,10 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
     match parsed.scheme() {
         // A sink that discards everything. `null:` (any trailing content ignored).
         "null" => return Ok(Endpoint::new(EndpointType::Null)),
+        // `http-bulk:?config_file=<path>` or `http-bulk:?config=<YAML or JSON>`.
+        // The value is what a config file has under `http_bulk:`, which is too
+        // nested for query params. `url=` replaces the target of the config.
+        "http-bulk" => return http_bulk_endpoint(&parsed, uri),
         // A source that endlessly produces a fixed message (config-only load
         // generator) or a sink. Body from `?body=`, or read a file with
         // `?body_file=`. `raw=true` sends the body verbatim (no JSON re-encode) —
@@ -2093,7 +2237,7 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                 return custom_endpoint_from_uri(plugin, uri);
             }
             bail!(
-                "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
+                "unsupported endpoint scheme '{other}' in URI '{uri}'. Supported schemes: postgres, postgresql, mysql, mariadb, sqlite, nats, mongodb, redis, file, spool, kafka, mqtt, mqtts, amqp, amqps, rabbitmq, rabbitmqs, http, https, clickhouse, clickhouses, http-bulk, ws, wss, grpc, grpcs, ibmmq, aws, zeromq, zmq, s3, gs, az, abfs, and the structural memory, null, static, fanout, request, switch, response. A scheme may also name an endpoint registered by an extension{}, loaded with --plugin, or installed on the plugin search path ({})",
                 extension_schemes(),
                 mq_bridge::plugin::search_path_hint(plugin),
             )
@@ -2466,13 +2610,28 @@ fn coerce_scalar(s: String, ty: FieldType) -> serde_json::Value {
 /// restores the detail.
 fn init_copy_logging(color: ColorChoice, verbose: bool) {
     use std::io::IsTerminal;
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
     let default = if verbose { "info" } else { "warn" };
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+    // stderr, so stdout carries only the summary line; `MQB_LOG_STDOUT` restores the old stream.
+    let to_stdout = std::env::var_os("MQB_LOG_STDOUT").is_some_and(|v| !v.is_empty() && v != "0");
+    let (writer, is_terminal) = if to_stdout {
+        (
+            BoxMakeWriter::new(std::io::stdout),
+            std::io::stdout().is_terminal(),
+        )
+    } else {
+        (
+            BoxMakeWriter::new(std::io::stderr),
+            std::io::stderr().is_terminal(),
+        )
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
-        .with_ansi(color.enabled(std::io::stdout().is_terminal(), no_color_requested()))
+        .with_writer(writer)
+        .with_ansi(color.enabled(is_terminal, no_color_requested()))
         .try_init();
 }
 
@@ -2621,6 +2780,8 @@ mod copy_result_tests {
         Throughput {
             rows,
             read: rows,
+            rejected: 0,
+            dead_lettered: 0,
             elapsed_s: 1.0,
             rows_per_second: rows,
         }
@@ -2648,6 +2809,8 @@ mod copy_result_tests {
         let filtered = Throughput {
             rows: 333_495,
             read: 1_000_000,
+            rejected: 0,
+            dead_lettered: 0,
             elapsed_s: 1.05,
             rows_per_second: 952_380,
         };
@@ -2752,6 +2915,47 @@ mod uri_tests {
 
     // A driver option whose name matches an object-typed config field (`tls` is a
     // TlsConfig struct) must stay on the connection URL, not be hijacked as config.
+    #[test]
+    fn http_bulk_uri_takes_its_config_inline_or_from_a_file() {
+        use super::mq_bridge::models::EndpointType;
+
+        let file = std::env::temp_dir().join(format!("mqb-http-bulk-{}.yaml", std::process::id()));
+        std::fs::write(
+            &file,
+            "http_bulk:\n  url: http://from-file\n  upsert:\n    path: /docs\n    result: &r\n      job: {id: /taskUid, poll: '/tasks/{id}', status: /status, succeeded: [ok], failed: [bad]}\n  delete:\n    path: /delete\n    result: *r\n",
+        )
+        .unwrap();
+        let from_file = endpoint_from_uri(&format!(
+            "http-bulk:?config_file={}&url=http://other:7700",
+            file.display()
+        ));
+        std::fs::remove_file(&file).unwrap();
+        let EndpointType::HttpBulk(config) = from_file.unwrap().endpoint_type else {
+            panic!("not an http_bulk endpoint");
+        };
+        assert_eq!(config.url, "http://other:7700");
+        assert!(config.delete.unwrap().result.job.is_some());
+
+        let inline =
+            endpoint_from_uri(r#"http-bulk:?config={"url":"http://h","upsert":{"path":"/d"}}"#);
+        let EndpointType::HttpBulk(config) = inline.unwrap().endpoint_type else {
+            panic!("not an http_bulk endpoint");
+        };
+        assert_eq!(
+            (config.url.as_str(), config.upsert.unwrap().path.as_str()),
+            ("http://h", "/d")
+        );
+
+        // The same scheme names a source: the config then carries `read`.
+        let source = endpoint_from_uri(
+            r#"http-bulk:?config={"url":"http://h","read":{"path":"/d?o={cursor}"}}"#,
+        );
+        let EndpointType::HttpBulk(config) = source.unwrap().endpoint_type else {
+            panic!("not an http_bulk endpoint");
+        };
+        assert_eq!(config.read.unwrap().path, "/d?o={cursor}");
+    }
+
     #[test]
     fn mongodb_tls_option_stays_on_url() {
         let cfg = config("mongodb://host:27017/?tls=true&database=appdb", "mongodb");
@@ -3305,6 +3509,13 @@ mod uri_tests {
                 "unsupported query param 'towards'",
             ),
             ("response:?to=null:", "unsupported query param 'to'"),
+            ("http-bulk:", "needs 'config_file=<path>'"),
+            ("http-bulk:?config=a&config_file=b", "twice"),
+            ("http-bulk:?config=url: [", "not valid YAML or JSON"),
+            (
+                "http-bulk:?config={url: 'http://h', upsert: {path: /d, foo: 1}}",
+                "unknown field `foo`",
+            ),
             ("request:?forward_to=null:", "needs a 'to=<uri>'"),
             ("request:?to=null:&to=null:", "duplicate query param 'to'"),
             (
@@ -3473,11 +3684,11 @@ mod uri_tests {
         assert_eq!(config["subscription"], "workers");
     }
 
-    // Meilisearch reaches `copy` the same way. Its crate normalizes the
-    // `meilisearch://` url to the HTTP one the server speaks, and accepts the
-    // string spelling of each scalar, which is all a query string can carry.
+    // Meilisearch reaches `copy` the same way, as the `http_bulk` preset or as
+    // the plugin crate. Either normalizes the `meilisearch://` url to the HTTP
+    // one the server speaks.
     #[test]
-    #[cfg(feature = "meilisearch")]
+    #[cfg(any(feature = "meilisearch", feature = "http-bulk"))]
     fn meilisearch_scheme_builds_a_custom_endpoint() {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
 
@@ -3496,6 +3707,40 @@ mod uri_tests {
         assert_eq!(config["primary_key"], "id");
     }
 
+    // A named `http_bulk` endpoint takes its address and its collection or index
+    // from the URI, so a load needs no config file.
+    #[test]
+    #[cfg(feature = "http-bulk")]
+    fn http_bulk_preset_schemes_build_custom_endpoints() {
+        mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
+
+        for (uri, url, field) in [
+            (
+                "typesense://localhost:8108/books?api_key=k",
+                "typesense://localhost:8108",
+                "collection",
+            ),
+            (
+                "elasticsearch+https://es.example.com/books?api_key=k",
+                "https://es.example.com",
+                "index",
+            ),
+        ] {
+            let endpoint = endpoint_from_uri(uri).unwrap();
+            let EndpointType::Custom { config, .. } = endpoint.endpoint_type else {
+                panic!("expected a custom endpoint for {uri}");
+            };
+            assert_eq!(config["url"], url);
+            assert_eq!(config[field], "books");
+            assert_eq!(config["api_key"], "k");
+        }
+        let error = endpoint_from_uri("typesense://h/books?request_timeout_ms=soon").unwrap_err();
+        assert!(
+            format!("{error:#}").contains("request_timeout_ms"),
+            "{error:#}"
+        );
+    }
+
     // Deliberately ungated: the features that name an extension here are this
     // crate's, while the one that compiles it in is the core crate's. A build
     // enabling only the latter registers the endpoint but omits it from the
@@ -3505,7 +3750,7 @@ mod uri_tests {
         mq_bridge_app::plugins::register_builtin_endpoints().unwrap();
         let schemes = super::extension_schemes();
 
-        for name in ["pulsar", "meilisearch"] {
+        for name in ["pulsar", "meilisearch", "typesense", "elasticsearch"] {
             if super::mq_bridge::extensions::get_endpoint_factory(name).is_some() {
                 assert!(
                     schemes.contains(name),

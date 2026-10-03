@@ -411,6 +411,7 @@ impl MessagePublisher for MemoryPublisher {
             }
             PublisherBackend::Queue(sender) => {
                 if self.request_reply {
+                    let request_id = message.message_id;
                     let cid = message
                         .metadata
                         .entry("correlation_id".to_string())
@@ -454,6 +455,9 @@ impl MessagePublisher for MemoryPublisher {
                     };
                     waiter.disarm();
 
+                    // A batch matches each reply to its request by id.
+                    let mut response = response;
+                    response.message_id = request_id;
                     Ok(Sent::Response(response))
                 } else {
                     sender

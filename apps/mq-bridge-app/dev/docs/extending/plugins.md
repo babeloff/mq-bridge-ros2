@@ -5,13 +5,19 @@ this binary never compiled: a proprietary broker, an in-house transport. Loading
 registers it under its own name, after which routes address it like any built-in
 connector.
 
-> **Pulsar is compiled in, so it is not a plugin here.** Address it directly, as
+> **Pulsar is compiled in, so it is not a plugin here, and `meilisearch` is a built-in endpoint.** Address Pulsar directly, as
 > `pulsar: { url: "pulsar://localhost:6650", topic: ..., subscription: ... }` in a route,
 > or `pulsar://localhost:6650?topic=...` from `copy`. Passing
 > `libmq_bridge_pulsar.{so,dylib}` to `--plugin` or `plugins:` fails at startup with
 > `` `pulsar` ... is already registered by another factory `` — that rejection is
 > deliberate, since a second factory under a live name would silently reroute traffic.
 > Other hosts that did *not* compile it in, such as the Python binding (`mq-bridge` on PyPI), do load it as a plugin.
+>
+> To run a plugin in place of a built-in endpoint of the same name, install it (Homebrew,
+> conda) or put its directory in `MQB_PLUGIN_DIR`, and set `MQB_PLUGIN_OVERRIDE=<name>`. For
+> example, `MQB_PLUGIN_OVERRIDE=meilisearch` uses the Meilisearch plugin, which has
+> [options the built-in endpoint leaves out](../connectors/meilisearch.md#built-in-or-plugin). `--plugin` and `plugins:` do not work for this. With `-v`,
+> startup logs which copy is in use.
 
 This is the runtime counterpart to [custom endpoints](custom-endpoints.md): a custom
 endpoint is registered programmatically by code you compile in, a plugin is loaded from

@@ -44,7 +44,18 @@
 //   status (`MqbPluginVTable::consumer_status`, `MqbPluginVTable::publisher_status`)
 //   non-blocking twins of the hot-path calls (`MqbCompletion`) and host
 //   services for logs, metrics and crash handlers (`MqbHostVTable`).
-#define MQB_PLUGIN_ABI_MINOR 2
+// * **1.3** appended `MqbPluginVTable::publisher_disconnect`, which tells a
+//   publisher how the route pass ended.
+#define MQB_PLUGIN_ABI_MINOR 3
+
+// The route pass drained its input to the end.
+#define MQB_DISCONNECT_COMPLETED 0
+
+// The route was stopped or is reconnecting; work may remain.
+#define MQB_DISCONNECT_STOPPED 1
+
+// The route pass ended with an error.
+#define MQB_DISCONNECT_FAILED 2
 
 // Acknowledge the message: it was processed successfully.
 #define MQB_DISPOSITION_ACK 0
@@ -325,6 +336,11 @@ typedef MqbStatus (*MqbFactoryDelivery)(MqbFactoryHandle factory,
                                         uint8_t *out_flags,
                                         struct MqbBuffer *err);
 
+// Signature of `MqbPluginVTable::publisher_disconnect`.
+typedef MqbStatus (*MqbPublisherDisconnect)(MqbPublisherHandle publisher,
+                                            uint32_t outcome,
+                                            struct MqbBuffer *err);
+
 // The function table a plugin exports through `MQB_PLUGIN_ENTRY_SYMBOL`.
 //
 // Every fallible function takes an `err` out-parameter. On a non-`MQB_OK`
@@ -543,6 +559,10 @@ typedef struct MqbPluginVTable {
   // Writes the `MQB_DELIVERY_*` flags for an endpoint built from `config_json`.
   // Read through `delivery_hook`.
   MqbFactoryDelivery factory_delivery;
+  // Flushes and runs the publisher's disconnect work, told how the route
+  // pass ended (`MQB_DISCONNECT_*`; an unknown value means stopped). Called
+  // at most once, before `publisher_close`, which then only releases.
+  MqbPublisherDisconnect publisher_disconnect;
 } MqbPluginVTable;
 
 // Signature of the exported discovery symbol.
@@ -589,6 +609,7 @@ typedef const struct MqbPluginVTable *(*MqbPluginListEntry)(size_t index);
 #define MQB_VTABLE_SIZE_V1_0 (27 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_1 (MQB_VTABLE_SIZE_V1_0 + 3 * sizeof(size_t))
 #define MQB_VTABLE_SIZE_V1_2 (MQB_VTABLE_SIZE_V1_1 + 11 * sizeof(size_t))
+#define MQB_VTABLE_SIZE_V1_3 (MQB_VTABLE_SIZE_V1_2 + sizeof(size_t))
 #define MQB_HOST_VTABLE_SIZE_V1_2 (5 * sizeof(size_t))
 
 #if defined(_WIN32)
@@ -614,7 +635,7 @@ MQB_PLUGIN_EXPORT const MqbPluginVTable *mq_bridge_plugin_v1(void);
 MQB_STATIC_ASSERT(sizeof(size_t) == 8, "the plugin ABI layout is defined for 64-bit targets");
 MQB_STATIC_ASSERT(sizeof(MqbMessage) == 16 + 4 * sizeof(size_t), "MqbMessage layout");
 MQB_STATIC_ASSERT(sizeof(MqbHostVTable) == MQB_HOST_VTABLE_SIZE_V1_2, "MqbHostVTable layout");
-MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_2,
+MQB_STATIC_ASSERT(sizeof(MqbPluginVTable) == MQB_VTABLE_SIZE_V1_3,
                   "MqbPluginVTable grew: add the new MQB_VTABLE_SIZE_* to include/cbindgen.toml");
 
 #endif /* MQ_BRIDGE_PLUGIN_H */

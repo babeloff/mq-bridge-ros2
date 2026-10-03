@@ -2,9 +2,10 @@
 
 ## Project Snapshot
 
-`mq-bridge-app` is a Rust + Svelte application inside the root `mq-bridge`
-Cargo workspace. Run npm commands from this directory; run Cargo commands with
-an explicit app package because the workspace default member is the engine.
+`mq-bridge-app` is a Rust + Svelte application vendored into the `mq-bridge`
+repository as its own Cargo workspace, with its own `Cargo.lock`; the root
+workspace excludes `apps`. Run npm commands from this directory. The engine it
+builds on is described in the root [AGENTS.md](../../AGENTS.md).
 
 - Backend/runtime: Rust (`crates/core`, `crates/cli`, `crates/desktop`)
 - UI: Svelte 5 + Vite (`ui/src`), utilizing Runes for state management.

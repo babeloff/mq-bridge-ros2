@@ -223,6 +223,9 @@ impl PublishConfirm {
 /// reconnect and redeliver in-flight QoS 1/2 publishes.
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Below the route's 5 s start window, so the cause is reported with the start failure.
+const PUBLISHER_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+
 pub struct MqttPublisher {
     state: Arc<RwLock<MqttState>>,
     topic: String,
@@ -275,6 +278,19 @@ impl MqttPublisher {
             confirm,
             None, // publishers don't subscribe
         ));
+
+        // The event loop connects in the background and retries forever, so without this
+        // a publisher for an unreachable broker would look started.
+        let deadline = tokio::time::Instant::now() + PUBLISHER_CONNECT_TIMEOUT;
+        while !is_connected.load(Ordering::Relaxed) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "the MQTT broker did not accept the connection within {:?}",
+                    PUBLISHER_CONNECT_TIMEOUT
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         Ok(MqttState {
             client,
@@ -883,6 +899,8 @@ async fn run_eventloop(
     // reconnect, which would otherwise let a batch be acked before its own message
     // is truly confirmed. Only used by publishers (`confirm` is `Some`).
     let mut outstanding_pkids: HashSet<u16> = HashSet::new();
+    // Nothing is in flight before the first CONNACK, so it resets no session.
+    let mut connected_before = false;
 
     loop {
         tokio::select! {
@@ -920,7 +938,7 @@ async fn run_eventloop(
                                     if !ack.session_present {
                                         // rumqttc drops its in-flight publishes on a fresh
                                         // session; fail any pending confirmations so they retry.
-                                        if let Some(confirm) = &confirm {
+                                        if let Some(confirm) = confirm.as_ref().filter(|_| connected_before) {
                                             confirm.reset_session();
                                         }
                                         if let Some((client, topic, qos)) = &subscription_info {
@@ -937,6 +955,7 @@ async fn run_eventloop(
                                     } else {
                                         info!("Session present on V3 connection, resuming...");
                                     }
+                                    connected_before = true;
                                 }
                                 rumqttc::Incoming::SubAck(ack) => {
                                     if let Some(tx) = &subscribed_tx {
@@ -998,7 +1017,7 @@ async fn run_eventloop(
                                         if !ack.session_present {
                                             // rumqttc drops its in-flight publishes on a fresh
                                             // session; fail pending confirmations so they retry.
-                                            if let Some(confirm) = &confirm {
+                                            if let Some(confirm) = confirm.as_ref().filter(|_| connected_before) {
                                                 confirm.reset_session();
                                             }
                                             if let Some((client, topic, qos)) = &subscription_info {
@@ -1015,6 +1034,7 @@ async fn run_eventloop(
                                         } else {
                                             info!("Session present on V5 connection, resuming...");
                                         }
+                                        connected_before = true;
                                     }
                                     rumqttc::v5::Event::Incoming(rumqttc::v5::Incoming::SubAck(ack)) => {
                                         if let Some(tx) = &subscribed_tx {

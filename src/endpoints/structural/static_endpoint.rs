@@ -89,7 +89,8 @@ impl MessagePublisher for StaticEndpointPublisher {
                     .map_err(PublisherError::NonRetryable)?,
             ),
         };
-        let mut response_msg = CanonicalMessage::new_bytes(payload, None);
+        // A batch matches each reply to its request by id; a fresh id would lose the reply.
+        let mut response_msg = CanonicalMessage::new_bytes(payload, Some(message.message_id));
         // Attach configured metadata to the response. When this feeds an HTTP
         // response these become headers (e.g. `content-type`), so the server
         // emits them instead of defaulting to `application/octet-stream`.
@@ -129,6 +130,9 @@ pub struct StaticRequestConsumer {
     /// Precomputed payload for a template with no tokens (the common case).
     static_payload: Option<Bytes>,
     metadata: std::collections::HashMap<String, String>,
+    /// Under `exit_on_empty` the source ends after one `receive` or one full batch.
+    exit_on_empty: bool,
+    emitted: bool,
 }
 
 impl StaticRequestConsumer {
@@ -146,6 +150,8 @@ impl StaticRequestConsumer {
             template: Arc::new(template),
             static_payload,
             metadata: config.metadata.clone(),
+            exit_on_empty: false,
+            emitted: false,
         })
     }
 
@@ -165,7 +171,13 @@ impl MessageConsumer for StaticRequestConsumer {
     fn commit_requires_order(&self) -> bool {
         false
     }
+    fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
+        self.exit_on_empty = exit_on_empty;
+    }
     async fn receive(&mut self) -> Result<Received, ConsumerError> {
+        if self.exit_on_empty && std::mem::replace(&mut self.emitted, true) {
+            return Err(ConsumerError::EndOfStream);
+        }
         let mut message = CanonicalMessage::new_bytes(self.next_payload(), None);
         message.metadata = self.metadata.clone();
         trace!(message_id = %format!("{:032x}", message.message_id), "Producing static message");
@@ -179,6 +191,9 @@ impl MessageConsumer for StaticRequestConsumer {
         &mut self,
         _max_messages: usize,
     ) -> Result<ReceivedBatch, ConsumerError> {
+        if self.exit_on_empty && std::mem::replace(&mut self.emitted, true) {
+            return Err(ConsumerError::EndOfStream);
+        }
         // To properly utilize batching, we generate `_max_messages` here.
         // Each message still involves cloning the payload and generating a new UUID.
         let mut messages = Vec::with_capacity(_max_messages);
@@ -261,6 +276,23 @@ mod tests {
             response_msg.metadata.get("server").map(String::as_str),
             Some("mq-bridge")
         );
+    }
+
+    #[tokio::test]
+    async fn batch_replies_carry_their_request_ids() {
+        let publisher = StaticEndpointPublisher::new(&config("ok")).unwrap();
+        let requests: Vec<CanonicalMessage> =
+            (0..3).map(|_| CanonicalMessage::from("req")).collect();
+        let ids: Vec<u128> = requests.iter().map(|m| m.message_id).collect();
+
+        let SentBatch::Partial { responses, failed } =
+            publisher.send_batch(requests).await.unwrap()
+        else {
+            panic!("a static publisher replies to every message");
+        };
+        assert!(failed.is_empty());
+        let reply_ids: Vec<u128> = responses.unwrap().iter().map(|m| m.message_id).collect();
+        assert_eq!(reply_ids, ids);
     }
 
     #[tokio::test]

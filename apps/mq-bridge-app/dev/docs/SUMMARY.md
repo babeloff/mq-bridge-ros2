@@ -32,6 +32,7 @@
   - [Checkpoints & resumable copies](cookbook/checkpoints.md)
   - [Retries & backoff](cookbook/retries.md)
   - [Dead-letter queues](cookbook/dlq.md)
+  - [MySQL, SQL Server & Oracle CDC via Debezium](cookbook/debezium.md)
 - [Shaping & routing]()
   - [Transform & schema mapping](cookbook/transform.md)
   - [Content-based routing (switch)](cookbook/switch.md)
@@ -45,6 +46,11 @@
   - [Compression](cookbook/compression.md)
 - [Analytics]()
   - [Query a stream in DuckDB](cookbook/duckdb.md)
+  - [Load into Snowflake](cookbook/snowflake.md)
+  - [Load into BigQuery](cookbook/bigquery.md)
+  - [Load into Databricks / Spark](cookbook/databricks.md)
+  - [Query from Athena / Trino](cookbook/athena.md)
+  - [ClickHouse: endpoint or s3()](cookbook/clickhouse.md)
 
 # Connectors
 - [Overview & capabilities](reference/endpoints.md)
@@ -85,6 +91,16 @@
     - [Parameters](reference/dir-spool.md)
   - [Object storage (local / cloud)](connectors/object-store.md)
     - [Parameters](reference/object-store.md)
+  - [Apache Pulsar](connectors/pulsar.md)
+  - [Meilisearch](connectors/meilisearch.md)
+  - [HTTP bulk (search engines)](connectors/http-bulk.md)
+    - [Typesense](connectors/typesense.md)
+    - [Elasticsearch](connectors/elasticsearch.md)
+    - [PostgREST and Supabase](connectors/postgrest.md)
+  - [Connect plugin (Redpanda Connect)](connectors/connect.md)
+    - [Inputs](connectors/connect-inputs.md)
+    - [Outputs](connectors/connect-outputs.md)
+    - [Processors](connectors/connect-processors.md)
 - [URL parameter index](reference/README.md)
 
 # Reference

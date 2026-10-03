@@ -68,8 +68,18 @@ impl MessagePublisher for CompressionPublisher {
             .iter()
             .map(|m| (m.message_id, m.payload.clone()))
             .collect();
-        for message in &mut messages {
-            self.compress_message(message)?;
+        if self.algo != Compression::None {
+            let algo = self.algo;
+            messages = crate::support::parallel::map_messages(messages, move |mut message| {
+                compress_member(algo, &message.payload).map(|out| {
+                    message.payload = out.into();
+                    message
+                })
+            })
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()
+            .map_err(|e| PublisherError::NonRetryable(e.into()))?;
         }
         match self.inner.send_batch(messages).await? {
             SentBatch::Ack => Ok(SentBatch::Ack),
@@ -151,8 +161,20 @@ impl MessageConsumer for CompressionConsumer {
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         let mut batch = self.inner.receive_batch(max_messages).await?;
-        for message in &mut batch.messages {
-            self.decompress_message(message)?;
+        if self.algo != Compression::None {
+            let (algo, max_bytes) = (self.algo, self.max_bytes);
+            let messages = std::mem::take(&mut batch.messages);
+            batch.messages =
+                crate::support::parallel::map_messages(messages, move |mut message| {
+                    decompress_all(algo, &message.payload, max_bytes).map(|out| {
+                        message.payload = out.into();
+                        message
+                    })
+                })
+                .await
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .map_err(|e| ConsumerError::Permanent(e.into()))?;
         }
         Ok(batch)
     }

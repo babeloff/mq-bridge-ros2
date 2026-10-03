@@ -6,6 +6,7 @@
 //! Enriches each message with the responses of other, request-capable endpoints.
 
 use crate::endpoints::create_publisher_from_route;
+use crate::errors::InvalidConfig;
 use crate::models::{Endpoint, LookupMiddleware};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
@@ -183,14 +184,22 @@ impl Lookup {
                 entries.push(Entry::new(from, &config.metadata, payload, into, route_name).await?);
             }
             (None, None) if config.metadata.is_empty() && config.payload.is_none() => {}
-            _ => anyhow::bail!("lookup: `from` and `into` must be set together"),
+            _ => {
+                return Err(InvalidConfig(anyhow::anyhow!(
+                    "lookup: `from` and `into` must be set together"
+                ))
+                .into())
+            }
         }
         for e in &config.entries {
             let payload = e.payload.as_deref();
             entries.push(Entry::new(&e.from, &e.metadata, payload, &e.into, route_name).await?);
         }
         if entries.is_empty() {
-            anyhow::bail!("lookup: set `from` and `into`, or list `entries`");
+            return Err(InvalidConfig(anyhow::anyhow!(
+                "lookup: set `from` and `into`, or list `entries`"
+            ))
+            .into());
         }
         Ok(Self {
             entries,
@@ -861,5 +870,46 @@ entries:
         assert!(out
             .iter()
             .all(|r| matches!(r, Err((_, PublisherError::NonRetryable(_))))));
+    }
+
+    #[cfg(all(feature = "http-bulk", feature = "plugin", feature = "test-utils"))]
+    #[tokio::test]
+    async fn an_http_bulk_query_answers_a_whole_batch_with_one_request() {
+        use crate::plugin::test_support::StubHttpServer;
+        let answer = r#"{"docs":[{"found":true,"_source":{"name":"Ada"}},{"found":false},{"found":true,"_source":{"name":"Bob"}}]}"#;
+        let server = StubHttpServer::start(move |_| (200, answer.to_string()))
+            .await
+            .unwrap();
+        let config = format!(
+            r#"
+from:
+  http_bulk:
+    url: "{}"
+    query:
+      path: /users/_mget
+      format: json_array
+      request: '{{"_id":"${{payload:user_id}}"}}'
+      envelope: '{{"docs":{{requests}}}}'
+      responses: /docs
+      value: /_source
+      found: /found
+into: user
+"#,
+            server.url()
+        );
+        let (publisher, channel) = lookup("lookup_http_bulk", &config).await;
+        let batch = (1..=3).map(|id| msg(json!({"user_id": id}))).collect();
+        publisher.send_batch(batch).await.unwrap();
+
+        let asked = server.requests();
+        assert_eq!(asked.len(), 1, "one request for three messages");
+        assert_eq!(
+            String::from_utf8_lossy(&asked[0].body),
+            r#"{"docs":[{"_id":"1"},{"_id":"2"},{"_id":"3"}]}"#
+        );
+        let sent = channel.drain_messages();
+        assert_eq!(payload(&sent[0])["user"], json!({"name": "Ada"}));
+        assert_eq!(payload(&sent[1]), json!({"user_id": 2, "user": null}));
+        assert_eq!(payload(&sent[2])["user"]["name"], "Bob");
     }
 }

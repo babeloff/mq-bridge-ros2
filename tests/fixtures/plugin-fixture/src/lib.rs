@@ -47,8 +47,8 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use mq_bridge::errors::{ConsumerError, InvalidConfig, PublisherError};
 use mq_bridge::traits::{
-    BatchCommitFunc, CustomEndpointFactory, EndpointStatus, MessageConsumer, MessageDisposition,
-    MessagePublisher,
+    BatchCommitFunc, BoxFuture, CustomEndpointFactory, DisconnectOutcome, EndpointStatus,
+    MessageConsumer, MessageDisposition, MessagePublisher,
 };
 use mq_bridge::{CanonicalMessage, ReceivedBatch, SentBatch};
 use serde::Deserialize;
@@ -157,6 +157,12 @@ pub fn commit_log_queue(name: &str) -> String {
 /// `Drop` that spawns, as the pulsar client's does, would have panicked.
 pub fn drop_log_queue(name: &str) -> String {
     format!("{name}#dropped")
+}
+
+/// Queue each publisher reports its route's outcome to when it disconnects:
+/// `completed`, `stopped`, `failed`, or `unknown` when none reached it.
+pub fn disconnect_log_queue(name: &str) -> String {
+    format!("{name}#disconnected")
 }
 
 #[derive(Debug, Default)]
@@ -487,6 +493,21 @@ impl MessagePublisher for FixturePublisher {
             },
             None => SentBatch::Ack,
         })
+    }
+
+    fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
+        Some(Box::pin(async move {
+            let outcome = match mq_bridge::traits::disconnect_outcome() {
+                Some(DisconnectOutcome::Completed) => "completed",
+                Some(DisconnectOutcome::Stopped) => "stopped",
+                Some(DisconnectOutcome::Failed) => "failed",
+                None => "unknown",
+            };
+            let log = queue(&disconnect_log_queue(&self.name));
+            let mut log = log.lock().expect("fixture queue poisoned");
+            log.ready.push_back(CanonicalMessage::from(outcome));
+            Ok(())
+        }))
     }
 
     async fn status(&self) -> EndpointStatus {

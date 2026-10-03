@@ -173,6 +173,7 @@ class Endpoint(TypedDict, total=False):
     file: FileConfig
     grpc: GrpcConfig
     http: HttpConfig
+    http_bulk: HttpBulkConfig
     ibmmq: IbmMqConfig
     kafka: KafkaConfig
     memory: MemoryConfig
@@ -240,6 +241,134 @@ class GrpcConfig(TypedDict, total=False):
     tls: TlsConfig
     topic: Optional[str]
     url: Required[str]
+
+
+class HttpBulkAuth(TypedDict, total=False):
+    """How `http_bulk` requests are authenticated beyond `headers`. Set at most one field."""
+    aws_sigv4: Optional[HttpBulkAwsSigV4]
+    oauth2: Optional[HttpBulkOAuth2]
+
+
+class HttpBulkAwsSigV4(TypedDict, total=False):
+    """AWS Signature Version 4 signing for `http_bulk`."""
+    access_key: Optional[str]
+    region: Required[str]
+    secret_key: Optional[str]
+    service: Required[str]
+    session_token: Optional[str]
+
+
+class HttpBulkConfig(TypedDict, total=False):
+    """HTTP APIs that take or return many JSON documents in one request, such as search engines."""
+    auth: Optional[HttpBulkAuth]
+    compression: Compression
+    connect_timeout_ms: Optional[int]
+    delete: Optional[HttpBulkDelete]
+    delete_values: List[str]
+    headers: Dict[str, str]
+    max_request_bytes: int
+    operation: Optional[str]
+    query: Optional[HttpBulkQuery]
+    read: Optional[HttpBulkRead]
+    request_timeout_ms: Optional[int]
+    tls: TlsConfig
+    upsert: Optional[HttpBulkUpsert]
+    url: Required[str]
+
+
+class HttpBulkCursor(TypedDict, total=False):
+    """Where an `http_bulk` input takes its next read position from. Set at most one of"""
+    item: Optional[str]
+    response: Optional[str]
+    start: Any
+
+
+class HttpBulkDelete(TypedDict, total=False):
+    """The `http_bulk` request that removes documents by id."""
+    envelope: Optional[str]
+    id_field: str
+    line: Optional[str]
+    max_ids: int
+    method: Optional[str]
+    path: Required[str]
+    result: HttpBulkResult
+
+
+class HttpBulkItems(TypedDict, total=False):
+    """A JSON response holding an array with one entry per document, in request order."""
+    error: Required[str]
+    path: str
+
+
+class HttpBulkJob(TypedDict, total=False):
+    """A job the target runs after answering, polled until it ends."""
+    error: Optional[str]
+    failed: Required[List[str]]
+    id: Required[str]
+    poll: Required[str]
+    status: Required[str]
+    succeeded: Required[List[str]]
+    timeout_ms: int
+
+
+class HttpBulkLines(TypedDict, total=False):
+    """A response with one JSON line per document, in request order."""
+    error: Optional[str]
+    success: Required[str]
+
+
+class HttpBulkOAuth2(TypedDict, total=False):
+    """OAuth2 client credentials grant for `http_bulk`."""
+    client_id: Required[str]
+    client_secret: Required[str]
+    scope: Optional[str]
+    token_url: Required[str]
+
+
+class HttpBulkQuery(TypedDict, total=False):
+    """The `http_bulk` request that answers a batch of lookups, one answer per message in order."""
+    content_type: Optional[str]
+    envelope: Optional[str]
+    error: Optional[str]
+    format: HttpBulkFormat
+    found: Optional[str]
+    method: Optional[str]
+    path: Required[str]
+    request: Required[str]
+    responses: str
+    value: Optional[str]
+
+
+class HttpBulkRead(TypedDict, total=False):
+    """The `http_bulk` request that reads one page of documents."""
+    body: Optional[str]
+    checkpoint_store: Optional[str]
+    cursor: HttpBulkCursor
+    cursor_id: Optional[str]
+    items: str
+    max_polling_interval_ms: Optional[int]
+    method: Optional[str]
+    path: Required[str]
+    polling_interval_ms: Optional[int]
+
+
+class HttpBulkResult(TypedDict, total=False):
+    """How an `http_bulk` target reports what happened to a request. Set at most one field."""
+    items: Optional[HttpBulkItems]
+    job: Optional[HttpBulkJob]
+    lines: Optional[HttpBulkLines]
+
+
+class HttpBulkUpsert(TypedDict, total=False):
+    """The `http_bulk` request that writes documents."""
+    action: Optional[str]
+    content_type: Optional[str]
+    document: Optional[str]
+    envelope: Optional[str]
+    format: HttpBulkFormat
+    method: Optional[str]
+    path: Required[str]
+    result: HttpBulkResult
 
 
 class HttpConfig(TypedDict, total=False):
@@ -710,6 +839,7 @@ DatePartitionStyle = Literal["nested", "hive"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
+HttpBulkFormat = Literal["ndjson", "json_array"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
 IdHash = Literal["fnv1a", "sha256"]
 MappingRule = Union[str, DetailedMappingRule]

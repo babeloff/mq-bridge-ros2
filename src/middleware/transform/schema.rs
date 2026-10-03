@@ -314,8 +314,9 @@ impl CompiledSchema {
             // as f64. A 24-digit id or `1e400` is well-formed JSON that no `Value` can
             // represent, and the normal path rejects it — so parse before waving it
             // through. This also rules out fractions and exponents for `integer`.
+            // `-0` parses as an i64, but a `Value` holds it as the float -0.0.
             (Ty::Integer, Some(b'-' | b'0'..=b'9')) => {
-                raw.parse::<i64>().is_ok() || raw.parse::<u64>().is_ok()
+                raw != "-0" && (raw.parse::<i64>().is_ok() || raw.parse::<u64>().is_ok())
             }
             (Ty::Number, Some(b'-' | b'0'..=b'9')) => raw.parse::<f64>().is_ok_and(f64::is_finite),
             _ => false,

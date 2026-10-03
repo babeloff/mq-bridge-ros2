@@ -26,6 +26,26 @@ In containers/Kubernetes, set the vars in the environment (and override any conf
 This is the recommended way to keep secrets out of source — see the
 [deploying security checklist](../operations/deploying.md#security-checklist-for-production).
 
+## Custom endpoints and plugins
+
+When the app stores secrets outside the config file (the `balanced` config security mode), it
+also takes them out of a `custom` endpoint's or middleware's `config`, such as a
+[Connect](../connectors/connect.md) component:
+
+- a string field whose name contains `password`, `passphrase`, `secret` or `credentials`, or
+  ends in `token`, `api_key`, `apikey`, `access_key`, `account_key`, `private_key` or
+  `connection_string`, at any depth;
+- a URL with `user:pass@` in it, also inside a list such as `urls`, and a `dsn` containing `@`.
+
+Left in the file, because an environment variable cannot carry them back unchanged:
+
+- a field whose name is not lowercase `snake_case` (`apiKey`, `X-Api-Key`), and everything below it;
+- a value that reads as a number or boolean (`"12345"`, `"true"`);
+- a value that already is a reference (`"${DB_PASSWORD}"`);
+- a Connect `yaml` document.
+
+For those, reference the secret from the environment as above.
+
 ## Encryption keys from the environment
 
 The [`encryption`](encryption.md) middleware and the file endpoints read their key with the

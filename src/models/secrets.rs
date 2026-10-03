@@ -149,6 +149,97 @@ fn extract_sensitive_optional_url(
     }
 }
 
+/// Narrower than the header heuristic: `key` and `max_tokens` are ordinary connector fields.
+fn is_sensitive_custom_field(key: &str) -> bool {
+    const CONTAINS: [&str; 4] = ["password", "passphrase", "secret", "credentials"];
+    const SUFFIXES: [&str; 7] = [
+        "token",
+        "apikey",
+        "api_key",
+        "access_key",
+        "account_key",
+        "private_key",
+        "connection_string",
+    ];
+    CONTAINS.iter().any(|needle| key.contains(needle))
+        || SUFFIXES.iter().any(|suffix| key.ends_with(suffix))
+}
+
+/// Whether an env-variable segment maps back onto exactly this key.
+fn is_env_restorable_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with('_')
+        && !key.ends_with('_')
+        && !key.contains("__")
+        && key.parse::<usize>().is_err()
+        && key
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn is_credential_url(value: &str) -> bool {
+    !value.contains(char::is_whitespace) && url_has_userinfo(value)
+}
+
+/// An env override of an untyped field comes back as a bool or number if it parses as one.
+fn env_keeps_string(value: &str) -> bool {
+    value.to_ascii_lowercase().parse::<bool>().is_err() && value.parse::<f64>().is_err()
+}
+
+fn is_custom_secret(key: &str, value: &str) -> bool {
+    // A `${…}` value is a reference, not the secret itself.
+    !value.is_empty()
+        && !value.starts_with("${")
+        && env_keeps_string(value)
+        && (is_sensitive_custom_field(key)
+            || is_credential_url(value)
+            || (key == "dsn" && value.contains('@')))
+}
+
+/// Extracts credentials from a custom endpoint's or middleware's free-form config.
+/// Keys an environment variable cannot name are left in place, with their subtree.
+fn extract_custom_config_secrets(
+    value: &mut serde_json::Value,
+    prefix: &str,
+    secrets: &mut HashMap<String, String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<String> = map
+                .keys()
+                .filter(|key| is_env_restorable_key(key))
+                .cloned()
+                .collect();
+            for key in keys {
+                let path = format!("{}__{}", prefix, key.to_ascii_uppercase());
+                let is_secret = matches!(
+                    map.get(&key),
+                    Some(serde_json::Value::String(value)) if is_custom_secret(&key, value)
+                );
+                if is_secret {
+                    if let Some(serde_json::Value::String(secret)) = map.remove(&key) {
+                        secrets.insert(path, secret);
+                    }
+                } else if let Some(child) = map.get_mut(&key) {
+                    extract_custom_config_secrets(child, &path, secrets);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for (i, item) in items.iter_mut().enumerate() {
+                let path = format!("{}__{}", prefix, i);
+                match item {
+                    serde_json::Value::String(url) if is_credential_url(url) => {
+                        secrets.insert(path, std::mem::take(url));
+                    }
+                    _ => extract_custom_config_secrets(item, &path, secrets),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 impl SecretExtractor for Route {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         self.input
@@ -209,6 +300,9 @@ impl SecretExtractor for EndpointType {
             EndpointType::ClickHouse(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "CLICKHOUSE"), secrets)
             }
+            EndpointType::HttpBulk(cfg) => {
+                cfg.extract_secrets(&format!("{}__{}", prefix, "HTTP_BULK"), secrets)
+            }
             EndpointType::PostgresCdc(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "POSTGRES_CDC"), secrets)
             }
@@ -258,6 +352,11 @@ impl SecretExtractor for EndpointType {
                     );
                 }
             }
+            EndpointType::Custom { config, .. } => extract_custom_config_secrets(
+                config,
+                &format!("{}__{}", prefix, "CUSTOM__CONFIG"),
+                secrets,
+            ),
             _ => {}
         }
     }
@@ -273,6 +372,11 @@ impl SecretExtractor for Middleware {
             Middleware::Encryption(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "ENCRYPTION"), secrets);
             }
+            Middleware::Custom { config, .. } => extract_custom_config_secrets(
+                config,
+                &format!("{}__{}", prefix, "CUSTOM__CONFIG"),
+                secrets,
+            ),
             _ => {}
         }
     }
@@ -480,6 +584,39 @@ impl SecretExtractor for ClickHouseConfig {
         }
         if let Some(val) = self.checkpoint_store.take() {
             secrets.insert(format!("{}__{}", prefix, "CHECKPOINT_STORE"), val);
+        }
+        self.tls
+            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
+    }
+}
+
+impl SecretExtractor for HttpBulkConfig {
+    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
+        extract_sensitive_string_map_entries(&mut self.headers, prefix, "HEADERS", secrets);
+        if let Some(oauth2) = self.auth.as_mut().and_then(|auth| auth.oauth2.as_mut()) {
+            secrets.insert(
+                format!("{prefix}__AUTH__OAUTH2__CLIENT_SECRET"),
+                std::mem::take(&mut oauth2.client_secret),
+            );
+        }
+        if let Some(aws) = self.auth.as_mut().and_then(|auth| auth.aws_sigv4.as_mut()) {
+            for (name, value) in [
+                ("SECRET_KEY", &mut aws.secret_key),
+                ("SESSION_TOKEN", &mut aws.session_token),
+            ] {
+                if let Some(value) = value.take() {
+                    secrets.insert(format!("{prefix}__AUTH__AWS_SIGV4__{name}"), value);
+                }
+            }
+        }
+        if let Some(read) = self.read.as_mut() {
+            extract_sensitive_optional_url(
+                &mut read.checkpoint_store,
+                prefix,
+                "READ__CHECKPOINT_STORE",
+                secrets,
+            );
         }
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
