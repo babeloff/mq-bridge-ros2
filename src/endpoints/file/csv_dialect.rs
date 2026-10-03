@@ -10,7 +10,7 @@ use anyhow::{anyhow, bail};
 use std::sync::{Arc, OnceLock};
 
 /// What `separator: auto` chooses between, in order of preference on a tie.
-const AUTO_CANDIDATES: [u8; 4] = [b',', b';', b'\t', b'|'];
+const AUTO_CANDIDATES: [u8; 4] = *b",;\t|";
 
 /// The bytes that carry CSV syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

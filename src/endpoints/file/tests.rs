@@ -2126,24 +2126,30 @@ fn csv_lone_empty_cell_is_quoted() {
 fn csv_write_then_frame(
     payload: &std::collections::BTreeMap<String, String>,
     delimiter: &[u8],
+    csv: &super::CsvDialect,
 ) -> (Vec<u8>, Vec<Vec<u8>>) {
-    use super::{csv_encode_message, csv_encode_row, read_record_sync};
+    use super::{csv_encode_message, csv_encode_row};
 
     let msg = crate::CanonicalMessage::new(serde_json::to_vec(payload).unwrap(), None);
     let mut header = None;
     let mut row = Vec::new();
-    let csv = super::CsvDialect::default();
-    assert!(csv_encode_message(&msg, &mut header, &mut row, delimiter, &csv).unwrap());
+    assert!(csv_encode_message(&msg, &mut header, &mut row, delimiter, csv).unwrap());
     let mut file = csv_encode_row(&header.unwrap(), delimiter, csv.syntax()).unwrap();
     file.extend_from_slice(delimiter);
     file.extend_from_slice(&row);
     file.extend_from_slice(delimiter);
+    let records = csv_frame(&file, delimiter, csv);
+    (file, records)
+}
 
-    let mut reader = std::io::Cursor::new(&file);
+/// Frames `file` into records exactly as the file consumer does.
+fn csv_frame(file: &[u8], delimiter: &[u8], csv: &super::CsvDialect) -> Vec<Vec<u8>> {
+    use super::read_record_sync;
+    let mut reader = std::io::Cursor::new(file);
     let mut records = Vec::new();
     loop {
         let mut record = Vec::new();
-        if read_record_sync(&mut reader, delimiter, &FileFormat::Csv, &csv, &mut record).unwrap()
+        if read_record_sync(&mut reader, delimiter, &FileFormat::Csv, csv, &mut record).unwrap()
             == 0
         {
             break;
@@ -2156,11 +2162,44 @@ fn csv_write_then_frame(
         }
         records.push(record);
     }
-    (file, records)
+    records
+}
+
+/// Decodes framed records into one object per data row, as the file consumer does.
+fn csv_rows(
+    records: &[Vec<u8>],
+    csv: &super::CsvDialect,
+) -> Vec<std::collections::BTreeMap<String, String>> {
+    use crate::endpoints::file::parse_message;
+    let mut state = Some(super::CsvHeader::unread(csv.clone()));
+    records
+        .iter()
+        .filter_map(|record| parse_message(record, &FileFormat::Csv, &mut state))
+        .map(|row| serde_json::from_slice(&row.payload).unwrap())
+        .collect()
 }
 
 fn csv_cell() -> impl proptest::strategy::Strategy<Value = String> {
-    r#"[a-c,"\\\n\r\t |;\x00\x01\x1f\x7fé世🎉\x{feff}\x{2028}]{0,10}"#
+    r#"[a-c,"'\\\n\r\t |;\x00\x01\x1f\x7fé世🎉\x{feff}\x{2028}]{0,10}"#
+}
+
+/// Separator and quote pairs, as their config spellings.
+fn csv_syntax() -> impl proptest::strategy::Strategy<Value = (&'static str, &'static str)> {
+    use proptest::sample::select;
+    (
+        select(vec![",", ";", "tab", "|", "space", "0x1f"]),
+        select(vec!["\"", "'"]),
+    )
+}
+
+/// `None` when the record delimiter collides with the dialect, which the config rejects.
+fn csv_dialect_of((separator, quote): (&str, &str), delimiter: &str) -> Option<super::CsvDialect> {
+    let config = CsvConfig {
+        separator: Some(separator.to_string()),
+        quote: Some(quote.to_string()),
+        ..Default::default()
+    };
+    super::CsvDialect::from_config(&config, delimiter.as_bytes()).ok()
 }
 
 fn csv_payload(
@@ -2175,18 +2214,50 @@ proptest::proptest! {
     fn csv_writer_output_reads_back_unchanged(
         payload in csv_payload(),
         delimiter in proptest::sample::select(vec!["\n", "\r\n", "|", ";;"]),
+        syntax in csv_syntax(),
     ) {
-        use crate::endpoints::file::parse_message;
-        let (file, records) = csv_write_then_frame(&payload, delimiter.as_bytes());
+        let Some(csv) = csv_dialect_of(syntax, delimiter) else { return Ok(()) };
+        let (file, records) = csv_write_then_frame(&payload, delimiter.as_bytes(), &csv);
         proptest::prop_assert_eq!(
             records.len(), 2, "file {:?} framed wrongly", String::from_utf8_lossy(&file)
         );
-        let mut state = None;
-        proptest::prop_assert!(parse_message(&records[0], &FileFormat::Csv, &mut state).is_none());
-        let row = parse_message(&records[1], &FileFormat::Csv, &mut state).unwrap();
-        let read: std::collections::BTreeMap<String, String> =
-            serde_json::from_slice(&row.payload).unwrap();
-        proptest::prop_assert_eq!(read, payload);
+        proptest::prop_assert_eq!(
+            csv_rows(&records, &csv), vec![payload], "file {:?}", String::from_utf8_lossy(&file)
+        );
+    }
+
+    /// The other direction: a file an independent writer produced, in any dialect,
+    /// reads back as the cells that went in.
+    #[test]
+    fn csv_crate_output_reads_back_unchanged(
+        header in proptest::collection::btree_set(csv_cell(), 1..6),
+        cells in proptest::collection::vec(csv_cell(), 12),
+        syntax in csv_syntax(),
+    ) {
+        // An unquoted leading U+FEFF is a byte-order mark to the reader.
+        proptest::prop_assume!(!header.first().unwrap().starts_with('\u{feff}'));
+        let csv = csv_dialect_of(syntax, "\n").unwrap();
+        let header: Vec<String> = header.into_iter().collect();
+        let rows: Vec<&[String]> = cells.chunks_exact(header.len()).collect();
+        let mut writer = csv::WriterBuilder::new()
+            .delimiter(csv.syntax().separator)
+            .quote(csv.syntax().quote.unwrap())
+            .terminator(csv::Terminator::Any(b'\n'))
+            .from_writer(Vec::new());
+        writer.write_record(&header).unwrap();
+        for row in &rows {
+            writer.write_record(*row).unwrap();
+        }
+        let file = writer.into_inner().unwrap();
+        let expected: Vec<std::collections::BTreeMap<String, String>> = rows
+            .iter()
+            .map(|row| header.iter().cloned().zip(row.iter().cloned()).collect())
+            .collect();
+        proptest::prop_assert_eq!(
+            csv_rows(&csv_frame(&file, b"\n", &csv), &csv),
+            expected,
+            "file {:?}", String::from_utf8_lossy(&file)
+        );
     }
 
     /// An independent RFC 4180 parser reads the writer's output the same way, so files
@@ -2195,18 +2266,22 @@ proptest::proptest! {
     fn csv_writer_output_matches_the_csv_crate(
         payload in csv_payload(),
         delimiter in proptest::sample::select(vec!["\n", "\r\n", "|"]),
+        syntax in csv_syntax(),
     ) {
+        let Some(csv) = csv_dialect_of(syntax, delimiter) else { return Ok(()) };
         // A lone empty cell is a blank line, which the csv crate skips by design.
         proptest::prop_assume!(
             !(payload.len() == 1 && payload.iter().any(|(k, v)| k.is_empty() || v.is_empty()))
         );
-        let (file, _) = csv_write_then_frame(&payload, delimiter.as_bytes());
+        let (file, _) = csv_write_then_frame(&payload, delimiter.as_bytes(), &csv);
         let terminator = match delimiter {
             "|" => csv::Terminator::Any(b'|'),
             _ => csv::Terminator::CRLF,
         };
         let parsed: Vec<Vec<String>> = csv::ReaderBuilder::new()
             .has_headers(false)
+            .delimiter(csv.syntax().separator)
+            .quote(csv.syntax().quote.unwrap())
             .terminator(terminator)
             .from_reader(file.as_slice())
             .records()

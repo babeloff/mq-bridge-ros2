@@ -2269,6 +2269,7 @@ fn run_file_queue_task(
 /// `make_reader` builds the decoding [`Read`](std::io::Read) chain
 /// (decrypt frames and/or decompress members) over a freshly opened file.
 #[cfg(any(feature = "compression", feature = "encryption"))]
+#[allow(clippy::too_many_arguments)]
 fn run_file_member_consume_task_sync<F>(
     path: String,
     msg_tx: async_channel::Sender<Vec<CanonicalMessage>>,
