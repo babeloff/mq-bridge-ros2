@@ -228,7 +228,8 @@ With `query` the endpoint writes nothing: it answers the
 of messages instead of one per message. Each message renders `request`, the
 parts are joined into one body, and the answers are matched to the messages by
 their position in the array at `responses`. The endpoint keeps no state and
-caches nothing.
+caches no answers; only an `auth.oauth2` token is cached, as described under
+[Behaviour](#behaviour).
 
 This output looks up each order's book in Elasticsearch with one `_mget` per
 batch, then writes the enriched orders:
@@ -283,7 +284,7 @@ Elasticsearch or Qdrant.
 | `compression` | `none` | `gzip`, `zstd` or `lz4` for request bodies, named in `Content-Encoding` |
 | `request_timeout_ms` | none | Timeout of one request |
 | `connect_timeout_ms` | 10000 | Connection timeout |
-| `tls` | none | `ca_file` and `accept_invalid_certs` for `https://` |
+| `tls` | none | `ca_file` and `accept_invalid_certs` for `https://`; `required: true` refuses a `url` or OAuth2 `token_url` that is not `https://` |
 
 `upsert`:
 
@@ -317,7 +318,7 @@ Elasticsearch or Qdrant.
 
 | Field | Meaning |
 | --- | --- |
-| `oauth2` | Client credentials grant: `token_url`, `client_id`, `client_secret` and an optional `scope`. The token is sent as `Authorization: Bearer`. |
+| `oauth2` | Client credentials grant: `token_url`, `client_id`, `client_secret` and an optional `scope`. The token is sent as `Authorization: Bearer`. Use an `https://` `token_url`: the secret is sent to it. With `tls.required` anything else is refused; without it, plain HTTP to another host logs a warning. |
 | `aws_sigv4` | Signs each request: `region` and `service` (`es`, `aoss`, …). `access_key`, `secret_key` and `session_token` are optional; without them the AWS default credential chain is used. Needs a build with the `aws` feature, which `full` includes. |
 
 `read`:
@@ -401,8 +402,9 @@ As a lookup (`query`):
 
 - **One request per batch**, split by `max_request_bytes` like an upsert. A
   refused request fails every lookup in it, retryable by its status.
-- **An answer the target left out is `null`**, as is an entry whose `found` is
-  not `true` or that has nothing at `value`.
+- **An entry whose `found` is not `true`, or that has nothing at `value`, is
+  `null`.** The array must hold one entry per lookup: answers are matched by
+  position, so a shorter or longer one fails the request for good.
 - **An entry that reports an error fails only its message.** The batch is then
   asked again one lookup at a time, with a warning in the log, so the other
   messages still get their answers.

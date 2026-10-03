@@ -17,6 +17,7 @@ use std::fmt;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
+use tracing::warn;
 
 /// A token is replaced this long before it expires, or at half its lifetime if shorter.
 const REFRESH_MARGIN: Duration = Duration::from_secs(60);
@@ -58,10 +59,10 @@ pub(super) enum Auth {
 }
 
 impl Auth {
-    pub(super) fn new(config: Option<&HttpBulkAuth>) -> anyhow::Result<Self> {
+    pub(super) fn new(config: Option<&HttpBulkAuth>, tls_required: bool) -> anyhow::Result<Self> {
         match config.map(|auth| (&auth.oauth2, &auth.aws_sigv4)) {
             None | Some((None, None)) => Ok(Self::None),
-            Some((Some(oauth2), None)) => Ok(Self::OAuth2(OAuth2::new(oauth2)?)),
+            Some((Some(oauth2), None)) => Ok(Self::OAuth2(OAuth2::new(oauth2, tls_required)?)),
             #[cfg(feature = "aws")]
             Some((None, Some(aws))) => Ok(Self::SigV4(Box::new(sigv4::SigV4::new(aws)?))),
             #[cfg(not(feature = "aws"))]
@@ -121,11 +122,28 @@ pub(super) struct OAuth2 {
 }
 
 impl OAuth2 {
-    fn new(config: &HttpBulkOAuth2) -> anyhow::Result<Self> {
+    fn new(config: &HttpBulkOAuth2, tls_required: bool) -> anyhow::Result<Self> {
         let url = url::Url::parse(&config.token_url)
             .context("http_bulk auth.oauth2.token_url is not a URL")?;
         if !matches!(url.scheme(), "http" | "https") {
             bail!("http_bulk auth.oauth2.token_url must be an http(s) URL");
+        }
+        if url.scheme() == "http" {
+            if tls_required {
+                bail!("http_bulk tls.required needs an https auth.oauth2.token_url");
+            }
+            let local = match url.host() {
+                Some(url::Host::Domain(name)) => name == "localhost",
+                Some(url::Host::Ipv4(address)) => address.is_loopback(),
+                Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                None => false,
+            };
+            if !local {
+                warn!(
+                    token_url = %config.token_url,
+                    "http_bulk sends the OAuth2 client secret unencrypted; use an https token_url"
+                );
+            }
         }
         let mut form = url::form_urlencoded::Serializer::new(String::new());
         form.append_pair("grant_type", "client_credentials")

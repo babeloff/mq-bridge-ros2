@@ -579,9 +579,13 @@ fn references(node: &Value, prefix: &str, names: &mut Vec<String>) {
         Value::Object(object) => {
             for (key, value) in object {
                 match value.as_str().filter(|_| key == "$ref") {
-                    Some(reference) => {
-                        names.extend(reference.strip_prefix(prefix).map(String::from))
-                    }
+                    // A pointer into a definition still needs the whole definition.
+                    Some(reference) => names.extend(
+                        reference
+                            .strip_prefix(prefix)
+                            .and_then(|rest| rest.split('/').next())
+                            .map(|name| name.replace("~1", "/").replace("~0", "~")),
+                    ),
                     None => references(value, prefix, names),
                 }
             }
@@ -640,10 +644,11 @@ fn constants_of(union: &Value) -> Option<Vec<Value>> {
 }
 
 fn local_definition<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
-    ["#/$defs/", "#/definitions/"].iter().find_map(|prefix| {
-        let name = reference.strip_prefix(prefix)?;
-        root.get(&prefix[2..prefix.len() - 1])?.get(name)
-    })
+    let pointer = reference.strip_prefix('#')?;
+    ["/$defs/", "/definitions/"]
+        .iter()
+        .any(|prefix| pointer.starts_with(prefix))
+        .then(|| root.pointer(pointer))?
 }
 
 #[cfg(test)]
@@ -1076,5 +1081,28 @@ mod tests {
         // The reference left behind still resolves.
         assert!(flat.pointer("/$defs/Node/properties/next").is_some());
         assert!(flat.pointer("/$defs/Missing").is_none());
+    }
+
+    #[test]
+    fn a_reference_into_a_definition_resolves_and_keeps_the_definition_a_cycle_needs() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "left": { "$ref": "#/$defs/Pair/properties/left" },
+                "loop": { "$ref": "#/$defs/Node/properties/next" },
+            },
+            "$defs": {
+                "Pair": { "properties": { "left": { "type": "integer" } } },
+                "Node": { "properties": { "next": { "$ref": "#/$defs/Node/properties/next" } } },
+            },
+        });
+        let flat = flatten(&schema);
+        assert_eq!(flat["properties"]["left"], json!({ "type": "integer" }));
+        assert_eq!(
+            flat["properties"]["loop"]["$ref"],
+            "#/$defs/Node/properties/next"
+        );
+        assert!(flat.pointer("/$defs/Node/properties/next").is_some());
+        assert!(flat.pointer("/$defs/Pair").is_none());
     }
 }

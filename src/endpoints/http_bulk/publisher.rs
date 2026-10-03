@@ -753,7 +753,9 @@ impl MessagePublisher for HttpBulkPublisher {
                 match answer {
                     Ok(value) => {
                         let value = value.unwrap_or(Value::Null).to_string();
-                        responses.push(CanonicalMessage::new(value.into_bytes(), None));
+                        // Failed lookups are left out, so the id is what matches an answer.
+                        let id = Some(message.message_id);
+                        responses.push(CanonicalMessage::new(value.into_bytes(), id));
                     }
                     Err(reason) => {
                         failed.push((message, PublisherError::NonRetryable(anyhow!(reason))));
@@ -1381,6 +1383,13 @@ mod tests {
             let error = refused(json!({"url": "http://h", "tls": tls, "upsert": {"path": "/d"}}));
             assert!(error.contains(expected), "{error}");
         }
+        let issuer = json!({"oauth2": {"token_url": "http://issuer/token",
+            "client_id": "a", "client_secret": "b"}});
+        assert!(
+            refused(json!({"url": "https://h", "tls": {"required": true},
+            "auth": issuer, "upsert": {"path": "/d"}}))
+            .contains("token_url")
+        );
         assert!(refused(json!({"url": "http://h", "upsert": {"path": "/d",
             "result": {"job": job.clone()}}}))
         .contains("{id}"));

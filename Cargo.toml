@@ -225,7 +225,8 @@ aws-config = { version = "1.10", optional = true, default-features = false, feat
 aws-sdk-sqs = { version = "1.105", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-sns = { version = "1.107", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 # Signs `http_bulk` requests (managed OpenSearch). Already in the tree through aws-config.
-aws-sigv4 = { version = "1.6", optional = true }
+# A low floor: 1.6 needs aws-smithy-types 1.8, which a dependent may pin below.
+aws-sigv4 = { version = "1.4", optional = true }
 
 # SQLx
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "any", "sqlite-bundled"], optional = true }

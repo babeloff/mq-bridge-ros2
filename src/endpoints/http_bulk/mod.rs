@@ -108,7 +108,7 @@ impl Connection {
                 .context("Failed to build http_bulk client")?,
             base: url.as_str().trim_end_matches('/').to_string(),
             headers,
-            auth: auth::Auth::new(config.auth.as_ref())?,
+            auth: auth::Auth::new(config.auth.as_ref(), config.tls.required)?,
         })
     }
 

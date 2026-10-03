@@ -173,14 +173,15 @@ impl Query {
             .as_ref()
             .and_then(|answer| answer.pointer(&self.responses))
             .and_then(Value::as_array);
-        let Some(entries) = entries else {
+        // Answers are matched by position, so a short array cannot be assigned.
+        let Some(entries) = entries.filter(|entries| entries.len() == indices.len()) else {
             return Err(Failure::permanent(format!(
-                "{label} answered no array at '{}': {}",
+                "{label} answered no array of {} entries at '{}': {}",
+                indices.len(),
                 self.responses,
                 quoted(&text)
             )));
         };
-        // An answer the target left out stays "not found".
         for (index, entry) in indices.iter().zip(entries) {
             answers[*index] = self.answer(entry);
         }
@@ -323,9 +324,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_batch_search_wraps_the_requests_and_a_missing_answer_is_null() {
+    async fn a_batch_search_wraps_the_requests_and_a_missing_answer_is_refused() {
         let answer = r#"{"result":[[{"id":7,"score":0.9}]],"status":"ok"}"#;
-        let server = server(move |_| (200, answer.to_string())).await;
+        let server = server(move |request| {
+            let full = r#"{"result":[[{"id":7,"score":0.9}],[]],"status":"ok"}"#;
+            let short = request.body.windows(3).any(|part| part == b"0.9");
+            (200, if short { answer } else { full }.to_string())
+        })
+        .await;
         let publisher = publisher(
             &server,
             json!({"query": {
@@ -339,7 +345,10 @@ mod tests {
         let lookups = requests(&[r#"{"vector":[0.1,0.2]}"#, r#"{"vector":[0.3,0.4]}"#]);
         let answers = publisher.lookup_batch(&lookups).await.unwrap().unwrap();
 
-        assert_eq!(answers, vec![Some(json!([{"id": 7, "score": 0.9}])), None]);
+        assert_eq!(
+            answers,
+            vec![Some(json!([{"id": 7, "score": 0.9}])), Some(json!([]))]
+        );
         assert_eq!(
             bodies(&server),
             vec![(
@@ -348,6 +357,15 @@ mod tests {
                     .to_string()
             )]
         );
+
+        // One answer for two lookups cannot be matched by position.
+        let lookups = requests(&[r#"{"vector":[0.9,0.2]}"#, r#"{"vector":[0.3,0.4]}"#]);
+        let error = publisher.lookup_batch(&lookups).await.unwrap().unwrap_err();
+        assert!(matches!(
+            error,
+            crate::errors::PublisherError::NonRetryable(_)
+        ));
+        assert!(error.to_string().contains("2 entries"), "{error}");
     }
 
     #[tokio::test]

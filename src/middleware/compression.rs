@@ -164,16 +164,17 @@ impl MessageConsumer for CompressionConsumer {
         if self.algo != Compression::None {
             let (algo, max_bytes) = (self.algo, self.max_bytes);
             let messages = std::mem::take(&mut batch.messages);
-            batch.messages = crate::support::parallel::map_messages(messages, move |mut message| {
-                decompress_all(algo, &message.payload, max_bytes).map(|out| {
-                    message.payload = out.into();
-                    message
+            batch.messages =
+                crate::support::parallel::map_messages(messages, move |mut message| {
+                    decompress_all(algo, &message.payload, max_bytes).map(|out| {
+                        message.payload = out.into();
+                        message
+                    })
                 })
-            })
-            .await
-            .into_iter()
-            .collect::<Result<_, _>>()
-            .map_err(|e| ConsumerError::Permanent(e.into()))?;
+                .await
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .map_err(|e| ConsumerError::Permanent(e.into()))?;
         }
         Ok(batch)
     }

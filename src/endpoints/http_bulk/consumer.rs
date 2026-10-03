@@ -64,6 +64,8 @@ pub struct HttpBulkConsumer {
 struct Progress {
     position: Position,
     rollbacks: u64,
+    /// Pages handed out and not yet committed.
+    outstanding: usize,
 }
 
 /// Names the listing in a checkpoint store: host and path, without the query.
@@ -175,6 +177,7 @@ impl HttpBulkConsumer {
             progress: Arc::new(Mutex::new(Progress {
                 position: saved.unwrap_or(Position::At(start)),
                 rollbacks: 0,
+                outstanding: 0,
             })),
             exit_on_empty: false,
         })
@@ -323,10 +326,17 @@ impl MessageConsumer for HttpBulkConsumer {
             let mut positions = self.positions(&response, items, cursor)?;
             if items.is_empty() {
                 if let Some(next) = positions.pop().flatten().filter(|next| *next != before) {
-                    save(&self.checkpoint, &next).await;
-                    let mut progress = self.progress.lock().unwrap();
-                    if progress.rollbacks == rollbacks {
-                        progress.position = next;
+                    let settled = {
+                        let mut progress = self.progress.lock().unwrap();
+                        let current = progress.rollbacks == rollbacks;
+                        if current {
+                            progress.position = next.clone();
+                        }
+                        current && progress.outstanding == 0
+                    };
+                    // Saved past a page that is still out, a restart would skip it.
+                    if settled {
+                        save(&self.checkpoint, &next).await;
                     }
                 }
                 return Ok(self.idle().await);
@@ -341,6 +351,7 @@ impl MessageConsumer for HttpBulkConsumer {
                 if let Some(Some(last)) = positions.last() {
                     progress.position = last.clone();
                 }
+                progress.outstanding += 1;
             }
             self.backoff.reset();
 
@@ -366,6 +377,7 @@ impl MessageConsumer for HttpBulkConsumer {
                     let boundary = positions[..acked].last().cloned().flatten();
                     {
                         let mut progress = progress.lock().unwrap();
+                        progress.outstanding = progress.outstanding.saturating_sub(1);
                         // An earlier nack rewound past this page: it is read again.
                         if progress.rollbacks != rollbacks {
                             return Ok(());
@@ -597,6 +609,45 @@ mod tests {
             targets(&server),
             ["/changes?since=0", "/changes?since=7%2Dx"]
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_page_does_not_save_past_a_page_that_is_still_out() {
+        let server = server(|request| {
+            let page = match request.target.as_str() {
+                "/changes?since=0" => r#"{"results":[{"id":1}],"last_seq":5}"#,
+                _ => r#"{"results":[],"last_seq":9}"#,
+            };
+            (200, page.to_string())
+        })
+        .await;
+        let (path, url) = store();
+        let config = json!({"read": {
+            "path": "/changes?since={cursor}", "items": "/results",
+            "cursor": {"response": "/last_seq", "start": 0},
+            "cursor_id": "feed", "checkpoint_store": url,
+        }});
+        let mut first = consumer(&server, config.clone()).await;
+        let out = first.receive_batch(2).await.expect("page");
+        assert!(read(&mut first, 0).await.is_empty());
+
+        let mut second = consumer(&server, config.clone()).await;
+        assert_eq!(
+            second.receive_batch(2).await.expect("page").messages.len(),
+            1
+        );
+        assert_eq!(targets(&server).last().unwrap(), "/changes?since=0");
+
+        // Once the page is acked, an empty page moves the checkpoint again.
+        (out.commit)(vec![MessageDisposition::Ack])
+            .await
+            .expect("commit");
+        for since in ["/changes?since=5", "/changes?since=9"] {
+            let mut next = consumer(&server, config.clone()).await;
+            assert!(read(&mut next, 0).await.is_empty());
+            assert_eq!(targets(&server).last().unwrap(), since);
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]
