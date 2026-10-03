@@ -245,17 +245,13 @@ class GrpcConfig(TypedDict, total=False):
 
 class HttpBulkConfig(TypedDict, total=False):
     """HTTP APIs that take or return many JSON documents in one request, such as search engines."""
-    checkpoint_store: Optional[str]
     compression: Compression
     connect_timeout_ms: Optional[int]
-    cursor_id: Optional[str]
     delete: Optional[HttpBulkDelete]
     delete_values: List[str]
     headers: Dict[str, str]
-    max_polling_interval_ms: Optional[int]
     max_request_bytes: int
     operation: Optional[str]
-    polling_interval_ms: Optional[int]
     read: Optional[HttpBulkRead]
     request_timeout_ms: Optional[int]
     tls: TlsConfig
@@ -306,10 +302,14 @@ class HttpBulkLines(TypedDict, total=False):
 class HttpBulkRead(TypedDict, total=False):
     """The `http_bulk` request that reads one page of documents."""
     body: Optional[str]
+    checkpoint_store: Optional[str]
     cursor: HttpBulkCursor
+    cursor_id: Optional[str]
     items: str
+    max_polling_interval_ms: Optional[int]
     method: Optional[str]
     path: Required[str]
+    polling_interval_ms: Optional[int]
 
 
 class HttpBulkResult(TypedDict, total=False):
