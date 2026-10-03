@@ -31,7 +31,7 @@ members = [
     "tests/fixtures/grpc-config-compat",
 ]
 # apps/mq-bridge-app is its own workspace with its own Cargo.lock; see its manifest.
-exclude = ["apps"]
+exclude = ["apps", "examples/plugin-template"]
 resolver = "2"
 
 # Lints that are off by default in rustc/clippy and mark code that was never meant to
@@ -289,7 +289,7 @@ middleware = ["metrics", "otel", "dedup", "compression", "encryption", "filter",
 # on ~19% of 17-significant-digit doubles (e.g. a Postgres `double precision` value
 # moved through a JSON payload). Enable if bit-exact float round-tripping matters.
 float-roundtrip = ["serde_json/float_roundtrip"]
-full-common = ["middleware", "yaml", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
+full-common = ["middleware", "yaml", "plugin", "mongodb", "kafka", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "zeromq-omq", "redis-streams", "sled", "grpc", "sqlx", "clickhouse", "http-bulk", "websocket", "postgres-cdc", "object-store", "parquet", "avro", "rustls-aws-lc"]
 
 # ibm-mq (dlopen) is safe to include: it needs no IBM SDK at build, and at
 # runtime the client is loaded lazily only when an ibm-mq endpoint is opened
@@ -325,7 +325,7 @@ vendored-protoc = ["dep:protoc-bin-vendored"]
 # kafka (librdkafka), sqlx (libsqlite3-sys), grpc (protoc), ibm-mq/ibm-mq-static
 # (IBM C client). postgres-cdc is excluded too: its wire protocol is pure Rust
 # but it pulls in sqlx (C).
-portable = ["metrics", "otel", "dedup", "yaml", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "websocket", "object-store", "rustls-aws-lc"]
+portable = ["metrics", "otel", "dedup", "yaml", "plugin", "mongodb", "amqp", "nats", "mqtt", "http", "aws", "zeromq", "redis-streams", "clickhouse", "http-bulk", "websocket", "object-store", "rustls-aws-lc"]
 
 # Functionality features
 # YAML config files for Route/Publisher::from_file and deploy_file; JSON works without it.
@@ -408,6 +408,8 @@ redis-streams = ["dep:redis"]
 grpc = ["tonic", "tonic-reflection", "prost", "prost-types", "prost-reflect", "tokio-stream", "tonic-prost", "tonic-prost-build", "rustls", "vendored-protoc"]
 sqlx = ["dep:sqlx"]
 clickhouse = ["dep:reqwest", "dep:flate2", "dep:lz4_flex", "dep:zstd", "dep:percent-encoding"]
+# Generic bulk document sink over HTTP (search engines and similar APIs).
+http-bulk = ["dep:reqwest", "dep:percent-encoding", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
 # Cloud object-store checkpoint backend (S3/GCS/Azure/R2). Talks cloud REST via reqwest.
 object-store = ["dep:object_store"]
 # `format: parquet` on object_store. Column codecs reuse the `compression` crates.

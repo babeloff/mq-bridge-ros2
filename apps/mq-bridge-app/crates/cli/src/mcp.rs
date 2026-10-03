@@ -755,7 +755,7 @@ impl BridgeMcp {
         route.options.batch_size = args
             .batch_size
             .or(in_route_batch_size)
-            .unwrap_or(crate::DEFAULT_BATCH_SIZE);
+            .unwrap_or_else(|| crate::default_batch_size(&route.output));
 
         let mut route = serde_json::to_value(route)
             .map_err(|error| internal(format!("failed to serialize route: {error}")))?;
@@ -817,7 +817,7 @@ impl BridgeMcp {
         let batch_size = args
             .batch_size
             .or(in_route_batch_size)
-            .unwrap_or(crate::DEFAULT_BATCH_SIZE);
+            .unwrap_or_else(|| crate::default_batch_size(&route.output));
         route.options.concurrency = concurrency;
         route.options.batch_size = batch_size;
         let exit_on_empty = route.options.exit_on_empty;

@@ -26,7 +26,8 @@ use std::sync::Arc;
 use crate::support::plugin_abi::{
     MqbAsyncHooks, MqbBatchHandle, MqbBuffer, MqbConsumerHandle, MqbMessage, MqbPublisherHandle,
     MqbResponsesHandle, MqbSlice, MqbStatus, MqbStatusHooks, MQB_DELIVERY_ACKNOWLEDGES,
-    MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DISPOSITION_ACK, MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY,
+    MQB_DELIVERY_IDEMPOTENT_SINK, MQB_DISCONNECT_COMPLETED, MQB_DISCONNECT_FAILED,
+    MQB_DISCONNECT_STOPPED, MQB_DISPOSITION_ACK, MQB_DISPOSITION_NACK, MQB_DISPOSITION_REPLY,
     MQB_END_OF_STREAM, MQB_ERR_CONNECTION, MQB_ERR_INVALID_CONFIG, MQB_ERR_PANIC,
     MQB_ERR_PERMANENT, MQB_ERR_RETRYABLE, MQB_ERR_UNSUPPORTED, MQB_OK, MQB_OUTCOME_OK,
     MQB_OUTCOME_PERMANENT,
@@ -37,8 +38,8 @@ use async_trait::async_trait;
 use super::{completion, LoadedPlugin};
 use crate::errors::{ConsumerError, PublisherError};
 use crate::traits::{
-    schema_flag, BatchCommitFunc, CustomEndpointFactory, EndpointStatus, MessageConsumer,
-    MessageDisposition, MessagePublisher,
+    schema_flag, BatchCommitFunc, CustomEndpointFactory, DisconnectOutcome, EndpointStatus,
+    MessageConsumer, MessageDisposition, MessagePublisher,
 };
 use crate::{CanonicalMessage, ReceivedBatch, SentBatch};
 
@@ -837,6 +838,27 @@ impl MessagePublisher for PluginPublisher {
         })
         .await
         .map_err(join_error)?
+    }
+
+    /// Hands a 1.3 plugin the route's outcome, which is a task-local and so
+    /// does not cross into the plugin's runtime by itself.
+    fn on_disconnect_hook(&self) -> Option<crate::traits::BoxFuture<'_, anyhow::Result<()>>> {
+        let hook = self.publisher.plugin.table().disconnect_hook()?;
+        let outcome = match crate::traits::disconnect_outcome() {
+            Some(DisconnectOutcome::Completed) => MQB_DISCONNECT_COMPLETED,
+            Some(DisconnectOutcome::Failed) => MQB_DISCONNECT_FAILED,
+            Some(DisconnectOutcome::Stopped) | None => MQB_DISCONNECT_STOPPED,
+        };
+        let publisher = Arc::clone(&self.publisher);
+        Some(Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut err = MqbBuffer::EMPTY;
+                let status = unsafe { hook(publisher.handle, outcome, &mut err) };
+                plugin_result(&publisher.plugin, status, err, "disconnect an output")
+            })
+            .await
+            .map_err(join_error)?
+        }))
     }
 
     async fn status(&self) -> EndpointStatus {

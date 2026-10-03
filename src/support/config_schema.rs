@@ -407,7 +407,7 @@ pub fn check_endpoint_config(name: &str, config: &Value) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
-    match validate_config(&schema, config) {
+    match validate_config(&flatten(&schema), config) {
         Ok(()) => Ok(()),
         Err(Unenforceable(why)) => {
             tracing::warn!(
@@ -536,6 +536,74 @@ pub fn validate(schema: &Value) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// How deep [`flatten`] follows references before giving up on a cyclic schema.
+const MAX_REF_DEPTH: usize = 16;
+
+/// Rewrites a schema into the flat form a host reads: local `$ref`s are replaced
+/// by what they point to, and a `oneOf`/`anyOf` of `const`s becomes an `enum`.
+///
+/// That is the shape `#[derive(JsonSchema)]` gives an enum field, so a plugin can
+/// derive its schema without hand-writing one per enum. A schema that is already
+/// flat comes back unchanged.
+pub fn flatten(schema: &Value) -> Value {
+    let mut flat = flatten_node(schema, schema, 0);
+    if let Some(object) = flat.as_object_mut() {
+        object.remove("$defs");
+        object.remove("definitions");
+    }
+    flat
+}
+
+fn flatten_node(node: &Value, root: &Value, depth: usize) -> Value {
+    let object = match node {
+        Value::Object(object) => object,
+        Value::Array(items) => {
+            return Value::Array(items.iter().map(|i| flatten_node(i, root, depth)).collect())
+        }
+        other => return other.clone(),
+    };
+    let mut out = Map::new();
+    let target = object
+        .get("$ref")
+        .and_then(Value::as_str)
+        .filter(|_| depth < MAX_REF_DEPTH)
+        .and_then(|reference| local_definition(root, reference));
+    if let Some(Value::Object(resolved)) = target.map(|t| flatten_node(t, root, depth + 1)) {
+        out = resolved;
+    }
+    for (key, value) in object {
+        if key == "$ref" && target.is_some() {
+            continue;
+        }
+        // A sibling of `$ref`, such as the field's own description, wins.
+        out.insert(key.clone(), flatten_node(value, root, depth));
+    }
+    for key in ["oneOf", "anyOf"] {
+        let Some(constants) = out.get(key).and_then(constants_of) else {
+            continue;
+        };
+        if constants.iter().all(Value::is_string) {
+            out.entry("type").or_insert_with(|| Value::from("string"));
+        }
+        out.remove(key);
+        out.insert("enum".to_string(), Value::Array(constants));
+    }
+    Value::Object(out)
+}
+
+/// The values of a union whose every branch is a `const`, else `None`.
+fn constants_of(union: &Value) -> Option<Vec<Value>> {
+    let branches = union.as_array().filter(|branches| !branches.is_empty())?;
+    branches.iter().map(|b| b.get("const").cloned()).collect()
+}
+
+fn local_definition<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    ["#/$defs/", "#/definitions/"].iter().find_map(|prefix| {
+        let name = reference.strip_prefix(prefix)?;
+        root.get(&prefix[2..prefix.len() - 1])?.get(name)
+    })
 }
 
 #[cfg(test)]
@@ -893,5 +961,74 @@ mod tests {
         assert!(validate(&json!([1, 2])).is_err());
         assert!(validate(&json!({ "type": "string" })).is_err());
         assert!(validate(&json!({ "type": "object", "properties": 7 })).is_err());
+    }
+
+    /// The schema `#[derive(JsonSchema)]` gives a struct with a documented enum field.
+    fn derived_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "method": {
+                    "description": "How an upsert is written.",
+                    "$ref": "#/$defs/WriteMethod",
+                    "default": "replace",
+                },
+                "compression": { "$ref": "#/$defs/Compression" },
+            },
+            "$defs": {
+                "WriteMethod": {
+                    "description": "The enum's own text.",
+                    "oneOf": [
+                        { "type": "string", "const": "replace", "description": "Replace." },
+                        { "type": "string", "const": "update", "description": "Merge." },
+                    ],
+                },
+                "Compression": { "type": "string", "enum": ["none", "gzip"] },
+            },
+        })
+    }
+
+    #[test]
+    fn a_derived_enum_is_flattened_to_the_form_a_host_reads() {
+        let flat = flatten(&derived_schema());
+
+        assert_eq!(
+            flat,
+            json!({
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "description": "How an upsert is written.",
+                        "type": "string",
+                        "enum": ["replace", "update"],
+                        "default": "replace",
+                    },
+                    "compression": { "type": "string", "enum": ["none", "gzip"] },
+                },
+            })
+        );
+        validate_config(&flat, &json!({ "method": "update" })).expect("a listed value");
+        assert!(validate_config(&flat, &json!({ "method": "merge" })).is_err());
+    }
+
+    #[test]
+    fn a_flat_schema_is_left_as_it_is() {
+        let schema = strict_schema();
+        assert_eq!(flatten(&schema), schema);
+    }
+
+    #[test]
+    fn a_cyclic_or_unknown_reference_is_kept_rather_than_followed_forever() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "node": { "$ref": "#/$defs/Node" },
+                "other": { "$ref": "#/$defs/Missing" },
+            },
+            "$defs": { "Node": { "properties": { "next": { "$ref": "#/$defs/Node" } } } },
+        });
+        let flat = flatten(&schema);
+        assert_eq!(flat["properties"]["other"]["$ref"], "#/$defs/Missing");
+        assert!(flat.to_string().contains("#/$defs/Node"));
     }
 }

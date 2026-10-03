@@ -1156,6 +1156,17 @@
         {
           "type": "object",
           "properties": {
+            "http_bulk": {
+              "$ref": "#/$defs/HttpBulkConfig"
+            }
+          },
+          "required": [
+            "http_bulk"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
             "postgres_cdc": {
               "$ref": "#/$defs/PostgresCdcConfig"
             }
@@ -1742,6 +1753,462 @@
       "additionalProperties": false,
       "required": [
         "url"
+      ]
+    },
+    "HttpBulkConfig": {
+      "description": "HTTP APIs that take or return many JSON documents in one request, such as search engines.\n\nAs an output, a batch of upserts is sent as one NDJSON or JSON-array body and deletes as a\nlist of ids; `result` describes how the target reports success. As an input, `read` pages\nthrough a JSON listing by a cursor. The endpoint knows no product by name.",
+      "type": "object",
+      "properties": {
+        "compression": {
+          "description": "(Publisher only) Compression of request bodies (`none`, `gzip`, `zstd`, `lz4`).",
+          "$ref": "#/$defs/Compression",
+          "default": "none"
+        },
+        "connect_timeout_ms": {
+          "description": "Connection timeout in milliseconds. Defaults to 10000ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "delete": {
+          "description": "(Publisher only) The request that removes documents. Without it a delete message fails.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkDelete"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delete_values": {
+          "description": "(Publisher only) Operation values that mean delete. Defaults to `delete` and `d`.",
+          "type": "array",
+          "default": [
+            "delete",
+            "d"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "headers": {
+          "description": "Headers sent with every request, e.g. `Authorization`. Treated as secrets.",
+          "type": "object",
+          "format": "password",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "max_request_bytes": {
+          "description": "(Publisher only) Largest request body in bytes; a bigger batch is split. Defaults to 10 MiB.",
+          "type": "integer",
+          "format": "uint",
+          "default": 10485760,
+          "minimum": 0
+        },
+        "operation": {
+          "description": "(Publisher only) Template for a message's operation, e.g. `${metadata:postgres.operation}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "read": {
+          "description": "(Consumer only) The request that reads a page of documents. Required for an input.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkRead"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_timeout_ms": {
+          "description": "Request timeout in milliseconds. Unset = no timeout.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "tls": {
+          "description": "TLS configuration for `https://` connections.",
+          "$ref": "#/$defs/TlsConfig",
+          "default": {
+            "accept_invalid_certs": false,
+            "ca_file": null,
+            "cert_file": null,
+            "cert_password": null,
+            "key_file": null,
+            "required": false
+          }
+        },
+        "upsert": {
+          "description": "(Publisher only) The request that writes documents. Required for an output.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkUpsert"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "description": "Base URL of the target, e.g. `http://localhost:7700`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "HttpBulkCursor": {
+      "description": "Where an `http_bulk` input takes its next read position from. Set at most one of\n`response` and `item`; with neither the position is the number of documents read.",
+      "type": "object",
+      "properties": {
+        "item": {
+          "description": "JSON pointer to the position in the last document of a page, e.g. `/id`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "response": {
+          "description": "JSON pointer to the next position in the response, e.g. `/last_seq`. `null` ends the read.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start": {
+          "description": "Position before the first read. Defaults to `0` for a count, otherwise to `null`."
+        }
+      },
+      "additionalProperties": false
+    },
+    "HttpBulkDelete": {
+      "description": "The `http_bulk` request that removes documents by id.",
+      "type": "object",
+      "properties": {
+        "envelope": {
+          "description": "The body around the id array, e.g. `{\"points\": {ids}}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id_field": {
+          "description": "Top-level payload field holding the document id. Defaults to `id`.",
+          "type": "string",
+          "default": "id"
+        },
+        "line": {
+          "description": "One body line per id instead of an array, e.g. `{\"delete\":{\"_id\":{id}}}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_ids": {
+          "description": "Most ids in one request. Defaults to 1000.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1000,
+          "minimum": 0
+        },
+        "method": {
+          "description": "HTTP method. Defaults to `POST`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path and query. With `{ids}` the ids go there, comma-separated; otherwise as a JSON array body.",
+          "type": "string"
+        },
+        "result": {
+          "description": "How the target reports the outcome. Unset = the HTTP status alone decides.",
+          "$ref": "#/$defs/HttpBulkResult",
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "HttpBulkFormat": {
+      "description": "Body shape of an `http_bulk` upsert request.",
+      "oneOf": [
+        {
+          "description": "One JSON document per line.",
+          "type": "string",
+          "const": "ndjson"
+        },
+        {
+          "description": "One JSON array holding every document.",
+          "type": "string",
+          "const": "json_array"
+        }
+      ]
+    },
+    "HttpBulkItems": {
+      "description": "A JSON response holding an array with one entry per document, in request order.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "JSON pointer to an entry's error text, e.g. `/index/error/reason`. An entry that has it failed.",
+          "type": "string"
+        },
+        "path": {
+          "description": "JSON pointer to the array, e.g. `/items`. Empty = the response itself is the array.",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "error"
+      ]
+    },
+    "HttpBulkJob": {
+      "description": "A job the target runs after answering, polled until it ends.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "JSON pointer to the error text of a failed job, e.g. `/error/message`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failed": {
+          "description": "States that mean the job failed. Any other state is polled again.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "id": {
+          "description": "JSON pointer to the job id in the response, e.g. `/taskUid`.",
+          "type": "string"
+        },
+        "poll": {
+          "description": "Path polled with GET; `{id}` is replaced by the job id, e.g. `/tasks/{id}`.",
+          "type": "string"
+        },
+        "status": {
+          "description": "JSON pointer to the job state in the poll response, e.g. `/status`.",
+          "type": "string"
+        },
+        "succeeded": {
+          "description": "States that mean the job succeeded.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "poll",
+        "status",
+        "succeeded",
+        "failed"
+      ]
+    },
+    "HttpBulkLines": {
+      "description": "A response with one JSON line per document, in request order.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "description": "JSON pointer to the error text of a rejected document, e.g. `/error`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "success": {
+          "description": "JSON pointer to the boolean that is true for a written document, e.g. `/success`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "success"
+      ]
+    },
+    "HttpBulkRead": {
+      "description": "The `http_bulk` request that reads one page of documents.",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "JSON request body; `{cursor}` and `{limit}` are replaced by JSON values.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checkpoint_store": {
+          "description": "Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "cursor": {
+          "description": "Where the next read position comes from. Unset = the number of documents read so far.",
+          "$ref": "#/$defs/HttpBulkCursor",
+          "default": {}
+        },
+        "cursor_id": {
+          "description": "Cursor id that keys the saved read position. Unset: every start reads all.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "items": {
+          "description": "JSON pointer to the array of documents, e.g. `/results`. Empty = the response is the array.",
+          "type": "string",
+          "default": ""
+        },
+        "max_polling_interval_ms": {
+          "description": "If set, the wait doubles after each empty page up to this value.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "method": {
+          "description": "HTTP method. Defaults to `GET`, or `POST` with a `body`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path and query. `{cursor}` is the read position and `{limit}` the batch size.",
+          "type": "string"
+        },
+        "polling_interval_ms": {
+          "description": "Wait in milliseconds after an empty page. Defaults to 1000ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "HttpBulkResult": {
+      "description": "How an `http_bulk` target reports what happened to a request. Set at most one field.",
+      "type": "object",
+      "properties": {
+        "items": {
+          "description": "The response is one JSON document holding an array with an entry per document.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkItems"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "job": {
+          "description": "The response names a job that finishes later and is polled.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkJob"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lines": {
+          "description": "The response has one JSON line per document.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkLines"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "HttpBulkUpsert": {
+      "description": "The `http_bulk` request that writes documents.",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "`ndjson` only: a line sent before each document, e.g. `{\"index\":{\"_id\":\"${payload:id}\"}}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content_type": {
+          "description": "`Content-Type` header. Defaults to `application/x-ndjson` or `application/json`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "envelope": {
+          "description": "`json_array` only: the body around the array, e.g. `{\"docs\": {documents}}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "description": "Body shape: `ndjson` (default) or `json_array`.",
+          "$ref": "#/$defs/HttpBulkFormat",
+          "default": "ndjson"
+        },
+        "method": {
+          "description": "HTTP method. Defaults to `POST`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path and query appended to `url`, e.g. `/indexes/books/documents`.",
+          "type": "string"
+        },
+        "result": {
+          "description": "How the target reports the outcome. Unset = the HTTP status alone decides.",
+          "$ref": "#/$defs/HttpBulkResult",
+          "default": {}
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
       ]
     },
     "HttpConfig": {

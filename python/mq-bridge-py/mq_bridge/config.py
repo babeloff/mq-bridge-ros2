@@ -20,6 +20,15 @@ EncryptionConfig = dict
 Endpoint = dict
 FileConfig = dict
 GrpcConfig = dict
+HttpBulkConfig = dict
+HttpBulkCursor = dict
+HttpBulkDelete = dict
+HttpBulkItems = dict
+HttpBulkJob = dict
+HttpBulkLines = dict
+HttpBulkRead = dict
+HttpBulkResult = dict
+HttpBulkUpsert = dict
 HttpConfig = dict
 IbmMqConfig = dict
 IbmTlsConfig = dict
@@ -64,6 +73,7 @@ DatePartitionStyle = str
 DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
+HttpBulkFormat = str
 HttpServerProtocol = str
 IdHash = str
 MappingRule = str
@@ -118,6 +128,16 @@ __all__ = [
     "FileConfig",
     "FileFormat",
     "GrpcConfig",
+    "HttpBulkConfig",
+    "HttpBulkCursor",
+    "HttpBulkDelete",
+    "HttpBulkFormat",
+    "HttpBulkItems",
+    "HttpBulkJob",
+    "HttpBulkLines",
+    "HttpBulkRead",
+    "HttpBulkResult",
+    "HttpBulkUpsert",
     "HttpConfig",
     "HttpServerProtocol",
     "IbmMqConfig",

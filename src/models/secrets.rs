@@ -300,6 +300,9 @@ impl SecretExtractor for EndpointType {
             EndpointType::ClickHouse(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "CLICKHOUSE"), secrets)
             }
+            EndpointType::HttpBulk(cfg) => {
+                cfg.extract_secrets(&format!("{}__{}", prefix, "HTTP_BULK"), secrets)
+            }
             EndpointType::PostgresCdc(cfg) => {
                 cfg.extract_secrets(&format!("{}__{}", prefix, "POSTGRES_CDC"), secrets)
             }
@@ -581,6 +584,18 @@ impl SecretExtractor for ClickHouseConfig {
         }
         if let Some(val) = self.checkpoint_store.take() {
             secrets.insert(format!("{}__{}", prefix, "CHECKPOINT_STORE"), val);
+        }
+        self.tls
+            .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);
+    }
+}
+
+impl SecretExtractor for HttpBulkConfig {
+    fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
+        extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
+        extract_sensitive_string_map_entries(&mut self.headers, prefix, "HEADERS", secrets);
+        if let Some(val) = self.read.as_mut().and_then(|r| r.checkpoint_store.take()) {
+            secrets.insert(format!("{}__{}", prefix, "READ__CHECKPOINT_STORE"), val);
         }
         self.tls
             .extract_secrets(&format!("{}__{}", prefix, "TLS"), secrets);

@@ -74,8 +74,8 @@ default = ["full", "zeromq-omq"]
 integration-test = []
 ibm-mq = ["mq-bridge/ibm-mq"]
 arm64-cross-compile = ["rdkafka", "rdkafka/cmake-build"]
-full = ["mq-bridge/full", "otel", "rustls-aws-lc", "pulsar", "meilisearch"]
-full-dynamic = ["mq-bridge/full-dynamic", "otel", "rustls-aws-lc", "pulsar", "meilisearch"]
+full = ["mq-bridge/full", "otel", "rustls-aws-lc", "pulsar", "http-bulk"]
+full-dynamic = ["mq-bridge/full-dynamic", "otel", "rustls-aws-lc", "pulsar", "http-bulk"]
 # Lean feature set for the ETL/CDC benchmarks (benches/etl): Postgres bulk-insert
 # (sqlx) + logical-replication CDC + per-route metrics. Avoids the heavy `full`
 # deps (rdkafka/librdkafka, grpc/protoc, ibm-mq) that aren't needed to move
@@ -124,9 +124,12 @@ grpc = ["mq-bridge/grpc"]
 amqp = ["mq-bridge/amqp"]
 redis-streams = ["mq-bridge/redis-streams"]
 object-store = ["mq-bridge/object-store"]
-# Extension endpoints maintained as separate crates. In `full`, so a default
-# build addresses `pulsar://` and `meilisearch://` with no install step, and out
-# of a lean one, where meilisearch is the only reason to compile reqwest at all.
+# Also registers the named endpoints built on it (`meilisearch`, `typesense`, `elasticsearch`).
+http-bulk = ["mq-bridge/http-bulk"]
+# Extension endpoints maintained as separate crates. `pulsar` is in `full`, so a
+# default build addresses `pulsar://` with no install step. `meilisearch` is not:
+# the default build answers `meilisearch://` with the `http_bulk` preset, and this
+# feature compiles the plugin crate in instead, for the options only it has.
 # Either is also loadable as a plugin, so leaving it out costs no reach.
 pulsar = ["dep:mq-bridge-pulsar"]
 meilisearch = ["dep:mq-bridge-meilisearch"]

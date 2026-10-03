@@ -336,6 +336,8 @@ pub enum EndpointType {
     Sqlx(SqlxConfig),
     #[serde(rename = "clickhouse", alias = "click_house")]
     ClickHouse(ClickHouseConfig),
+    #[serde(rename = "http_bulk", alias = "http-bulk")]
+    HttpBulk(HttpBulkConfig),
     #[serde(rename = "postgres_cdc", alias = "postgres-cdc")]
     PostgresCdc(PostgresCdcConfig),
     #[cfg_attr(feature = "schema", schemars(extend("format" = "structural_endpoint")))]
@@ -2834,6 +2836,230 @@ pub struct ClickHouseConfig {
     /// `lz4`/`zstd` are faster than `gzip`; all are understood natively by ClickHouse. Defaults to `gzip`.
     #[serde(default = "default_gzip_compression")]
     pub compression: Compression,
+}
+
+// --- HTTP Bulk Specific Configuration ---
+
+/// HTTP APIs that take or return many JSON documents in one request, such as search engines.
+///
+/// As an output, a batch of upserts is sent as one NDJSON or JSON-array body and deletes as a
+/// list of ids; `result` describes how the target reports success. As an input, `read` pages
+/// through a JSON listing by a cursor. The endpoint knows no product by name.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkConfig {
+    /// Base URL of the target, e.g. `http://localhost:7700`.
+    pub url: String,
+    /// Headers sent with every request, e.g. `Authorization`. Treated as secrets.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    /// (Publisher only) The request that writes documents. Required for an output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upsert: Option<HttpBulkUpsert>,
+    /// (Consumer only) The request that reads a page of documents. Required for an input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<HttpBulkRead>,
+    /// (Publisher only) The request that removes documents. Without it a delete message fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete: Option<HttpBulkDelete>,
+    /// (Publisher only) Template for a message's operation, e.g. `${metadata:postgres.operation}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// (Publisher only) Operation values that mean delete. Defaults to `delete` and `d`.
+    #[serde(default = "default_http_bulk_delete_values")]
+    pub delete_values: Vec<String>,
+    /// (Publisher only) Largest request body in bytes; a bigger batch is split. Defaults to 10 MiB.
+    #[serde(default = "default_http_bulk_max_request_bytes")]
+    pub max_request_bytes: usize,
+    /// (Publisher only) Compression of request bodies (`none`, `gzip`, `zstd`, `lz4`).
+    #[serde(default)]
+    pub compression: Compression,
+    /// Request timeout in milliseconds. Unset = no timeout.
+    pub request_timeout_ms: Option<u64>,
+    /// Connection timeout in milliseconds. Defaults to 10000ms.
+    pub connect_timeout_ms: Option<u64>,
+    /// TLS configuration for `https://` connections.
+    #[serde(default)]
+    pub tls: TlsConfig,
+}
+
+/// Body shape of an `http_bulk` upsert request.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum HttpBulkFormat {
+    /// One JSON document per line.
+    #[default]
+    Ndjson,
+    /// One JSON array holding every document.
+    JsonArray,
+}
+
+/// The `http_bulk` request that writes documents.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkUpsert {
+    /// Path and query appended to `url`, e.g. `/indexes/books/documents`.
+    pub path: String,
+    /// HTTP method. Defaults to `POST`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Body shape: `ndjson` (default) or `json_array`.
+    #[serde(default)]
+    pub format: HttpBulkFormat,
+    /// `Content-Type` header. Defaults to `application/x-ndjson` or `application/json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// `ndjson` only: a line sent before each document, e.g. `{"index":{"_id":"${payload:id}"}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// `json_array` only: the body around the array, e.g. `{"docs": {documents}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<String>,
+    /// How the target reports the outcome. Unset = the HTTP status alone decides.
+    #[serde(default)]
+    pub result: HttpBulkResult,
+}
+
+/// The `http_bulk` request that reads one page of documents.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkRead {
+    /// Path and query. `{cursor}` is the read position and `{limit}` the batch size.
+    pub path: String,
+    /// HTTP method. Defaults to `GET`, or `POST` with a `body`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// JSON request body; `{cursor}` and `{limit}` are replaced by JSON values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// JSON pointer to the array of documents, e.g. `/results`. Empty = the response is the array.
+    #[serde(default)]
+    pub items: String,
+    /// Where the next read position comes from. Unset = the number of documents read so far.
+    #[serde(default)]
+    pub cursor: HttpBulkCursor,
+    /// Cursor id that keys the saved read position. Unset: every start reads all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_id: Option<String>,
+    /// Where the read position is saved, e.g. `file:///var/lib/mqb/cursors.json`.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_store: Option<String>,
+    /// Wait in milliseconds after an empty page. Defaults to 1000ms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polling_interval_ms: Option<u64>,
+    /// If set, the wait doubles after each empty page up to this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_polling_interval_ms: Option<u64>,
+}
+
+/// Where an `http_bulk` input takes its next read position from. Set at most one of
+/// `response` and `item`; with neither the position is the number of documents read.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkCursor {
+    /// JSON pointer to the next position in the response, e.g. `/last_seq`. `null` ends the read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
+    /// JSON pointer to the position in the last document of a page, e.g. `/id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    /// Position before the first read. Defaults to `0` for a count, otherwise to `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<serde_json::Value>,
+}
+
+/// The `http_bulk` request that removes documents by id.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkDelete {
+    /// Path and query. With `{ids}` the ids go there, comma-separated; otherwise as a JSON array body.
+    pub path: String,
+    /// HTTP method. Defaults to `POST`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Top-level payload field holding the document id. Defaults to `id`.
+    #[serde(default = "default_http_bulk_id_field")]
+    pub id_field: String,
+    /// Most ids in one request. Defaults to 1000.
+    #[serde(default = "default_http_bulk_max_ids")]
+    pub max_ids: usize,
+    /// The body around the id array, e.g. `{"points": {ids}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<String>,
+    /// One body line per id instead of an array, e.g. `{"delete":{"_id":{id}}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    /// How the target reports the outcome. Unset = the HTTP status alone decides.
+    #[serde(default)]
+    pub result: HttpBulkResult,
+}
+
+/// How an `http_bulk` target reports what happened to a request. Set at most one field.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkResult {
+    /// The response has one JSON line per document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<HttpBulkLines>,
+    /// The response is one JSON document holding an array with an entry per document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<HttpBulkItems>,
+    /// The response names a job that finishes later and is polled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job: Option<HttpBulkJob>,
+}
+
+/// A JSON response holding an array with one entry per document, in request order.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkItems {
+    /// JSON pointer to the array, e.g. `/items`. Empty = the response itself is the array.
+    #[serde(default)]
+    pub path: String,
+    /// JSON pointer to an entry's error text, e.g. `/index/error/reason`. An entry that has it failed.
+    pub error: String,
+}
+
+/// A response with one JSON line per document, in request order.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkLines {
+    /// JSON pointer to the boolean that is true for a written document, e.g. `/success`.
+    pub success: String,
+    /// JSON pointer to the error text of a rejected document, e.g. `/error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A job the target runs after answering, polled until it ends.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkJob {
+    /// JSON pointer to the job id in the response, e.g. `/taskUid`.
+    pub id: String,
+    /// Path polled with GET; `{id}` is replaced by the job id, e.g. `/tasks/{id}`.
+    pub poll: String,
+    /// JSON pointer to the job state in the poll response, e.g. `/status`.
+    pub status: String,
+    /// States that mean the job succeeded.
+    pub succeeded: Vec<String>,
+    /// States that mean the job failed. Any other state is polled again.
+    pub failed: Vec<String>,
+    /// JSON pointer to the error text of a failed job, e.g. `/error/message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // --- Common Configuration ---

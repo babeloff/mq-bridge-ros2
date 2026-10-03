@@ -240,6 +240,13 @@ const ENDPOINT_KIND_OVERRIDES = {
       ],
     },
   },
+  http_bulk: {
+    order: 28,
+    basicFields: ["url", "headers", "operation", "upsert", "delete", "read"],
+    requestBar: {
+      fields: [{ inputId: "pub-url", field: "url", label: "URL", placeholder: "http://localhost:7700" }],
+    },
+  },
 
   // Structural kinds. `structural` here is only the offline fallback for the
   // schema's `format: "structural_endpoint"` marker.

@@ -114,6 +114,7 @@
 //! | `postgres-cdc` | Postgres change data capture (logical replication, `pgoutput`) |
 //! | `mongodb` | MongoDB source and sink, including change streams (CDC) |
 //! | `clickhouse` | ClickHouse bulk insert and cursor reads |
+//! | `http-bulk` | `http_bulk` endpoint: JSON documents in bulk to and from search engines and similar HTTP APIs |
 //! | `object-store` | S3, GCS, Azure Blob and local-directory object storage |
 //! | `parquet` | `format: parquet` on the object-store endpoint |
 //! | `compression`, `encryption` | gzip / lz4 / zstd and AEAD encryption for files, objects and payloads |

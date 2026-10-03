@@ -21,6 +21,8 @@ key, and the part before the query string becomes `url` (or `path`):
 | `postgres-cdc://`, `pgcdc://` | `postgres_cdc` | `url: "postgres://…"` |
 | `mongodb://` | `mongodb` | `url: "mongodb://host:27017"` |
 | `clickhouse://`, `clickhouses://` | `clickhouse` | `url: "http://host:8123"` / `https://` |
+| `http-bulk:?config_file=<path>` | `http_bulk` | nested config from a file, or inline with `config=<YAML or JSON>` |
+| `typesense://host:8108/<collection>`, `elasticsearch://host:9200/<index>` | `custom` with that name | `+https` in the scheme for HTTPS; see [Typesense](./typesense.md), [Elasticsearch](./elasticsearch.md) |
 | `http://`, `https://` | `http` | unchanged |
 | `ws://`, `wss://` | `websocket` | unchanged |
 | `grpc://`, `grpcs://` | `grpc` | `url: "http://host:50051"` / `https://` |
@@ -61,4 +63,8 @@ polling, file formats, plugins — is on [Overview & capabilities](../reference/
 - [Object storage (local / cloud)](./object-store.md)
 - [Apache Pulsar](./pulsar.md)
 - [Meilisearch](./meilisearch.md)
+- [HTTP bulk (search engines)](./http-bulk.md)
+- [Typesense](./typesense.md)
+- [Elasticsearch](./elasticsearch.md)
+- [PostgREST and Supabase](./postgrest.md)
 - [Connect plugin (Redpanda Connect components)](./connect.md)

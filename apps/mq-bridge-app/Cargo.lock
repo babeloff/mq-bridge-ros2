@@ -4744,6 +4744,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "sqlx",
  "tokio",
  "tracing",

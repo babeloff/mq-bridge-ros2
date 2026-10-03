@@ -15,6 +15,8 @@ pub mod file;
 pub mod grpc;
 #[cfg(feature = "http")]
 pub mod http;
+#[cfg(feature = "http-bulk")]
+pub mod http_bulk;
 #[cfg(any(feature = "ibm-mq-static", feature = "ibm-mq"))]
 pub mod ibm_mq;
 #[cfg(feature = "kafka")]
@@ -28,7 +30,7 @@ pub mod mqtt;
 pub mod nats;
 #[cfg(feature = "object-store")]
 pub mod object_store;
-#[cfg(any(feature = "sqlx", feature = "clickhouse"))]
+#[cfg(any(feature = "sqlx", feature = "clickhouse", feature = "http-bulk"))]
 mod poll;
 #[cfg(feature = "postgres-cdc")]
 pub mod postgres;
@@ -466,6 +468,24 @@ fn check_consumer_recursive(
             }
             if cfg.stream_response_to.is_some() {
                 warnings.push("Endpoint 'http' is used as a consumer, but 'stream_response_to' is a publisher-only option and will be ignored.".to_string());
+            }
+            Ok(warnings)
+        }
+        #[cfg(feature = "http-bulk")]
+        EndpointType::HttpBulk(cfg) => {
+            if cfg.read.is_none() {
+                return Err(anyhow!(
+                    "http_bulk endpoint used as a consumer requires 'read' (the request that lists documents)."
+                ));
+            }
+            for (set, name) in [
+                (cfg.upsert.is_some(), "upsert"),
+                (cfg.delete.is_some(), "delete"),
+                (cfg.operation.is_some(), "operation"),
+            ] {
+                if set {
+                    warnings.push(format!("Endpoint 'http_bulk' is used as a consumer, but '{name}' is a publisher-only option and will be ignored."));
+                }
             }
             Ok(warnings)
         }
@@ -1708,6 +1728,10 @@ async fn create_base_consumer(
                 ))
             }
         }
+        #[cfg(feature = "http-bulk")]
+        EndpointType::HttpBulk(cfg) => Ok(boxed(
+            http_bulk::HttpBulkConsumer::new(cfg, _no_resume).await?,
+        )),
         #[cfg(feature = "postgres-cdc")]
         EndpointType::PostgresCdc(cfg) => {
             postgres_cdc_consumer(route_name, cfg, _source_metadata).await
@@ -2065,6 +2089,18 @@ fn check_publisher_recursive(
                     "Endpoint 'sqlx' is used as a publisher, but 'polling_interval_ms' is a consumer-only option and will be ignored."
                     .to_string()
                 );
+            }
+            Ok(warnings)
+        }
+        #[cfg(feature = "http-bulk")]
+        EndpointType::HttpBulk(cfg) => {
+            if cfg.upsert.is_none() {
+                return Err(anyhow!(
+                    "http_bulk endpoint used as a publisher requires 'upsert' (the request that writes documents)."
+                ));
+            }
+            if cfg.read.is_some() {
+                warnings.push("Endpoint 'http_bulk' is used as a publisher, but 'read' is a consumer-only option and will be ignored.".to_string());
             }
             Ok(warnings)
         }
@@ -2458,6 +2494,10 @@ async fn create_base_publisher(
         EndpointType::ClickHouse(cfg) => {
             Ok(Box::new(clickhouse::ClickHousePublisher::new(cfg).await?)
                 as Box<dyn MessagePublisher>)
+        }
+        #[cfg(feature = "http-bulk")]
+        EndpointType::HttpBulk(cfg) => {
+            Ok(Box::new(http_bulk::HttpBulkPublisher::new(cfg)?) as Box<dyn MessagePublisher>)
         }
         #[cfg(feature = "http")]
         EndpointType::Http(cfg) => {

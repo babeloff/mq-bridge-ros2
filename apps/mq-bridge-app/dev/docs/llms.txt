@@ -33,11 +33,15 @@ Key facts:
 - [RabbitMQ](https://marcomq.github.io/mq-bridge/connectors/rabbitmq.html)
 - [MQTT](https://marcomq.github.io/mq-bridge/connectors/mqtt.html)
 - [ClickHouse](https://marcomq.github.io/mq-bridge/connectors/clickhouse.html)
+- [HTTP bulk](https://marcomq.github.io/mq-bridge/connectors/http-bulk.html): JSON documents in bulk to and from search engines and similar HTTP APIs (Meilisearch, Typesense, Elasticsearch, Qdrant, PostgREST, CouchDB); reads page by page with a resumable cursor
+- [Typesense](https://marcomq.github.io/mq-bridge/connectors/typesense.html): `typesense://host/collection` output; Postgres CDC to Typesense with backfill and deletes
+- [Elasticsearch](https://marcomq.github.io/mq-bridge/connectors/elasticsearch.html): `elasticsearch://host/index` output over the `_bulk` API; Postgres CDC to Elasticsearch
+- [PostgREST and Supabase](https://marcomq.github.io/mq-bridge/connectors/postgrest.html): upserts and deletes through the REST data API
 - [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html): S3, GCS, Azure Blob, local directory; Parquet, JSONL, CSV
 - [File](https://marcomq.github.io/mq-bridge/connectors/file.html): CSV and JSONL
 - [HTTP](https://marcomq.github.io/mq-bridge/connectors/http.html) and [gRPC](https://marcomq.github.io/mq-bridge/connectors/grpc.html)
 - [Apache Pulsar](https://marcomq.github.io/mq-bridge/connectors/pulsar.html): input and output, built into `mqb`, a plugin elsewhere
-- [Meilisearch](https://marcomq.github.io/mq-bridge/connectors/meilisearch.html): search-index sink; Postgres CDC to Meilisearch with backfill and deletes
+- [Meilisearch](https://marcomq.github.io/mq-bridge/connectors/meilisearch.html): built-in `meilisearch://` sink and source; Postgres CDC to Meilisearch with backfill and deletes; which options need the plugin
 - [Connect plugin](https://marcomq.github.io/mq-bridge/connectors/connect.html): Redpanda Connect components as endpoints and middleware (Elasticsearch, OpenSearch, Cassandra, Google Pub/Sub, BigQuery, Azure storage, Bloblang, …), a separate install. Full lists with fields: [inputs](https://marcomq.github.io/mq-bridge/connectors/connect-inputs.html), [outputs](https://marcomq.github.io/mq-bridge/connectors/connect-outputs.html), [processors](https://marcomq.github.io/mq-bridge/connectors/connect-processors.html)
 
 ## Cookbook

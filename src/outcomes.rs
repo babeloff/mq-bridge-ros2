@@ -45,6 +45,20 @@ impl SentBatch {
             }
         }
     }
+
+    /// Builds the result from one outcome per message, in batch order: `None`
+    /// for a message that was sent, `Some(error)` for one that was not.
+    pub fn from_outcomes(
+        messages: Vec<CanonicalMessage>,
+        outcomes: impl IntoIterator<Item = Option<PublisherError>>,
+    ) -> Self {
+        let failed = messages
+            .into_iter()
+            .zip(outcomes)
+            .filter_map(|(message, outcome)| Some((message, outcome?)))
+            .collect();
+        Self::from_failures(failed)
+    }
 }
 
 /// A successfully received single message.
@@ -104,6 +118,25 @@ mod tests {
             SentBatch::from_failures(failed),
             SentBatch::Partial { responses: None, failed } if failed.len() == 1
         ));
+    }
+
+    #[test]
+    fn outcomes_by_position_keep_only_the_failed_messages() {
+        let messages = || vec![CanonicalMessage::from("a"), CanonicalMessage::from("b")];
+        assert!(matches!(
+            SentBatch::from_outcomes(messages(), [None, None]),
+            SentBatch::Ack
+        ));
+        let outcomes = [
+            None,
+            Some(PublisherError::NonRetryable(anyhow::anyhow!("bad"))),
+        ];
+        let SentBatch::Partial { failed, .. } = SentBatch::from_outcomes(messages(), outcomes)
+        else {
+            panic!("expected a partial result");
+        };
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0.payload.as_ref(), b"b");
     }
 
     #[test]

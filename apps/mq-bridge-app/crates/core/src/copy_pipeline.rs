@@ -196,6 +196,19 @@ pub fn configure_resume(
             config.cursor_id.get_or_insert_with(|| state_id.clone());
             Ok(ResumeCapability::ExternalCheckpoint)
         }
+        EndpointType::HttpBulk(config) => {
+            let Some(read) = config
+                .read
+                .as_mut()
+                .filter(|r| r.checkpoint_store.is_some())
+            else {
+                bail!(
+                    "source `http_bulk` needs an external `read.checkpoint_store` for resumable copy"
+                );
+            };
+            read.cursor_id.get_or_insert_with(|| state_id.clone());
+            Ok(ResumeCapability::ExternalCheckpoint)
+        }
         EndpointType::File(config) => match config.mode {
             Some(FileConsumerMode::GroupSubscribe { .. }) => bail!(
                 "source `file` has offset state, but resumable copy is not enabled because its current batch commit is not safe across partial failures"

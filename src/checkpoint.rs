@@ -166,6 +166,8 @@ pub async fn open_endpoint_checkpoint(
         }
         #[cfg(feature = "clickhouse")]
         EndpointType::ClickHouse(cfg) => crate::endpoints::clickhouse::cursor_checkpoint(cfg).await,
+        #[cfg(feature = "http-bulk")]
+        EndpointType::HttpBulk(cfg) => crate::endpoints::http_bulk::cursor_checkpoint(cfg).await,
         #[cfg(feature = "object-store")]
         EndpointType::ObjectStore(cfg) => {
             crate::endpoints::object_store::cursor_checkpoint(cfg).await

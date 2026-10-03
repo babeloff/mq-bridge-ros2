@@ -3830,6 +3830,7 @@ name = "mq-bridge-plugin-fixture"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "async-trait",
  "cbindgen",
  "libloading",

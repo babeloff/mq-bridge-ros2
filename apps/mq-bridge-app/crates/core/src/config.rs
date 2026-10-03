@@ -2131,7 +2131,12 @@ consumers:
                 .consumers
                 .iter()
                 .map(|c| (c.name.clone(), c.id.clone()))
-                .chain(config.publishers.iter().map(|p| (p.name.clone(), p.id.clone())))
+                .chain(
+                    config
+                        .publishers
+                        .iter()
+                        .map(|p| (p.name.clone(), p.id.clone())),
+                )
                 .collect();
             ids.sort();
             ids
