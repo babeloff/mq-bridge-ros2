@@ -47,17 +47,26 @@ impl SentBatch {
     }
 
     /// Builds the result from one outcome per message, in batch order: `None`
-    /// for a message that was sent, `Some(error)` for one that was not.
+    /// for a message that was sent, `Some(error)` for one that was not. A count
+    /// that differs from the messages' is an error, so none is acknowledged unseen.
     pub fn from_outcomes(
         messages: Vec<CanonicalMessage>,
         outcomes: impl IntoIterator<Item = Option<PublisherError>>,
-    ) -> Self {
+    ) -> Result<Self, PublisherError> {
+        let outcomes: Vec<_> = outcomes.into_iter().collect();
+        if outcomes.len() != messages.len() {
+            return Err(PublisherError::NonRetryable(anyhow::anyhow!(
+                "{} outcomes for {} messages",
+                outcomes.len(),
+                messages.len()
+            )));
+        }
         let failed = messages
             .into_iter()
             .zip(outcomes)
             .filter_map(|(message, outcome)| Some((message, outcome?)))
             .collect();
-        Self::from_failures(failed)
+        Ok(Self::from_failures(failed))
     }
 }
 
@@ -125,13 +134,15 @@ mod tests {
         let messages = || vec![CanonicalMessage::from("a"), CanonicalMessage::from("b")];
         assert!(matches!(
             SentBatch::from_outcomes(messages(), [None, None]),
-            SentBatch::Ack
+            Ok(SentBatch::Ack)
         ));
+        assert!(SentBatch::from_outcomes(messages(), [None]).is_err());
+        assert!(SentBatch::from_outcomes(messages(), [None, None, None]).is_err());
         let outcomes = [
             None,
             Some(PublisherError::NonRetryable(anyhow::anyhow!("bad"))),
         ];
-        let SentBatch::Partial { failed, .. } = SentBatch::from_outcomes(messages(), outcomes)
+        let Ok(SentBatch::Partial { failed, .. }) = SentBatch::from_outcomes(messages(), outcomes)
         else {
             panic!("expected a partial result");
         };

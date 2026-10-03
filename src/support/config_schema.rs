@@ -548,7 +548,7 @@ const MAX_REF_DEPTH: usize = 16;
 /// derive its schema without hand-writing one per enum. A schema that is already
 /// flat comes back unchanged.
 pub fn flatten(schema: &Value) -> Value {
-    let mut flat = flatten_node(schema, schema, 0);
+    let mut flat = flatten_node(schema, schema, &mut Vec::new());
     if let Some(object) = flat.as_object_mut() {
         object.remove("$defs");
         object.remove("definitions");
@@ -556,11 +556,12 @@ pub fn flatten(schema: &Value) -> Value {
     flat
 }
 
-fn flatten_node(node: &Value, root: &Value, depth: usize) -> Value {
+/// `path` holds the references being expanded; one already on it is a cycle and stays a `$ref`.
+fn flatten_node<'a>(node: &'a Value, root: &'a Value, path: &mut Vec<&'a str>) -> Value {
     let object = match node {
         Value::Object(object) => object,
         Value::Array(items) => {
-            return Value::Array(items.iter().map(|i| flatten_node(i, root, depth)).collect())
+            return Value::Array(items.iter().map(|i| flatten_node(i, root, path)).collect())
         }
         other => return other.clone(),
     };
@@ -568,17 +569,21 @@ fn flatten_node(node: &Value, root: &Value, depth: usize) -> Value {
     let target = object
         .get("$ref")
         .and_then(Value::as_str)
-        .filter(|_| depth < MAX_REF_DEPTH)
-        .and_then(|reference| local_definition(root, reference));
-    if let Some(Value::Object(resolved)) = target.map(|t| flatten_node(t, root, depth + 1)) {
-        out = resolved;
+        .filter(|reference| path.len() < MAX_REF_DEPTH && !path.contains(reference))
+        .and_then(|reference| Some((reference, local_definition(root, reference)?)));
+    if let Some((reference, definition)) = target {
+        path.push(reference);
+        if let Value::Object(resolved) = flatten_node(definition, root, path) {
+            out = resolved;
+        }
+        path.pop();
     }
     for (key, value) in object {
         if key == "$ref" && target.is_some() {
             continue;
         }
         // A sibling of `$ref`, such as the field's own description, wins.
-        out.insert(key.clone(), flatten_node(value, root, depth));
+        out.insert(key.clone(), flatten_node(value, root, path));
     }
     for key in ["oneOf", "anyOf"] {
         let Some(constants) = out.get(key).and_then(constants_of) else {
@@ -1029,6 +1034,9 @@ mod tests {
         });
         let flat = flatten(&schema);
         assert_eq!(flat["properties"]["other"]["$ref"], "#/$defs/Missing");
-        assert!(flat.to_string().contains("#/$defs/Node"));
+        assert_eq!(
+            flat["properties"]["node"],
+            json!({ "properties": { "next": { "$ref": "#/$defs/Node" } } })
+        );
     }
 }

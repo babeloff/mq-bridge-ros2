@@ -1322,10 +1322,14 @@ unsafe fn disconnect(
 ) -> MqbStatus {
     let shared = Arc::clone(&state.publisher);
     let teardown = async move {
-        shared.flush().await?;
-        if let Some(hook) = shared.on_disconnect_hook() {
-            hook.await?;
-        }
+        // The hook releases resources, so a failed flush must not skip it.
+        let flushed = shared.flush().await;
+        let hooked = match shared.on_disconnect_hook() {
+            Some(hook) => hook.await,
+            None => Ok(()),
+        };
+        flushed?;
+        hooked?;
         Ok::<_, anyhow::Error>(())
     };
     let closed = match outcome {

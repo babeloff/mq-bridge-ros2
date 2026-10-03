@@ -169,6 +169,9 @@ impl Connection {
         if url.query().is_some() || url.fragment().is_some() {
             bail!("http_bulk URL must not carry a query or fragment; put it into the request path");
         }
+        if config.tls.required && url.scheme() != "https" {
+            bail!("http_bulk tls.required needs an https URL");
+        }
         let mut headers = HeaderMap::new();
         for (name, value) in &config.headers {
             headers.insert(
@@ -197,6 +200,29 @@ impl Connection {
                 reqwest::Certificate::from_pem(&pem)
                     .with_context(|| format!("Invalid http_bulk CA certificate '{ca}'"))?,
             );
+        }
+        if config.tls.cert_password.is_some() {
+            bail!("http_bulk tls.cert_password is not supported; use an unencrypted key");
+        }
+        match (&config.tls.cert_file, &config.tls.key_file) {
+            (Some(cert), key) => {
+                let mut pem = std::fs::read(cert)
+                    .with_context(|| format!("Failed to read http_bulk cert file '{cert}'"))?;
+                if let Some(key) = key {
+                    pem.push(b'\n');
+                    pem.extend(
+                        std::fs::read(key).with_context(|| {
+                            format!("Failed to read http_bulk key file '{key}'")
+                        })?,
+                    );
+                }
+                builder =
+                    builder.identity(reqwest::Identity::from_pem(&pem).with_context(|| {
+                        format!("Invalid http_bulk client certificate '{cert}'")
+                    })?);
+            }
+            (None, Some(_)) => bail!("http_bulk tls.key_file needs tls.cert_file"),
+            (None, None) => {}
         }
         Ok(Self {
             http: builder
@@ -561,7 +587,9 @@ impl HttpBulkPublisher {
             .ok_or_else(|| {
                 Failure::permanent(format!("{label} answered without a job id at '{}'", job.id))
             })?;
-        let url = format!("{}{}", self.base, job.poll.replace(JOB_ID, &id));
+        // The id comes from the server; encoded, it cannot leave its path segment.
+        let in_url = utf8_percent_encode(&id, NON_ALPHANUMERIC).to_string();
+        let url = format!("{}{}", self.base, job.poll.replace(JOB_ID, &in_url));
         let (this, url, id) = (self, url.as_str(), id.as_str());
         poll_until(
             PollSchedule::default(),
@@ -765,7 +793,7 @@ impl MessagePublisher for HttpBulkPublisher {
                 break;
             }
         }
-        Ok(SentBatch::from_outcomes(messages, outcomes))
+        SentBatch::from_outcomes(messages, outcomes)
     }
 
     /// With `operation` set the messages are changes, and a delete must not
@@ -954,6 +982,21 @@ mod tests {
         assert!(failed
             .iter()
             .all(|f| !f.1 && f.2.contains("no primary key")));
+    }
+
+    #[tokio::test]
+    async fn a_job_id_cannot_leave_its_path_segment() {
+        let server = server(|request| match request.method.as_str() {
+            "POST" => (202, r#"{"taskUid":"../keys?x=1"}"#.to_string()),
+            _ => (200, r#"{"status":"succeeded"}"#.to_string()),
+        })
+        .await;
+        publisher(&server, job_config())
+            .send_batch(documents(&[r#"{"id":1}"#]))
+            .await
+            .unwrap();
+
+        assert_eq!(server.requests()[1].target, "/tasks/%2E%2E%2Fkeys%3Fx%3D1");
     }
 
     #[tokio::test]
@@ -1254,6 +1297,14 @@ mod tests {
             refused(json!({"url": "http://h?a=1", "upsert": {"path": "/d"}})).contains("query")
         );
         assert!(refused(json!({"url": "http://h", "upsert": {"path": "d"}})).contains("path"));
+        for (tls, expected) in [
+            (json!({"required": true}), "https"),
+            (json!({"cert_password": "x"}), "cert_password"),
+            (json!({"key_file": "k.pem"}), "cert_file"),
+        ] {
+            let error = refused(json!({"url": "http://h", "tls": tls, "upsert": {"path": "/d"}}));
+            assert!(error.contains(expected), "{error}");
+        }
         assert!(refused(json!({"url": "http://h", "upsert": {"path": "/d",
             "result": {"job": job.clone()}}}))
         .contains("{id}"));

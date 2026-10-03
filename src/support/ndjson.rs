@@ -21,6 +21,8 @@ pub fn append_line(body: &mut Vec<u8>, payload: &[u8]) -> anyhow::Result<()> {
         serde_json::to_writer(&mut *body, &document)
             .context("failed to re-serialize a multi-line JSON payload")?;
     } else {
+        serde_json::from_slice::<serde::de::IgnoredAny>(payload)
+            .context("the payload is not valid JSON")?;
         body.extend_from_slice(payload);
     }
     body.push(b'\n');
@@ -108,5 +110,7 @@ mod tests {
     fn a_payload_that_is_not_an_object_is_refused() {
         assert!(chunk([b"[1,2]".as_slice()], 100).is_err());
         assert!(chunk([b"{\n broken".as_slice()], 100).is_err());
+        assert!(chunk([b"{ broken".as_slice()], 100).is_err());
+        assert!(chunk([br#"{"id":1} x"#.as_slice()], 100).is_err());
     }
 }

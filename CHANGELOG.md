@@ -59,8 +59,8 @@ change: secret extraction now covers custom endpoints.
   unchanged. C plugins that use `MQB_NO_PUBLISHER` or `MQB_BLOCKING_PUBLISHER` get a stub.
 - **An endpoint can ask for its own default batch size.** `mqb copy` and the MCP server's
   `start_route` use the top-level schema annotation `x-mqb-default-batch-size` of a custom
-  output when no batch size is given. The general default stays 1,024, and no built-in
-  endpoint declares one yet.
+  output when no batch size is given. The general default stays 1,024; of the built-in
+  endpoints only the `meilisearch` preset declares one, 50,000.
 - **Plugin repository template.** [examples/plugin-template](examples/plugin-template) holds a
   working endpoint with its npm and Python packages, conda recipe, Homebrew formula script and
   CI and release workflows, plus a script that renames it.

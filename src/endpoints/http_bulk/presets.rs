@@ -122,8 +122,9 @@ fn base_url(name: &str, url: &str) -> anyhow::Result<String> {
 
 /// A collection or index name as one path segment.
 fn segment<'a>(field: &str, name: &'a str) -> anyhow::Result<&'a str> {
-    if name.is_empty() || name.contains(['/', '?', '#', ' ']) {
-        bail!("'{field}' must be one name without '/', '?', '#' or spaces, got '{name}'");
+    let reserved = ['/', '?', '#', '&', '%', '{', '}', ' '];
+    if name.is_empty() || name == "." || name == ".." || name.contains(reserved) {
+        bail!("'{field}' must be one name without '/', '?', '#', '&', '%', braces or spaces, got '{name}'");
     }
     Ok(name)
 }
@@ -424,7 +425,7 @@ fn meilisearch(route: &str, value: &Value) -> anyhow::Result<Value> {
     }
     let mut read = format!("/indexes/{index}/documents?offset={{cursor}}&limit={{limit}}");
     if let Some(fields) = &config.fields {
-        if fields.contains(['&', '#', ' ']) {
+        if fields.contains(['&', '#', '%', '{', '}', ' ']) {
             bail!("'fields' must be field names separated by commas, got '{fields}'");
         }
         read = format!("{read}&fields={fields}");
@@ -594,6 +595,11 @@ mod tests {
                 json!({"url": "http://h", "index": "a", "id_field": "x}"}),
             ),
             ("elasticsearch", json!({"url": "http://h"})),
+            ("elasticsearch", json!({"url": "http://h", "index": ".."})),
+            (
+                "meilisearch",
+                json!({"url": "http://h", "index": "a", "primary_key": "id&x=1"}),
+            ),
         ] {
             let error = preset(name).config("route", &bad).expect_err("refused");
             assert!(error.is::<InvalidConfig>(), "{name}: {error:#}");
