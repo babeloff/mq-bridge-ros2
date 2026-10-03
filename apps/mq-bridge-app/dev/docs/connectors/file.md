@@ -73,12 +73,51 @@ Full field list: [reference/file.md](../reference/file.md).
   A repeated header name gets a suffix (`a,a` → keys `a`, `a_2`) so no column is lost.
 - **Writing:** the payload must be a JSON object. A new file takes its columns from the
   first message's keys, sorted; appending to a non-empty file keeps that file's header, so
-  rows stay aligned with it. Fields containing `,`, `"`, a line break or the `delimiter` are
-  quoted. Nested objects and arrays are written as their JSON text, and `null` as `null`. A
-  payload that is not an object, or a string with no UTF-8 spelling (a lone `\ud800`
-  escape), fails that message instead of writing a broken row.
-- `delimiter` separates records (rows), not fields; the field separator is always `,`. For
-  CSV it must not contain `,` or `"`.
+  rows stay aligned with it. Fields containing the separator, the quote character, a line
+  break or the `delimiter` are quoted. A nested object becomes one `parent.child` column per
+  leaf (`stats.avg`), which is what an [`aggregate`](../cookbook/aggregate.md) result needs;
+  `csv.nested: json` writes its JSON text into one cell instead. Arrays are written as their
+  JSON text, and `null` as `null`. A payload that is not an object, or a string with no UTF-8
+  spelling (a lone `\ud800` escape), fails that message instead of writing a broken row.
+- `delimiter` separates records (rows), not fields. It must not contain the field separator
+  or the quote character.
+
+### Dialects
+
+Comma-separated with `"` quotes and a header record is the default. Anything else goes in the
+`csv` block:
+
+```yaml
+input:
+  file:
+    path: export.csv
+    format: csv
+    csv:
+      separator: auto
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `separator` | `,` | One character, `tab`, `space`, hex (`0x1f`), or `auto`. `auto` is for sources: it takes whichever of `,` `;` tab `\|` occurs most often outside quotes in the first record. |
+| `quote` | `"` | One character, or `none` when the file quotes nothing. |
+| `header` | `true` | `false` when the first record is already data; a source then needs `columns`, and a sink writes rows only. |
+| `columns` | — | Source: the keys to use instead of the header's. Sink: the columns to write, in this order. |
+| `nested` | `flatten` | Sink: `flatten` or `json`, see above. |
+
+| Export | Setting |
+| --- | --- |
+| Excel "CSV UTF-8", semicolon locales | `separator: ";"` (or `auto`); the byte-order mark and CRLF need nothing |
+| Excel "Text (Tab delimited)", saved as UTF-8 | `separator: tab` |
+| `mongoexport --type=csv` | default |
+| `mongoexport --type=tsv` | `separator: tab` |
+| `psql --csv`, `COPY … WITH (FORMAT csv)` | default; add `separator` for `DELIMITER ';'` |
+| `COPY … WITH (FORMAT csv, HEADER false)`, `mongoexport --noHeaderLine` | `header: false` plus `columns` |
+
+On the command line the block is one JSON parameter:
+`mqb copy 'file:///data/export.csv?format=csv&csv={"separator":"auto"}' …`.
+
+Not read: UTF-16 files (Excel's "Unicode Text"; re-save as UTF-8) and PostgreSQL's `COPY`
+*text* format, which escapes with backslashes and writes `\N` for null.
 
 ## JSON lines (`normal`, `json`, `text`)
 

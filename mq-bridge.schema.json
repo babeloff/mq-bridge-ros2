@@ -635,6 +635,61 @@
       },
       "additionalProperties": false
     },
+    "CsvConfig": {
+      "description": "CSV dialect for `format: csv`: field separator, quoting, header and nested values.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "Column names. A source uses them instead of the header's; a sink writes exactly these, in this order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "header": {
+          "description": "Whether the first record names the columns. Defaults to true; a source without one needs `columns`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "nested": {
+          "description": "(Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell.",
+          "$ref": "#/$defs/CsvNested",
+          "default": "flatten"
+        },
+        "quote": {
+          "description": "Quote character, or `none` for unquoted fields. Defaults to `\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "separator": {
+          "description": "Field separator: one character, `tab`, `space`, hex (`0x1f`) or `auto` (source: guessed from the first record). Defaults to `,`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CsvNested": {
+      "description": "How a CSV sink writes a nested JSON object.",
+      "oneOf": [
+        {
+          "description": "One column per leaf, named by its dotted path (`stats.avg`).",
+          "type": "string",
+          "const": "flatten"
+        },
+        {
+          "description": "The object's JSON text in a single cell.",
+          "type": "string",
+          "const": "json"
+        }
+      ]
+    },
     "DatePartitionStyle": {
       "description": "Layout of the object_store sink's date folders.",
       "oneOf": [
@@ -1336,6 +1391,10 @@
           "description": "Per-batch compression (`none`, `gzip`, `lz4`, `zstd`). Requires the `compression` feature. Publishers: always. Consumers: must match, and only the default `consume` mode reads it.",
           "$ref": "#/$defs/Compression",
           "default": "none"
+        },
+        "csv": {
+          "description": "CSV dialect (separator, quote, header, columns); only read with `format: csv`.",
+          "$ref": "#/$defs/CsvConfig"
         },
         "delimiter": {
           "description": "Optional delimiter for messages. Defaults to newline (\"\\n\").\nCan be a string or a hex sequence (e.g. \"0x00\").\nCurrently only single-byte delimiters are supported.",
@@ -3949,6 +4008,10 @@
           "$ref": "#/$defs/Compression",
           "default": "none"
         },
+        "csv": {
+          "description": "CSV dialect (separator, quote, header, columns); only read with `format: csv`.",
+          "$ref": "#/$defs/CsvConfig"
+        },
         "cursor_id": {
           "description": "(Source only) Cursor id namespacing the checkpoint key; enables durable resume.",
           "type": [
@@ -4035,6 +4098,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "url"
       ]

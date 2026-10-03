@@ -3154,6 +3154,18 @@ mod uri_tests {
         }
     }
 
+    /// The CSV dialect is a nested struct, so it arrives as one JSON parameter.
+    #[test]
+    fn file_csv_dialect_is_a_json_param() {
+        let mut uri = url::Url::parse("file:///tmp/export.csv?format=csv").unwrap();
+        uri.query_pairs_mut()
+            .append_pair("csv", r#"{"separator":"auto","header":false,"columns":["id"]}"#);
+        let cfg = config(uri.as_str(), "file");
+        assert_eq!(cfg["format"], "csv");
+        assert_eq!(cfg["csv"]["separator"], "auto");
+        assert_eq!(cfg["csv"]["columns"][0], "id");
+    }
+
     /// The authority-less form has no `//` to strip, so the scheme has to come off on
     /// its own or the path keeps it and names a relative directory.
     #[test]

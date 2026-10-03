@@ -559,8 +559,8 @@ impl MessagePublisher for MemoryPublisher {
 pub struct MemoryQueueConsumer {
     topic: String,
     receiver: Receiver<Vec<CanonicalMessage>>,
-    // Internal buffer to hold messages from a received batch.
-    buffer: Vec<CanonicalMessage>,
+    /// The rest of a received batch larger than one `receive_batch` asked for.
+    buffer: std::vec::IntoIter<CanonicalMessage>,
     enable_nack: bool,
     /// Drain mode: only then does an idle recv time out into an empty batch.
     exit_on_empty: bool,
@@ -666,9 +666,8 @@ impl MemoryConsumer {
 
 impl Drop for MemoryQueueConsumer {
     fn drop(&mut self) {
-        if !self.buffer.is_empty() {
-            let mut messages = std::mem::take(&mut self.buffer);
-            messages.reverse();
+        if self.buffer.len() > 0 {
+            let messages: Vec<CanonicalMessage> = std::mem::take(&mut self.buffer).collect();
 
             let channel = get_or_create_channel(&MemoryConfig {
                 topic: self.topic.clone(),
@@ -708,15 +707,10 @@ impl Drop for MemoryQueueConsumer {
 impl MemoryQueueConsumer {
     pub fn new(config: &MemoryConfig) -> anyhow::Result<Self> {
         let channel = get_or_create_channel(config);
-        let buffer = if let Some(capacity) = config.capacity {
-            Vec::with_capacity(capacity)
-        } else {
-            Vec::new()
-        };
         Ok(Self {
             topic: config.topic.clone(),
             receiver: channel.receiver.clone(),
-            buffer,
+            buffer: Vec::new().into_iter(),
             enable_nack: config.enable_nack,
             exit_on_empty: false,
         })
@@ -726,31 +720,21 @@ impl MemoryQueueConsumer {
         &mut self,
         max_messages: usize,
     ) -> Result<Vec<CanonicalMessage>, ConsumerError> {
-        // If the internal buffer has messages, return them first.
-        if self.buffer.is_empty() {
-            // Buffer is empty. Wait for a new batch from the channel.
+        if self.buffer.len() == 0 {
             // Drain mode: a brief idle timeout returns empty so --drain can fire.
             let Some(recv) =
                 crate::traits::drain_gated(self.exit_on_empty, self.receiver.recv()).await
             else {
                 return Ok(Vec::new());
             };
-            self.buffer = match recv {
-                Ok(batch) => batch,
-                Err(_) => return Err(ConsumerError::EndOfStream),
-            };
-            // Reverse the buffer so we can efficiently pop from the end.
-            self.buffer.reverse();
+            let batch = recv.map_err(|_| ConsumerError::EndOfStream)?;
+            // The common case: hand the publisher's batch on as it is.
+            if batch.len() <= max_messages {
+                return Ok(batch);
+            }
+            self.buffer = batch.into_iter();
         }
-
-        // Determine the number of messages to take from the buffer.
-        let num_to_take = self.buffer.len().min(max_messages);
-        let split_at = self.buffer.len() - num_to_take;
-
-        // `split_off` is highly efficient. It splits the Vec in two at the given
-        // index and returns the part after the index, leaving the first part.
-        let mut messages = self.buffer.split_off(split_at);
-        messages.reverse(); // Reverse back to original order.
+        let messages = self.buffer.by_ref().take(max_messages).collect();
         Ok(messages)
     }
 }
@@ -826,10 +810,10 @@ impl MessageConsumer for MemoryQueueConsumer {
             if let Ok(mut next_batch) = self.receiver.try_recv() {
                 if next_batch.len() + messages.len() > max_messages {
                     let needed = max_messages - messages.len();
-                    let mut to_buffer = next_batch.split_off(needed);
-                    messages.append(&mut next_batch);
-                    self.buffer.append(&mut to_buffer);
-                    self.buffer.reverse();
+                    // `messages` came up short, so the buffer is drained.
+                    let mut rest = next_batch.into_iter();
+                    messages.extend(rest.by_ref().take(needed));
+                    self.buffer = rest;
                     break;
                 } else {
                     messages.append(&mut next_batch);
@@ -850,10 +834,18 @@ impl MessageConsumer for MemoryQueueConsumer {
 
         let topic = self.topic.clone();
         let expected_count = messages.len();
-        let correlation_ids: Vec<Option<String>> = messages
+        // Only request/reply traffic carries them; an empty list costs no allocation.
+        let correlation_ids: Vec<Option<String>> = if messages
             .iter()
-            .map(|m| m.metadata.get("correlation_id").cloned())
-            .collect();
+            .any(|m| m.metadata.contains_key("correlation_id"))
+        {
+            messages
+                .iter()
+                .map(|m| m.metadata.get("correlation_id").cloned())
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Guard to requeue messages if the batch is dropped without commit/nack.
         let mut guard = if self.enable_nack {
@@ -875,23 +867,20 @@ impl MessageConsumer for MemoryQueueConsumer {
                     ));
                 }
 
-                // Clone messages from guard to keep it armed during async operations
-                let messages_for_retry = if let Some(g) = &guard {
-                    g.messages.clone()
-                } else {
-                    Vec::new()
-                };
-
-                let response_channel = get_or_create_response_channel(&topic);
+                // Looked up on the first reply: a plain ack never touches the registry.
+                let mut response_channel = None;
                 let mut to_requeue = Vec::new();
 
                 for (i, disposition) in dispositions.into_iter().enumerate() {
                     match disposition {
                         MessageDisposition::Reply(resp) => {
-                            handle_memory_reply(resp, i, &correlation_ids, &response_channel).await;
+                            let channel = response_channel
+                                .get_or_insert_with(|| get_or_create_response_channel(&topic));
+                            handle_memory_reply(resp, i, &correlation_ids, channel).await;
                         }
                         MessageDisposition::Nack => {
-                            if let Some(msg) = messages_for_retry.get(i) {
+                            // The guard stays armed across the awaits above.
+                            if let Some(msg) = guard.as_ref().and_then(|g| g.messages.get(i)) {
                                 warn!("Requeueing nacked message {}", i);
                                 to_requeue.push(msg.clone());
                             } else {

@@ -702,6 +702,36 @@ file.
 
 A `csv` sink takes its columns from the first row it writes, in that row's field order.
 
+`csv` on its own means comma-separated, `"`-quoted, with a header record. The `csv` block
+describes any other dialect, for the `file` endpoint and for an `object_store` source:
+
+```yaml endpoint
+input:
+  file:
+    path: "export.csv"
+    format: csv
+    csv:
+      separator: ";"          # one character, `tab`, `space`, hex (`0x1f`), or `auto`
+      quote: "'"              # one character, or `none`; default `"`
+      header: false           # first record is data; a source then needs `columns`
+      columns: [id, name]     # replaces the header's names; a sink writes exactly these
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `separator` | `,` | Field separator. `auto` (sources only) picks whichever of `,` `;` tab `\|` occurs most often outside quotes in the first record, and `,` on a tie. |
+| `quote` | `"` | Quote character; a doubled one inside a quoted field is a literal. `none` reads every byte as data and makes a sink fail a value it would have to quote. |
+| `header` | `true` | Whether the first record names the columns. A sink with `false` writes rows only. |
+| `columns` | — | Source: the keys to use, instead of the header's. Sink: the columns to write, in this order; other keys are dropped. |
+| `nested` | `flatten` | Sink only. `flatten` writes a nested object as one `parent.child` column per leaf; `json` writes its JSON text into one cell. Arrays are always JSON text. |
+
+`delimiter` stays the *record* separator and is independent of all this; it only must not
+contain the separator or the quote character. Common exports: Excel "CSV UTF-8" in a
+semicolon locale is `separator: ";"` (the byte-order mark and CRLF are handled already),
+`mongoexport --type=tsv` and `psql -A -F $'\t'` are `separator: tab`, and `psql --csv` and
+`COPY … WITH (FORMAT csv)` are the default. PostgreSQL's `COPY` *text* format (backslash
+escapes, `\N`) and UTF-16 files are not CSV dialects and are not read.
+
 A file **source** must declare the same `compression`/`encryption` the data was written with.
 A mismatch (wrong key, wrong codec, or a missing field) is a permanent decode failure: the
 route ends `failed` with the error in its status, rather than completing as if the file were

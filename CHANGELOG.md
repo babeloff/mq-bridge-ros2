@@ -2,6 +2,32 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 0.4.19
+
+CSV in more shapes: the reader takes other separators and quoting, and a CSV sink no longer
+mixes JSON into its cells. The second is a behaviour change, listed below.
+
+### Added
+
+- **CSV dialects.** `format: csv` took only comma-separated, `"`-quoted files with a header. A
+  `csv` block on the `file` endpoint and on an `object_store` source now sets `separator` (one
+  character, `tab`, `space`, hex, or `auto`), `quote` (a character or `none`), `header` and
+  `columns`. `separator: auto` is for sources and takes whichever of `,` `;` tab `|` occurs
+  most often outside quotes in the first record. That covers Excel's semicolon exports, TSV
+  from `mongoexport` and `psql`, and headerless dumps; the book's file page lists the setting
+  per tool. On the command line it is one parameter, `csv={"separator":"auto"}`.
+  `FileConfig` and `ObjectStoreConfig` gain the field `csv`, and `models` the types
+  `CsvConfig` and `CsvNested`; code that builds either struct without `..Default::default()`
+  needs the new field.
+
+### Behaviour changes
+
+- **A CSV sink flattens nested objects.** A nested object used to be written as JSON text in
+  one cell, so the output of `aggregate` (`{"stats":{"n":3,"avg":2.5}}`) came out as a mix of
+  CSV and JSON. It now becomes one column per leaf, named by its path: `stats.n`, `stats.avg`.
+  **A new file gets different columns than before; a file that already has a header keeps
+  it.** Set `csv.nested: json` for the previous output. Arrays are still written as JSON text.
+
 ## 0.4.18
 
 A new generic output for search engines, plus documentation and packaging work. This release

@@ -27,7 +27,9 @@
 //!   non-destructive, at-least-once at object granularity.
 
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
-use crate::endpoints::file::{encode_record, parse_delimiter, parse_message};
+use crate::endpoints::file::{
+    encode_record, parse_delimiter, parse_message, CsvDialect, CsvHeader, CsvQuoteState,
+};
 use crate::models::{Compression, DatePartitionStyle, FileFormat, NameBy, ObjectStoreConfig};
 #[cfg(feature = "encryption")]
 use crate::support::crypto::Crypto;
@@ -194,26 +196,31 @@ fn classify_put_error(error: ObjectStoreError, context: String) -> PublisherErro
 /// Splits a fetched object into record slices on `delimiter`, dropping a trailing empty
 /// remainder and a stray `\r` before a `\n` delimiter (mirrors the file reader). With
 /// `csv`, a delimiter inside a quoted field is data, as it is for the file reader.
-fn split_records<'a>(data: &'a [u8], delimiter: &[u8], csv: bool) -> Vec<&'a [u8]> {
+fn split_records<'a>(data: &'a [u8], delimiter: &[u8], csv: Option<&CsvDialect>) -> Vec<&'a [u8]> {
     let mut records = Vec::new();
     if delimiter.is_empty() {
         return records;
     }
     let newline = delimiter.len() == 1 && delimiter[0] == b'\n';
-    let mut quotes = crate::endpoints::file::CsvQuoteState::default();
+    // An `auto` separator is settled on the object's first line.
+    let syntax = csv.map(|csv| {
+        let first_line = memchr::memmem::find(data, delimiter).unwrap_or(data.len());
+        csv.resolve(&data[..first_line])
+    });
+    let mut quotes = CsvQuoteState::new(syntax.unwrap_or_default());
     let mut scanned = 0;
     let mut start = 0;
     let mut i = 0;
     while i + delimiter.len() <= data.len() {
         if &data[i..i + delimiter.len()] == delimiter {
-            if csv {
+            if let Some(syntax) = syntax {
                 quotes.feed(&data[scanned..i]);
                 scanned = i;
                 if quotes.in_quotes() {
                     i += 1;
                     continue;
                 }
-                quotes = Default::default();
+                quotes = CsvQuoteState::new(syntax);
                 scanned = i + delimiter.len();
             }
             let mut end = i;
@@ -236,10 +243,15 @@ fn split_records<'a>(data: &'a [u8], delimiter: &[u8], csv: bool) -> Vec<&'a [u8
 
 /// Splits and decodes an object's bytes into messages, threading CSV header state across
 /// the object's lines (so the first CSV row establishes the schema).
-fn split_and_parse(data: &[u8], delimiter: &[u8], format: &FileFormat) -> Vec<CanonicalMessage> {
+fn split_and_parse(
+    data: &[u8],
+    delimiter: &[u8],
+    format: &FileFormat,
+    csv: &CsvDialect,
+) -> Vec<CanonicalMessage> {
     let mut out = Vec::new();
-    let mut csv_header: Option<crate::endpoints::file::CsvHeader> = None;
-    let csv = matches!(format, FileFormat::Csv);
+    let csv = matches!(format, FileFormat::Csv).then_some(csv);
+    let mut csv_header = csv.map(|csv| CsvHeader::unread(csv.clone()));
     for record in split_records(data, delimiter, csv) {
         if let Some(msg) = parse_message(record, format, &mut csv_header) {
             out.push(msg);
@@ -333,7 +345,7 @@ impl ObjectStorePublisher {
         validate_object_settings(config)?;
         let (store, base) = build_store(&config.url)?;
         let store: Arc<dyn ObjectStore> = Arc::from(store);
-        let delimiter = parse_delimiter(config.delimiter.as_deref(), &config.format)?;
+        let delimiter = parse_delimiter(config.delimiter.as_deref())?;
         let extension = config.extension.clone().unwrap_or_else(|| {
             extension_for(
                 &config.format,
@@ -681,6 +693,7 @@ pub struct ObjectStoreConsumer {
     single_object: Option<bool>,
     delimiter: Vec<u8>,
     format: FileFormat,
+    csv: CsvDialect,
     #[cfg(feature = "compression")]
     compression: Compression,
     #[cfg(feature = "encryption")]
@@ -740,7 +753,9 @@ impl ObjectStoreConsumer {
     ) -> anyhow::Result<Self> {
         validate_object_settings(config)?;
         let (store, base) = build_store(&config.url)?;
-        let delimiter = parse_delimiter(config.delimiter.as_deref(), &config.format)?;
+        let delimiter = parse_delimiter(config.delimiter.as_deref())?;
+        let csv = CsvDialect::for_format(&config.format, &config.csv, &delimiter)?;
+        csv.check_source()?;
 
         // Durable resume needs an external checkpoint store: an object store has no cheap
         // per-key cursor row, so the source-datastore backend is rejected here.
@@ -812,6 +827,7 @@ impl ObjectStoreConsumer {
             store: Arc::from(store),
             base,
             single_object,
+            csv,
             delimiter,
             format: config.format.clone(),
             #[cfg(feature = "compression")]
@@ -848,6 +864,7 @@ impl ObjectStoreConsumer {
             single_object: Some(false),
             delimiter: vec![b'\n'],
             format,
+            csv: CsvDialect::default(),
             #[cfg(feature = "compression")]
             compression: Compression::None,
             #[cfg(feature = "encryption")]
@@ -950,7 +967,12 @@ impl ObjectStoreConsumer {
             return crate::support::parquet::decode_rows(data, self.decompressed_limit())
                 .with_context(|| format!("decode parquet object '{key}'"));
         }
-        Ok(split_and_parse(&data, &self.delimiter, &self.format))
+        Ok(split_and_parse(
+            &data,
+            &self.delimiter,
+            &self.format,
+            &self.csv,
+        ))
     }
 
     /// Decrypt-then-decompress a fetched object whole (the write path compressed first).
@@ -1681,7 +1703,7 @@ mod tests {
         let mut replayed = Vec::new();
         for name in &names {
             let bytes = store.get(name).await.unwrap().bytes().await.unwrap();
-            for record in split_records(&bytes, b"\n", false) {
+            for record in split_records(&bytes, b"\n", None) {
                 let value: serde_json::Value = serde_json::from_slice(record).unwrap();
                 replayed.push(value["offset"].as_i64().unwrap());
             }
@@ -1990,7 +2012,7 @@ mod tests {
         let stored = store.get(&key).await.unwrap().bytes().await.unwrap();
         let plain =
             crate::support::compression::decompress_all(Compression::Gzip, &stored, None).unwrap();
-        assert_eq!(split_records(&plain, b"\n", false).len(), 2);
+        assert_eq!(split_records(&plain, b"\n", None).len(), 2);
 
         // A restart parses the longer extension back out, so covered offsets are not rewritten.
         let recovered =
@@ -2322,11 +2344,11 @@ mod tests {
     fn split_records_is_quote_aware_only_for_csv() {
         let data = b"a,\"x\ny\"\nb\n";
         assert_eq!(
-            split_records(data, b"\n", true),
+            split_records(data, b"\n", Some(&CsvDialect::default())),
             vec![&b"a,\"x\ny\""[..], b"b"]
         );
         assert_eq!(
-            split_records(data, b"\n", false),
+            split_records(data, b"\n", None),
             vec![&b"a,\"x"[..], b"y\"", b"b"]
         );
     }
@@ -2609,5 +2631,29 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(offsets, vec![0, 2]);
+    }
+
+    /// The dialect reaches the splitter and the row decoder alike: the quoted line break
+    /// stays in one record, and the separator is guessed from the object's first line.
+    #[test]
+    fn csv_objects_follow_the_configured_dialect() {
+        let config = crate::models::CsvConfig {
+            separator: Some("auto".to_string()),
+            ..Default::default()
+        };
+        let csv = CsvDialect::from_config(&config, b"\n").unwrap();
+        let object = "\u{feff}id;note\r\n1;\"a\nb;c\"\r\n2;x,y\r\n";
+        let rows: Vec<serde_json::Value> =
+            split_and_parse(object.as_bytes(), b"\n", &FileFormat::Csv, &csv)
+                .iter()
+                .map(|msg| serde_json::from_slice(&msg.payload).unwrap())
+                .collect();
+        assert_eq!(
+            rows,
+            vec![
+                serde_json::json!({"id": "1", "note": "a\nb;c"}),
+                serde_json::json!({"id": "2", "note": "x,y"}),
+            ]
+        );
     }
 }

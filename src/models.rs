@@ -1092,6 +1092,46 @@ pub enum FileFormat {
     Parquet,
 }
 
+/// CSV dialect for `format: csv`: field separator, quoting, header and nested values.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CsvConfig {
+    /// Field separator: one character, `tab`, `space`, hex (`0x1f`) or `auto` (source: guessed from the first record). Defaults to `,`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+    /// Quote character, or `none` for unquoted fields. Defaults to `"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    /// Whether the first record names the columns. Defaults to true; a source without one needs `columns`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<bool>,
+    /// Column names. A source uses them instead of the header's; a sink writes exactly these, in this order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+    /// (Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell.
+    #[serde(default)]
+    pub nested: CsvNested,
+}
+
+impl CsvConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// How a CSV sink writes a nested JSON object.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CsvNested {
+    /// One column per leaf, named by its dotted path (`stats.avg`).
+    #[default]
+    Flatten,
+    /// The object's JSON text in a single cell.
+    Json,
+}
+
 /// Compression algorithm. Used for at-rest batches (file, object_store) and for HTTP
 /// body compression (http, clickhouse). Orthogonal to `format`.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
@@ -1281,6 +1321,9 @@ pub struct FileConfig {
     /// The format for writing messages to the file (Publisher) or interpreting them (Consumer). Defaults to `normal`.
     #[serde(default)]
     pub format: FileFormat,
+    /// CSV dialect (separator, quote, header, columns); only read with `format: csv`.
+    #[serde(default, skip_serializing_if = "CsvConfig::is_default")]
+    pub csv: CsvConfig,
     /// Per-batch compression (`none`, `gzip`, `lz4`, `zstd`). Requires the `compression` feature. Publishers: always. Consumers: must match, and only the default `consume` mode reads it.
     #[serde(default)]
     pub compression: Compression,
@@ -1562,6 +1605,9 @@ pub struct ObjectStoreConfig {
     /// `normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.
     #[serde(default)]
     pub format: FileFormat,
+    /// CSV dialect (separator, quote, header, columns); only read with `format: csv`.
+    #[serde(default, skip_serializing_if = "CsvConfig::is_default")]
+    pub csv: CsvConfig,
     /// Record delimiter within an object. Defaults to newline ("\n"). Can be a string or a
     /// hex sequence (e.g. "0x00").
     pub delimiter: Option<String>,

@@ -53,12 +53,14 @@ sensor_stats:
 `{"sensor_id": 7, "reading": 20, "sensor": {"total": 20, "count": 1}}`. The next message for
 sensor 7 continues from that state.
 
+A CSV sink writes that nested result as the columns `sensor.total` and `sensor.count`, not as
+JSON text in one cell; see [CSV](../connectors/file.md#csv).
+
 `expression` returns the new state. It reads payload fields by name, metadata as `meta.<key>`,
 and `state`, the value it returned for the previous message with the same key. For a new key
 `state` is `null`, so `state.total ?? 0` gives the starting value. The language is the one
 [`transform`](transform.md) and `filter` use.
 
-## A moving average
 
 The usual form `avg * 0.99 + reading * 0.01` starts at the first reading and needs hundreds
 of messages to forget it. Keep the weighted sum and the weight, and divide when writing:
