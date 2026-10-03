@@ -199,21 +199,21 @@ impl HttpBulkConsumer {
                 )
                 .replace(LIMIT, &limit)
         );
-        let mut request = self
-            .connection
-            .http
-            .request(self.method.clone(), url)
-            .headers(self.connection.headers.clone());
+        let mut request = self.connection.request(self.method.clone(), &url);
         if let Some(body) = &self.body {
             request = request.header(CONTENT_TYPE, JSON).body(
                 body.replace(CURSOR, &cursor.to_string())
                     .replace(LIMIT, &limit),
             );
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| ConsumerError::Connection(anyhow!("{label} failed: {e}")))?;
+        let response = self.connection.send(request).await.map_err(|e| {
+            let error = anyhow!("{label} failed: {e}");
+            if e.retryable {
+                ConsumerError::Connection(error)
+            } else {
+                ConsumerError::Permanent(error)
+            }
+        })?;
         let status = response.status();
         let text = response
             .text()

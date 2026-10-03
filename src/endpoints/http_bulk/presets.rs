@@ -242,10 +242,23 @@ struct Elasticsearch {
     api_key: Option<String>,
     #[serde(default = "default_id_field")]
     id_field: String,
+    #[serde(default)]
+    mode: ElasticsearchMode,
+    auth: Option<Value>,
     operation: Option<String>,
     #[serde(default)]
     compression: Compression,
     request_timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Default, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum ElasticsearchMode {
+    /// Replaces the stored document.
+    #[default]
+    Index,
+    /// Merges the payload into the stored document, creating it if missing.
+    Update,
 }
 
 fn elasticsearch_schema() -> Value {
@@ -262,6 +275,16 @@ fn elasticsearch_schema() -> Value {
                 "type": "string",
                 "default": "id",
                 "description": "Top-level payload field that becomes the document `_id`."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["index", "update"],
+                "default": "index",
+                "description": "`index` replaces a document; `update` merges the payload into it."
+            },
+            "auth": {
+                "type": ["object", "string"],
+                "description": "`oauth2` or `aws_sigv4` credentials, as on `http_bulk`; JSON in a URI."
             }
         }),
         &["url", "index"],
@@ -280,16 +303,27 @@ fn elasticsearch(_route: &str, value: &Value) -> anyhow::Result<Value> {
         headers.insert("Authorization".into(), json!(format!("ApiKey {key}")));
     }
     let path = format!("/{index}/_bulk");
+    let update = config.mode == ElasticsearchMode::Update;
+    // A URI carries the object as JSON text.
+    let auth = match config.auth {
+        Some(Value::String(text)) => {
+            Some(serde_json::from_str(&text).context("'auth' is not valid JSON")?)
+        }
+        auth => auth,
+    };
+    let verb = if update { "update" } else { "index" };
     Ok(json!({
         "url": base_url("elasticsearch", &config.url)?,
         "headers": headers,
+        "auth": auth,
         "operation": config.operation,
         "compression": config.compression,
         "request_timeout_ms": config.request_timeout_ms,
         "upsert": {
             "path": path,
-            "action": format!(r#"{{"index":{{"_id":"${{payload:{id_field}}}"}}}}"#),
-            "result": {"items": {"path": "/items", "error": "/index/error/reason"}}
+            "action": format!(r#"{{"{verb}":{{"_id":"${{payload:{id_field}}}"}}}}"#),
+            "document": update.then_some(r#"{"doc":{document},"doc_as_upsert":true}"#),
+            "result": {"items": {"path": "/items", "error": format!("/{verb}/error/reason")}}
         },
         "delete": {
             "path": path,
@@ -574,6 +608,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn elasticsearch_update_mode_merges_and_reports_failures_per_document() {
+        let answer = r#"{"errors":true,"items":[{"update":{"status":200}},{"update":{"status":400,"error":{"reason":"bad field"}}}]}"#;
+        let server = StubHttpServer::start(move |_| (200, answer.to_string()))
+            .await
+            .expect("stub server");
+        let config = json!({
+            "url": server.url(), "index": "books", "id_field": "isbn", "mode": "update"
+        });
+        let publisher = preset("elasticsearch")
+            .create_publisher("route", &config)
+            .await
+            .unwrap();
+        let sent = publisher
+            .send_batch(vec![
+                r#"{"isbn":"a","stock":3}"#.into(),
+                r#"{"isbn":"b","stock":"x"}"#.into(),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            calls(&server),
+            vec![(
+                "POST".to_string(),
+                "/books/_bulk".to_string(),
+                concat!(
+                    "{\"update\":{\"_id\":\"a\"}}\n",
+                    "{\"doc\":{\"isbn\":\"a\",\"stock\":3},\"doc_as_upsert\":true}\n",
+                    "{\"update\":{\"_id\":\"b\"}}\n",
+                    "{\"doc\":{\"isbn\":\"b\",\"stock\":\"x\"},\"doc_as_upsert\":true}\n",
+                )
+                .to_string()
+            )]
+        );
+        let crate::outcomes::SentBatch::Partial { failed, .. } = sent else {
+            panic!("the second document was refused");
+        };
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0.payload.as_ref(), br#"{"isbn":"b","stock":"x"}"#);
+        assert!(failed[0].1.to_string().contains("bad field"));
+    }
+
     #[test]
     fn the_scheme_picks_http_or_https_and_a_bad_config_is_named() {
         let url = |value: Value| typesense("route", &value).map(|config| config["url"].clone());
@@ -596,6 +673,14 @@ mod tests {
             ),
             ("elasticsearch", json!({"url": "http://h"})),
             ("elasticsearch", json!({"url": "http://h", "index": ".."})),
+            (
+                "elasticsearch",
+                json!({"url": "http://h", "index": "a", "auth": "{oauth2"}),
+            ),
+            (
+                "elasticsearch",
+                json!({"url": "http://h", "index": "a", "mode": "merge"}),
+            ),
             (
                 "meilisearch",
                 json!({"url": "http://h", "index": "a", "primary_key": "id&x=1"}),

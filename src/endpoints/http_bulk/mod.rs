@@ -11,9 +11,11 @@
 //! Messages are sent in order: a batch is cut into runs of upserts and deletes,
 //! and after a request that may be retried nothing later in the batch is sent.
 
+mod auth;
 mod consumer;
 mod presets;
 mod publisher;
+mod query;
 pub(crate) use consumer::cursor_checkpoint;
 pub use consumer::HttpBulkConsumer;
 pub use presets::{preset_names, register_preset};
@@ -28,11 +30,12 @@ const JSON: &str = "application/json";
 /// Most characters of a response body quoted in an error.
 const QUOTED_RESPONSE_CHARS: usize = 500;
 
-/// The client, base URL and headers both directions of the endpoint share.
+/// The client, base URL, headers and credentials both directions of the endpoint share.
 struct Connection {
     http: reqwest::Client,
     base: String,
     headers: HeaderMap,
+    auth: auth::Auth,
 }
 
 impl Connection {
@@ -105,7 +108,21 @@ impl Connection {
                 .context("Failed to build http_bulk client")?,
             base: url.as_str().trim_end_matches('/').to_string(),
             headers,
+            auth: auth::Auth::new(config.auth.as_ref())?,
         })
+    }
+
+    /// A request to `url` with the configured headers.
+    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
+        self.http.request(method, url).headers(self.headers.clone())
+    }
+
+    /// Sends `request` authenticated; every request of the endpoint goes through here.
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, auth::SendError> {
+        self.auth.send(&self.http, request).await
     }
 }
 
@@ -128,7 +145,7 @@ mod tests {
             "/apps/mq-bridge-app/dev/docs/connectors/"
         );
         for (name, recipes) in [
-            ("http-bulk.md", 7),
+            ("http-bulk.md", 8),
             ("typesense.md", 2),
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),

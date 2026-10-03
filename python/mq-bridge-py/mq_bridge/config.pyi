@@ -243,8 +243,24 @@ class GrpcConfig(TypedDict, total=False):
     url: Required[str]
 
 
+class HttpBulkAuth(TypedDict, total=False):
+    """How `http_bulk` requests are authenticated beyond `headers`. Set at most one field."""
+    aws_sigv4: Optional[HttpBulkAwsSigV4]
+    oauth2: Optional[HttpBulkOAuth2]
+
+
+class HttpBulkAwsSigV4(TypedDict, total=False):
+    """AWS Signature Version 4 signing for `http_bulk`."""
+    access_key: Optional[str]
+    region: Required[str]
+    secret_key: Optional[str]
+    service: Required[str]
+    session_token: Optional[str]
+
+
 class HttpBulkConfig(TypedDict, total=False):
     """HTTP APIs that take or return many JSON documents in one request, such as search engines."""
+    auth: Optional[HttpBulkAuth]
     compression: Compression
     connect_timeout_ms: Optional[int]
     delete: Optional[HttpBulkDelete]
@@ -252,6 +268,7 @@ class HttpBulkConfig(TypedDict, total=False):
     headers: Dict[str, str]
     max_request_bytes: int
     operation: Optional[str]
+    query: Optional[HttpBulkQuery]
     read: Optional[HttpBulkRead]
     request_timeout_ms: Optional[int]
     tls: TlsConfig
@@ -291,12 +308,35 @@ class HttpBulkJob(TypedDict, total=False):
     poll: Required[str]
     status: Required[str]
     succeeded: Required[List[str]]
+    timeout_ms: int
 
 
 class HttpBulkLines(TypedDict, total=False):
     """A response with one JSON line per document, in request order."""
     error: Optional[str]
     success: Required[str]
+
+
+class HttpBulkOAuth2(TypedDict, total=False):
+    """OAuth2 client credentials grant for `http_bulk`."""
+    client_id: Required[str]
+    client_secret: Required[str]
+    scope: Optional[str]
+    token_url: Required[str]
+
+
+class HttpBulkQuery(TypedDict, total=False):
+    """The `http_bulk` request that answers a batch of lookups, one answer per message in order."""
+    content_type: Optional[str]
+    envelope: Optional[str]
+    error: Optional[str]
+    format: HttpBulkFormat
+    found: Optional[str]
+    method: Optional[str]
+    path: Required[str]
+    request: Required[str]
+    responses: str
+    value: Optional[str]
 
 
 class HttpBulkRead(TypedDict, total=False):
@@ -323,6 +363,7 @@ class HttpBulkUpsert(TypedDict, total=False):
     """The `http_bulk` request that writes documents."""
     action: Optional[str]
     content_type: Optional[str]
+    document: Optional[str]
     envelope: Optional[str]
     format: HttpBulkFormat
     method: Optional[str]

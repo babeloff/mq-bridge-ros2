@@ -594,6 +594,22 @@ impl SecretExtractor for HttpBulkConfig {
     fn extract_secrets(&mut self, prefix: &str, secrets: &mut HashMap<String, String>) {
         extract_sensitive_url(&mut self.url, prefix, "URL", secrets);
         extract_sensitive_string_map_entries(&mut self.headers, prefix, "HEADERS", secrets);
+        if let Some(oauth2) = self.auth.as_mut().and_then(|auth| auth.oauth2.as_mut()) {
+            secrets.insert(
+                format!("{prefix}__AUTH__OAUTH2__CLIENT_SECRET"),
+                std::mem::take(&mut oauth2.client_secret),
+            );
+        }
+        if let Some(aws) = self.auth.as_mut().and_then(|auth| auth.aws_sigv4.as_mut()) {
+            for (name, value) in [
+                ("SECRET_KEY", &mut aws.secret_key),
+                ("SESSION_TOKEN", &mut aws.session_token),
+            ] {
+                if let Some(value) = value.take() {
+                    secrets.insert(format!("{prefix}__AUTH__AWS_SIGV4__{name}"), value);
+                }
+            }
+        }
         if let Some(read) = self.read.as_mut() {
             extract_sensitive_optional_url(
                 &mut read.checkpoint_store,

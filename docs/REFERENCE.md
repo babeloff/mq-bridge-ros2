@@ -944,7 +944,7 @@ whether they were found. On an input, the handler already sees the enriched mess
   response, or HTTP status 404, writes `null`. The metadata `lookup.found` is `true` or
   `false`, for a following [`switch`](#switch).
 - `from` must answer: `http`, `static`, `nats` / `memory` with `request_reply: true`,
-  `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, or `grpc` to an
+  `mongodb` with `find`, `sqlx` or `clickhouse` with `lookup_query`, `http_bulk` with `query`, or `grpc` to an
   mq-bridge `grpc` input whose route replies. An endpoint that only acknowledges fails the
   message as non-retryable.
 - `mongodb.find` is an Extended-JSON filter template and answers with the first matching
@@ -997,6 +997,25 @@ query answers the whole batch instead of one query per message:
         collection: "customers"
         find: '{"_id": "${payload:customer_id}"}'
     into: customer
+```
+An `http_bulk` endpoint with `query` batches too: one HTTP request answers every message
+of the batch, matched by position. An entry that reports an error makes it ask again one
+message at a time, so only that message fails.
+
+```yaml middleware
+- lookup:
+    from:
+      http_bulk:
+        url: "http://localhost:9200"
+        query:
+          path: /books/_mget
+          format: json_array
+          request: '{"_id":"${payload:isbn}"}'
+          envelope: '{"docs":{requests}}'
+          responses: /docs
+          value: /_source
+          found: /found
+    into: book
 ```
 - HTTP 408, 429 and 5xx fail the message as retryable, other statuses as non-retryable.
   Without `pass_through_status: true` the `http` endpoint already fails on any non-2xx

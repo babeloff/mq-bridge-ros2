@@ -321,8 +321,9 @@ Things most endpoints need, so a plugin doesn't write them itself:
   wraps an error as `Retryable` or `NonRetryable` on that basis.
 - **`mq_bridge::support::poll_job::poll_until`.** Polls a job the remote system
   runs asynchronously until it reports an end, backing off from 10 ms to 250 ms.
-  It has no deadline: a callback fires every 60 s so the endpoint can log that it
-  is still waiting. All three durations are set through `PollSchedule`.
+  A callback fires every 60 s so the endpoint can log that it is still waiting,
+  and after 5 minutes it answers `None`. All four durations are set through
+  `PollSchedule`.
 - **`mq_bridge::support::change_op::ChangeOp`.** `ChangeOp::classify(operation,
   delete_values)` maps a change record's operation name onto `Upsert`, `Delete`
   or `Truncate`, for a sink fed by a CDC source.

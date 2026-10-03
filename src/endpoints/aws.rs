@@ -628,7 +628,7 @@ impl MessagePublisher for AwsPublisher {
     }
 }
 
-async fn load_aws_config(config: &AwsConfig) -> aws_config::SdkConfig {
+pub(crate) async fn load_aws_config(config: &AwsConfig) -> aws_config::SdkConfig {
     let mut loader = aws_config::defaults(BehaviorVersion::latest());
     if let Some(region) = &config.region {
         loader = loader.region(aws_config::Region::new(region.clone()));

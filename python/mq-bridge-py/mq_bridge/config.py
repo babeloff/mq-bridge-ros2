@@ -20,12 +20,16 @@ EncryptionConfig = dict
 Endpoint = dict
 FileConfig = dict
 GrpcConfig = dict
+HttpBulkAuth = dict
+HttpBulkAwsSigV4 = dict
 HttpBulkConfig = dict
 HttpBulkCursor = dict
 HttpBulkDelete = dict
 HttpBulkItems = dict
 HttpBulkJob = dict
 HttpBulkLines = dict
+HttpBulkOAuth2 = dict
+HttpBulkQuery = dict
 HttpBulkRead = dict
 HttpBulkResult = dict
 HttpBulkUpsert = dict
@@ -128,6 +132,8 @@ __all__ = [
     "FileConfig",
     "FileFormat",
     "GrpcConfig",
+    "HttpBulkAuth",
+    "HttpBulkAwsSigV4",
     "HttpBulkConfig",
     "HttpBulkCursor",
     "HttpBulkDelete",
@@ -135,6 +141,8 @@ __all__ = [
     "HttpBulkItems",
     "HttpBulkJob",
     "HttpBulkLines",
+    "HttpBulkOAuth2",
+    "HttpBulkQuery",
     "HttpBulkRead",
     "HttpBulkResult",
     "HttpBulkUpsert",

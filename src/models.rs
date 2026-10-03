@@ -2844,7 +2844,8 @@ pub struct ClickHouseConfig {
 ///
 /// As an output, a batch of upserts is sent as one NDJSON or JSON-array body and deletes as a
 /// list of ids; `result` describes how the target reports success. As an input, `read` pages
-/// through a JSON listing by a cursor. The endpoint knows no product by name.
+/// through a JSON listing by a cursor. With `query` it answers a batch of lookups in one
+/// request. The endpoint knows no product by name.
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -2855,9 +2856,15 @@ pub struct HttpBulkConfig {
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub headers: HashMap<String, String>,
-    /// (Publisher only) The request that writes documents. Required for an output.
+    /// Credentials that are fetched or computed per request: an OAuth2 token or AWS SigV4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<HttpBulkAuth>,
+    /// (Publisher only) The request that writes documents. An output needs it or `query`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upsert: Option<HttpBulkUpsert>,
+    /// (Publisher only) The request that answers lookups. Excludes `upsert` and `delete`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<HttpBulkQuery>,
     /// (Consumer only) The request that reads a page of documents. Required for an input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read: Option<HttpBulkRead>,
@@ -2919,9 +2926,99 @@ pub struct HttpBulkUpsert {
     /// `json_array` only: the body around the array, e.g. `{"docs": {documents}}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope: Option<String>,
+    /// Template around each document, e.g. `{"doc": {document}, "doc_as_upsert": true}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<String>,
     /// How the target reports the outcome. Unset = the HTTP status alone decides.
     #[serde(default)]
     pub result: HttpBulkResult,
+}
+
+/// The `http_bulk` request that answers a batch of lookups, one answer per message in order.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkQuery {
+    /// Path and query appended to `url`, e.g. `/books/_mget`.
+    pub path: String,
+    /// HTTP method. Defaults to `POST`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    /// Body shape: `ndjson` (default) or `json_array`.
+    #[serde(default)]
+    pub format: HttpBulkFormat,
+    /// `Content-Type` header. Defaults to `application/x-ndjson` or `application/json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    /// Template of one message's part of the body, e.g. `{"_id": "${payload:id}"}`.
+    pub request: String,
+    /// `json_array` only: the body around the array, e.g. `{"docs": {requests}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<String>,
+    /// JSON pointer to the array of answers, e.g. `/responses`. Empty = the response is the array.
+    #[serde(default)]
+    pub responses: String,
+    /// JSON pointer in an answer to the value returned, e.g. `/_source`. Unset = the whole answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// JSON pointer in an answer to a boolean; `false` or missing means not found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub found: Option<String>,
+    /// JSON pointer in an answer to its error text. An answer that has it fails its message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// How `http_bulk` requests are authenticated beyond `headers`. Set at most one field.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkAuth {
+    /// OAuth2 client credentials: a bearer token is fetched, cached and refreshed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth2: Option<HttpBulkOAuth2>,
+    /// AWS Signature Version 4 on every request. Needs the `aws` feature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_sigv4: Option<HttpBulkAwsSigV4>,
+}
+
+/// OAuth2 client credentials grant for `http_bulk`.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkOAuth2 {
+    /// Token endpoint, e.g. `https://login.example.com/oauth2/token`.
+    pub token_url: String,
+    /// Client id.
+    pub client_id: String,
+    /// Client secret.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    pub client_secret: String,
+    /// Scopes to ask for, separated by spaces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// AWS Signature Version 4 signing for `http_bulk`.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct HttpBulkAwsSigV4 {
+    /// AWS region, e.g. `eu-west-1`.
+    pub region: String,
+    /// Service name to sign for, e.g. `es` or `aoss`.
+    pub service: String,
+    /// Access key id. Unset = the default AWS credential chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_key: Option<String>,
+    /// Secret access key.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_key: Option<String>,
+    /// Session token of temporary credentials.
+    #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_token: Option<String>,
 }
 
 /// The `http_bulk` request that reads one page of documents.
@@ -3043,7 +3140,7 @@ pub struct HttpBulkLines {
 }
 
 /// A job the target runs after answering, polled until it ends.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HttpBulkJob {
@@ -3060,6 +3157,23 @@ pub struct HttpBulkJob {
     /// JSON pointer to the error text of a failed job, e.g. `/error/message`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// How long the job may run before its documents fail as retryable.
+    #[serde(default = "default_http_bulk_job_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+impl Default for HttpBulkJob {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            poll: String::new(),
+            status: String::new(),
+            succeeded: Vec::new(),
+            failed: Vec::new(),
+            error: None,
+            timeout_ms: default_http_bulk_job_timeout_ms(),
+        }
+    }
 }
 
 // --- Common Configuration ---

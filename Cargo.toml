@@ -224,6 +224,8 @@ tokio-websockets = { version = "0.13", optional = true, default-features = false
 aws-config = { version = "1.10", optional = true, default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
 aws-sdk-sqs = { version = "1.105", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
 aws-sdk-sns = { version = "1.107", optional = true, default-features = false, features = ["rt-tokio", "default-https-client"] }
+# Signs `http_bulk` requests (managed OpenSearch). Already in the tree through aws-config.
+aws-sigv4 = { version = "1.6", optional = true }
 
 # SQLx
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "mysql", "any", "sqlite-bundled"], optional = true }
@@ -385,7 +387,7 @@ mongodb = ["dep:mongodb"]
 mqtt = ["rumqttc", "rustls", "tokio-rustls", "rustls-pemfile"]
 http = ["dep:arc-swap", "hyper", "hyper-util", "hyper-rustls", "http-body-util", "dep:http-body", "rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots", "h2", "dep:flate2", "dep:lz4_flex", "dep:zstd"]
 websocket = ["dep:tokio-websockets"]
-aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns"]
+aws = ["aws-config", "aws-sdk-sqs", "aws-sdk-sns", "aws-sigv4"]
 # Runtime-loaded IBM MQ client via dlopen: builds with no SDK present; the IBM
 # redistributable client is only needed at runtime, and only if an ibm-mq
 # endpoint is actually used.

@@ -2094,9 +2094,9 @@ fn check_publisher_recursive(
         }
         #[cfg(feature = "http-bulk")]
         EndpointType::HttpBulk(cfg) => {
-            if cfg.upsert.is_none() {
+            if cfg.upsert.is_none() && cfg.query.is_none() {
                 return Err(anyhow!(
-                    "http_bulk endpoint used as a publisher requires 'upsert' (the request that writes documents)."
+                    "http_bulk endpoint used as a publisher requires 'upsert' (the request that writes documents) or 'query' (the request that answers lookups)."
                 ));
             }
             if cfg.read.is_some() {

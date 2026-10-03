@@ -281,6 +281,10 @@ pub(crate) fn default_http_bulk_max_request_bytes() -> usize {
     10 * 1024 * 1024
 }
 
+pub(crate) fn default_http_bulk_job_timeout_ms() -> u64 {
+    300_000
+}
+
 pub(crate) fn default_http_bulk_id_field() -> String {
     "id".to_string()
 }

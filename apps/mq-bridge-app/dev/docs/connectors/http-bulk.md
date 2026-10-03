@@ -12,6 +12,9 @@ you describe three things, and a new target is a few lines of configuration:
 As an input you describe one: **read**, the request that lists a page of
 documents and where the next page starts. See [Reading](#reading).
 
+For a [`lookup`](../cookbook/lookup.md) you describe **query**: the request that
+answers a whole batch of lookups at once. See [Lookups](#lookups).
+
 It needs the `http-bulk` feature, which `full` includes.
 
 ## On the command line
@@ -218,13 +221,60 @@ input:
 With direct access to the database, the [Postgres connector](./postgres.md) is
 the better source: its change stream sees updates and deletes.
 
+## Lookups
+
+With `query` the endpoint writes nothing: it answers the
+[`lookup`](../cookbook/lookup.md) middleware, one request for a whole batch
+of messages instead of one per message. Each message renders `request`, the
+parts are joined into one body, and the answers are matched to the messages by
+their position in the array at `responses`. The endpoint keeps no state and
+caches nothing.
+
+This output looks up each order's book in Elasticsearch with one `_mget` per
+batch, then writes the enriched orders:
+
+```yaml
+output:
+  middlewares:
+    - lookup:
+        from:
+          http_bulk:
+            url: http://localhost:9200
+            query:
+              path: /books/_mget
+              format: json_array
+              request: '{"_id":"${payload:isbn}"}'
+              envelope: '{"docs":{requests}}'
+              responses: /docs
+              value: /_source
+              found: /found
+        into: book
+  http_bulk:
+    url: http://localhost:9200
+    upsert:
+      path: /orders/_bulk
+      action: '{"index":{"_id":"${payload:id}"}}'
+```
+
+Two more shapes, as the `query` section alone:
+
+| Target | `query` |
+| --- | --- |
+| Elasticsearch `_msearch` | `path: /books/_msearch`, `request:` two lines, `{}` and `{"query":{"term":{"isbn":"${payload:isbn}"}},"size":1}`, `responses: /responses`, `value: /hits/hits/0/_source`, `error: /error/reason` |
+| Qdrant batch search | `path: /collections/books/points/search/batch`, `format: json_array`, `request: '{"vector":${payload:vector \| raw},"limit":3}'`, `envelope: '{"searches":{requests}}'`, `responses: /result` |
+
+These three shapes were run against a stub server only, not against
+Elasticsearch or Qdrant.
+
 ## Fields
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `url` | required | Base URL of the target |
 | `headers` | none | Sent with every request; stored as secrets |
-| `upsert` | required for an output | The request that writes documents |
+| `auth` | none | `oauth2` or `aws_sigv4` credentials for every request; see below |
+| `upsert` | an output needs it or `query` | The request that writes documents |
+| `query` | none | The request that answers lookups; excludes `upsert`, `delete` and `operation` |
 | `read` | required for an input | The request that reads a page of documents |
 | `delete` | none | The request that removes documents |
 | `operation` | none | Template for a message's operation; without it every message is an upsert |
@@ -245,7 +295,30 @@ the better source: its change stream sees updates and deletes.
 | `content_type` | by format | `application/x-ndjson` or `application/json` |
 | `action` | none | `ndjson` only: a line sent before each document, e.g. `{"index":{"_id":"${payload:id}"}}`. Values taken from the message are JSON-escaped. |
 | `envelope` | none | `json_array` only: the body around the array; `{documents}` marks where the array goes |
+| `document` | none | Template around each document; `{document}` marks where the payload goes, e.g. `{"doc":{document},"doc_as_upsert":true}`. Values taken from the message are JSON-escaped. |
 | `result` | HTTP status | See below |
+
+`query`:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `path` | required | Path and query appended to `url` |
+| `method` | `POST` | HTTP method |
+| `format` | `ndjson` | `ndjson` (each lookup adds its lines) or `json_array` (each lookup adds one entry) |
+| `content_type` | by format | `application/x-ndjson` or `application/json` |
+| `request` | required | Template of one lookup's part of the body. Values taken from the message are JSON-escaped; `\| raw` inserts a JSON value as it is. With `ndjson` it may hold several lines. |
+| `envelope` | none | `json_array` only: the body around the array; `{requests}` marks where the array goes |
+| `responses` | the response | JSON pointer to the array with one answer per lookup, in order |
+| `value` | the entry | JSON pointer, inside an entry, to what the lookup answers |
+| `found` | none | JSON pointer, inside an entry, to a boolean; anything but `true` answers `null` |
+| `error` | none | JSON pointer, inside an entry, to an error text; set, it fails that lookup |
+
+`auth` takes one of:
+
+| Field | Meaning |
+| --- | --- |
+| `oauth2` | Client credentials grant: `token_url`, `client_id`, `client_secret` and an optional `scope`. The token is sent as `Authorization: Bearer`. |
+| `aws_sigv4` | Signs each request: `region` and `service` (`es`, `aoss`, …). `access_key`, `secret_key` and `session_token` are optional; without them the AWS default credential chain is used. Needs a build with the `aws` feature, which `full` includes. |
 
 `read`:
 
@@ -283,7 +356,7 @@ the better source: its change stream sees updates and deletes.
 | --- | --- |
 | `lines` | The response has one JSON line per document, in order. `success` is a JSON pointer to a boolean; `error` points to the reason. |
 | `items` | The response is one JSON document with an array entry per document, in order. `path` is a JSON pointer to the array (empty when the response is the array); `error` points to an entry's error text, and an entry that has it failed. |
-| `job` | The response names a job. `id` points to it, `poll` is the path asked with GET (`{id}` is replaced), `status` points to its state. `succeeded` and `failed` list the final states; any other state is polled again. `error` points to the reason. |
+| `job` | The response names a job. `id` points to it, `poll` is the path asked with GET (`{id}` is replaced), `status` points to its state. `succeeded` and `failed` list the final states; any other state is polled again. `error` points to the reason. `timeout_ms` (default `300000`) is how long the job may run. |
 
 Without `result`, a 2xx status means every document was written.
 
@@ -307,9 +380,35 @@ Without `result`, a 2xx status means every document was written.
 - **Retries follow the status.** 408, 429 and 5xx (except 501 and 505) and
   connection errors are retryable; other statuses are not. Add the `retry`
   middleware to retry them and `dlq` to keep what failed for good.
-- **A job has no deadline.** The endpoint polls until the job ends and logs a
-  warning every minute.
+- **A job has a deadline.** The endpoint polls until the job ends, logs a
+  warning every minute and gives up after `timeout_ms` (5 minutes unless set).
+  The documents of that request then fail as retryable, with the job id and
+  the last state or poll error seen. A poll that keeps failing ends the same
+  way. The job may still finish later, so retry only where sending a document
+  twice is safe, as it is for an upsert by id.
 - **Truncate is not applied.** A truncate message fails for good.
+- **A token is fetched once and shared.** With `auth.oauth2` the token is
+  cached and replaced a minute before it expires (at half its lifetime if that
+  is shorter); concurrent batches wait for one token request. A request
+  answered 401 gets a new token and is sent once more; a second 401 fails as any
+  other status. The client id and secret go in the form body of the token
+  request. A failing token endpoint fails the batch by its status.
+- **Credentials cover every request**: upserts, deletes, queries, reads and job
+  polls. `client_secret`, `secret_key` and `session_token` are stored as
+  secrets. A SigV4 signature covers the body as sent, after compression.
+
+As a lookup (`query`):
+
+- **One request per batch**, split by `max_request_bytes` like an upsert. A
+  refused request fails every lookup in it, retryable by its status.
+- **An answer the target left out is `null`**, as is an entry whose `found` is
+  not `true` or that has nothing at `value`.
+- **An entry that reports an error fails only its message.** The batch is then
+  asked again one lookup at a time, with a warning in the log, so the other
+  messages still get their answers.
+- **A single lookup is a batch of one**: the same request with one part.
+- **A `json_array` part must be valid JSON**; one that is not fails its message
+  for good and is left out of the request.
 
 As an input:
 

@@ -5,10 +5,11 @@
 
 //! Output for HTTP APIs that take many JSON documents in one request.
 
+use super::query::Query;
 use super::{quoted, Connection, JSON};
 use crate::models::{
     Compression, HttpBulkConfig, HttpBulkDelete, HttpBulkFormat, HttpBulkItems, HttpBulkJob,
-    HttpBulkLines, HttpBulkResult,
+    HttpBulkLines, HttpBulkResult, HttpBulkUpsert,
 };
 use crate::support::change_op::ChangeOp;
 use crate::support::compression_pool::{gzip_default, lz4_pooled, zstd_pooled};
@@ -20,25 +21,28 @@ use crate::CanonicalMessage;
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_ENCODING, CONTENT_TYPE};
+use reqwest::header::{HeaderValue, CONTENT_ENCODING, CONTENT_TYPE};
 use serde_json::Value;
 use std::ops::Range;
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 use tracing::{trace, warn};
 
 const IDS: &str = "{ids}";
 const JOB_ID: &str = "{id}";
 const DOCUMENTS: &str = "{documents}";
+const DOCUMENT: &str = "{document}";
 const LINE_ID: &str = "{id}";
 const NDJSON: &str = "application/x-ndjson";
 
 /// A failed request, kept as text so every message it covered gets its own error.
-struct Failure {
-    retryable: bool,
-    text: String,
+pub(super) struct Failure {
+    pub(super) retryable: bool,
+    pub(super) text: String,
 }
 
 impl Failure {
-    fn permanent(text: String) -> Self {
+    pub(super) fn permanent(text: String) -> Self {
         Self {
             retryable: false,
             text,
@@ -52,7 +56,7 @@ impl Failure {
         }
     }
 
-    fn error(&self) -> PublisherError {
+    pub(super) fn error(&self) -> PublisherError {
         let error = anyhow!("{}", self.text);
         if self.retryable {
             PublisherError::Retryable(error)
@@ -77,6 +81,9 @@ impl ResultMode {
             (None, None, Some(job)) => {
                 if !job.poll.contains(JOB_ID) {
                     bail!("http_bulk {request}.result.job.poll must contain '{JOB_ID}'");
+                }
+                if job.timeout_ms == 0 {
+                    bail!("http_bulk {request}.result.job.timeout_ms must be greater than 0");
                 }
                 Ok(Self::Job(job.clone()))
             }
@@ -113,7 +120,11 @@ impl Request {
 }
 
 /// The text before and after a placeholder, which must occur exactly once.
-fn around(template: &str, placeholder: &str, name: &str) -> anyhow::Result<(String, String)> {
+pub(super) fn around(
+    template: &str,
+    placeholder: &str,
+    name: &str,
+) -> anyhow::Result<(String, String)> {
     match template.split_once(placeholder) {
         Some((before, after)) if !after.contains(placeholder) => {
             Ok((before.to_string(), after.to_string()))
@@ -139,10 +150,12 @@ struct Chunk {
 }
 
 pub struct HttpBulkPublisher {
-    http: reqwest::Client,
-    base: String,
-    headers: HeaderMap,
-    upsert: Request,
+    connection: Connection,
+    /// Unset on an endpoint that only answers lookups.
+    upsert: Option<Request>,
+    query: Option<Query>,
+    /// The templates before and after each document.
+    document: Option<(CompiledTemplate, CompiledTemplate)>,
     format: HttpBulkFormat,
     content_type: HeaderValue,
     action: Option<CompiledTemplate>,
@@ -156,13 +169,20 @@ pub struct HttpBulkPublisher {
 
 impl HttpBulkPublisher {
     pub fn new(config: &HttpBulkConfig) -> anyhow::Result<Self> {
-        let Connection {
-            http,
-            base,
-            headers,
-        } = Connection::new(config)?;
-        let Some(upsert) = &config.upsert else {
-            bail!("http_bulk used as an output needs 'upsert'");
+        let connection = Connection::new(config)?;
+        let query = config.query.as_ref().map(Query::new).transpose()?;
+        if query.is_some()
+            && (config.upsert.is_some() || config.delete.is_some() || config.operation.is_some())
+        {
+            bail!(
+                "http_bulk 'query' answers lookups and excludes 'upsert', 'delete' and 'operation'"
+            );
+        }
+        let unused = HttpBulkUpsert::default();
+        let upsert = match (&config.upsert, &query) {
+            (Some(upsert), _) => upsert,
+            (None, Some(_)) => &unused,
+            (None, None) => bail!("http_bulk used as an output needs 'upsert' or 'query'"),
         };
         let content_type = upsert.content_type.as_deref().unwrap_or({
             match upsert.format {
@@ -178,6 +198,20 @@ impl HttpBulkPublisher {
             Some(_) if ndjson => bail!("http_bulk upsert.envelope needs format 'json_array'"),
             Some(envelope) => around(envelope, DOCUMENTS, "upsert.envelope")?,
             None => Default::default(),
+        };
+        let document = match &upsert.document {
+            Some(document) => {
+                let (before, after) = around(document, DOCUMENT, "upsert.document")?;
+                if ndjson && !before.trim_start().starts_with('{') {
+                    bail!("http_bulk upsert.document must be a JSON object for format 'ndjson'");
+                }
+                let compile = |part: &str| {
+                    CompiledTemplate::compile(part, Some(JSON))
+                        .context("Invalid http_bulk upsert.document template")
+                };
+                Some((compile(&before)?, compile(&after)?))
+            }
+            None => None,
         };
         let delete = match &config.delete {
             Some(delete) => {
@@ -211,16 +245,19 @@ impl HttpBulkPublisher {
             }
             None => None,
         };
-        Ok(Self {
-            http,
-            base,
-            headers,
-            upsert: Request::new(
+        let request = config.upsert.as_ref().map(|upsert| {
+            Request::new(
                 upsert.method.as_deref(),
                 &upsert.path,
                 &upsert.result,
                 "upsert",
-            )?,
+            )
+        });
+        Ok(Self {
+            connection,
+            upsert: request.transpose()?,
+            query,
+            document,
             format: upsert.format,
             content_type: HeaderValue::from_str(content_type)
                 .context("http_bulk upsert.content_type is not a valid header value")?,
@@ -262,6 +299,17 @@ impl HttpBulkPublisher {
         if payload.first() != Some(&b'{') {
             bail!("the payload is not a JSON object");
         }
+        let wrapped;
+        let payload = match &self.document {
+            Some((before, after)) => {
+                let mut text = before.render(Some(message));
+                text.extend_from_slice(payload);
+                text.extend_from_slice(&after.render(Some(message)));
+                wrapped = text;
+                wrapped.as_slice()
+            }
+            None => payload,
+        };
         match self.format {
             HttpBulkFormat::Ndjson => {
                 if let Some(action) = &self.action {
@@ -332,13 +380,15 @@ impl HttpBulkPublisher {
         run: Range<usize>,
         outcomes: &mut [Option<PublisherError>],
     ) -> Result<(), (usize, Failure)> {
+        let Some(upsert) = &self.upsert else {
+            let text = "http_bulk has no 'upsert' request configured".to_string();
+            return Err((run.start, Failure::permanent(text)));
+        };
         for chunk in self.upsert_chunks(messages, run, outcomes) {
-            let url = format!("{}{}", self.base, self.upsert.path);
+            let url = format!("{}{}", self.connection.base, upsert.path);
             let body = Some((self.content_type.clone(), self.close_body(chunk.body)));
-            let sent = self
-                .send(&self.upsert, &url, body, chunk.indices.len())
-                .await;
-            trace!(count = chunk.indices.len(), path = %self.upsert.path, "Upserted documents");
+            let sent = self.send(upsert, &url, body, chunk.indices.len()).await;
+            trace!(count = chunk.indices.len(), path = %upsert.path, "Upserted documents");
             record(sent, &chunk.indices, outcomes)?;
         }
         Ok(())
@@ -375,13 +425,13 @@ impl HttpBulkPublisher {
         }
         for chunk in ids.chunks(delete.max_ids) {
             let indices: Vec<usize> = chunk.iter().map(|(index, _)| *index).collect();
-            let mut url = format!("{}{}", self.base, request.path);
+            let mut url = format!("{}{}", self.connection.base, request.path);
             let body = match shape {
                 DeleteBody::Url => {
                     let list: Vec<String> = chunk.iter().map(|(_, id)| id_in_url(id)).collect();
                     url = format!(
                         "{}{}",
-                        self.base,
+                        self.connection.base,
                         request.path.replace(IDS, &list.join(","))
                     );
                     None
@@ -419,10 +469,7 @@ impl HttpBulkPublisher {
         documents: usize,
     ) -> Result<Vec<(usize, String)>, Failure> {
         let label = format!("{} {}", request.method, request.path);
-        let mut builder = self
-            .http
-            .request(request.method.clone(), url)
-            .headers(self.headers.clone());
+        let mut builder = self.connection.request(request.method.clone(), url);
         if let Some((content_type, body)) = body {
             builder = builder.header(CONTENT_TYPE, content_type);
             builder = match self.compress(body).await {
@@ -435,10 +482,10 @@ impl HttpBulkPublisher {
                 }
             };
         }
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| Failure::retryable(format!("{label} failed: {e}")))?;
+        let response = self.connection.send(builder).await.map_err(|e| Failure {
+            retryable: e.retryable,
+            text: format!("{label} failed: {e}"),
+        })?;
         let status = response.status();
         let text = response
             .text()
@@ -496,32 +543,57 @@ impl HttpBulkPublisher {
             })?;
         // The id comes from the server; encoded, it cannot leave its path segment.
         let in_url = utf8_percent_encode(&id, NON_ALPHANUMERIC).to_string();
-        let url = format!("{}{}", self.base, job.poll.replace(JOB_ID, &in_url));
-        let (this, url, id) = (self, url.as_str(), id.as_str());
-        poll_until(
-            PollSchedule::default(),
+        let url = format!(
+            "{}{}",
+            self.connection.base,
+            job.poll.replace(JOB_ID, &in_url)
+        );
+        let timeout = Duration::from_millis(job.timeout_ms);
+        let schedule = PollSchedule {
+            timeout,
+            ..PollSchedule::default()
+        };
+        let last = Mutex::new("no poll was answered".to_string());
+        let (this, url, id, last) = (self, url.as_str(), id.as_str(), &last);
+        let seen = move |text: String| *last.lock().unwrap_or_else(PoisonError::into_inner) = text;
+        let ended = poll_until(
+            schedule,
             |waited| warn!(job = id, waited = ?waited, "http_bulk job is still running"),
             || async move {
-                let response = this
-                    .http
-                    .get(url)
-                    .headers(this.headers.clone())
-                    .send()
-                    .await
-                    .ok()?;
+                let poll = this.connection.request(reqwest::Method::GET, url);
+                let response = match this.connection.send(poll).await {
+                    Ok(response) => response,
+                    Err(error) if error.retryable => {
+                        seen(format!("the poll failed: {error}"));
+                        return None;
+                    }
+                    Err(error) => {
+                        return Some(Err(Failure::permanent(format!(
+                            "polling job {id} failed: {error}"
+                        ))))
+                    }
+                };
                 let status = response.status();
-                let text = response.text().await.ok()?;
+                let text = match response.text().await {
+                    Ok(text) => text,
+                    Err(error) => {
+                        seen(format!("the poll response was cut off: {error}"));
+                        return None;
+                    }
+                };
                 if !status.is_success() {
-                    return (!http_status::is_retryable(status.as_u16())).then(|| {
-                        Err(Failure::permanent(format!(
-                            "polling job {id} answered {status}: {}",
-                            quoted(&text)
-                        )))
-                    });
+                    if http_status::is_retryable(status.as_u16()) {
+                        seen(format!("the poll answered {status}: {}", quoted(&text)));
+                        return None;
+                    }
+                    return Some(Err(Failure::permanent(format!(
+                        "polling job {id} answered {status}: {}",
+                        quoted(&text)
+                    ))));
                 }
                 let state: Option<Value> = serde_json::from_str(&text).ok();
                 let name = state.as_ref().and_then(|state| state.pointer(&job.status));
-                // A wrong pointer would otherwise be polled forever.
+                // A wrong pointer would otherwise be polled until the deadline.
                 let (Some(state), Some(name)) = (&state, name.and_then(Value::as_str)) else {
                     return Some(Err(Failure::permanent(format!(
                         "polling job {id} gave no state at '{}': {}",
@@ -542,11 +614,18 @@ impl HttpBulkPublisher {
                         "job {id} {name}: {reason}"
                     ))))
                 } else {
+                    seen(format!("state '{name}'"));
                     None
                 }
             },
         )
-        .await
+        .await;
+        ended.unwrap_or_else(|| {
+            let last = last.lock().unwrap_or_else(PoisonError::into_inner);
+            Err(Failure::retryable(format!(
+                "job {id} did not end within {timeout:?}; last seen: {last}"
+            )))
+        })
     }
 }
 
@@ -576,7 +655,7 @@ fn record(
     }
 }
 
-fn scalar_text(value: &Value) -> Option<String> {
+pub(super) fn scalar_text(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
         Value::Number(number) => Some(number.to_string()),
@@ -663,6 +742,29 @@ impl MessagePublisher for HttpBulkPublisher {
         if messages.is_empty() {
             return Ok(SentBatch::Ack);
         }
+        if let Some(query) = &self.query {
+            let answers = query
+                .answers(&self.connection, self.max_request_bytes, &messages)
+                .await
+                .map_err(|failure| failure.error())?;
+            let mut responses = Vec::new();
+            let mut failed = Vec::new();
+            for (message, answer) in messages.into_iter().zip(answers) {
+                match answer {
+                    Ok(value) => {
+                        let value = value.unwrap_or(Value::Null).to_string();
+                        responses.push(CanonicalMessage::new(value.into_bytes(), None));
+                    }
+                    Err(reason) => {
+                        failed.push((message, PublisherError::NonRetryable(anyhow!(reason))));
+                    }
+                }
+            }
+            return Ok(SentBatch::Partial {
+                responses: Some(responses),
+                failed,
+            });
+        }
         let operations: Vec<ChangeOp> = messages.iter().map(|m| self.operation(m)).collect();
         let mut outcomes: Vec<Option<PublisherError>> = messages.iter().map(|_| None).collect();
         let mut next = 0;
@@ -694,6 +796,35 @@ impl MessagePublisher for HttpBulkPublisher {
             }
         }
         SentBatch::from_outcomes(messages, outcomes)
+    }
+
+    /// One request for the whole batch. An answer that reports an error sends the
+    /// lookups again one by one, so only its own message fails.
+    async fn lookup_batch(
+        &self,
+        requests: &[CanonicalMessage],
+    ) -> Option<Result<Vec<Option<Value>>, PublisherError>> {
+        let query = self.query.as_ref()?;
+        let answers = query
+            .answers(&self.connection, self.max_request_bytes, requests)
+            .await;
+        let answers = match answers {
+            Ok(answers) => answers,
+            Err(failure) => return Some(Err(failure.error())),
+        };
+        let failed = answers.iter().filter(|answer| answer.is_err()).count();
+        if failed > 0 {
+            warn!(
+                failed,
+                of = requests.len(),
+                "http_bulk query: an answer reported an error, repeating the lookups one by one"
+            );
+            return None;
+        }
+        Some(Ok(answers
+            .into_iter()
+            .map(Result::unwrap_or_default)
+            .collect()))
     }
 
     /// With `operation` set the messages are changes, and a delete must not
@@ -879,6 +1010,87 @@ mod tests {
         assert!(matches!(sent, SentBatch::Ack));
         assert_eq!(polls.load(Ordering::SeqCst), 3);
         assert_eq!(server.requests()[1].target, "/tasks/7");
+    }
+
+    fn job_config_with_timeout(timeout_ms: u64) -> Value {
+        let mut config = job_config();
+        config["upsert"]["result"]["job"]["timeout_ms"] = json!(timeout_ms);
+        config
+    }
+
+    #[tokio::test]
+    async fn a_job_that_never_ends_fails_as_retryable_at_the_deadline() {
+        let server = server(|request| match request.method.as_str() {
+            "POST" => (202, r#"{"taskUid":7}"#.to_string()),
+            _ => (200, r#"{"status":"processing"}"#.to_string()),
+        })
+        .await;
+        let sent = publisher(&server, job_config_with_timeout(60))
+            .send_batch(documents(&[r#"{"id":1}"#, r#"{"id":2}"#]))
+            .await
+            .unwrap();
+
+        let failed = failures(sent);
+        assert_eq!(failed.len(), 2);
+        for (_, retryable, text) in &failed {
+            assert!(*retryable, "{text}");
+            assert!(text.contains("job 7 did not end within 60ms"), "{text}");
+            assert!(text.contains("state 'processing'"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_poll_that_keeps_failing_ends_at_the_deadline_with_its_last_error() {
+        let server = server(|request| match request.method.as_str() {
+            "POST" => (202, r#"{"taskUid":7}"#.to_string()),
+            _ => (503, "warming up".to_string()),
+        })
+        .await;
+        let sent = publisher(&server, job_config_with_timeout(60))
+            .send_batch(documents(&[r#"{"id":1}"#]))
+            .await
+            .unwrap();
+
+        let failed = failures(sent);
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].1, "{}", failed[0].2);
+        assert!(failed[0].2.contains("503"), "{}", failed[0].2);
+        assert!(failed[0].2.contains("warming up"), "{}", failed[0].2);
+    }
+
+    #[tokio::test]
+    async fn a_job_that_ends_before_its_deadline_succeeds() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let seen = polls.clone();
+        let server = server(move |request| match request.method.as_str() {
+            "POST" => (202, r#"{"taskUid":7}"#.to_string()),
+            _ if seen.fetch_add(1, Ordering::SeqCst) < 2 => {
+                (200, r#"{"status":"processing"}"#.to_string())
+            }
+            _ => (200, r#"{"status":"succeeded"}"#.to_string()),
+        })
+        .await;
+        let sent = publisher(&server, job_config_with_timeout(10_000))
+            .send_batch(documents(&[r#"{"id":1}"#]))
+            .await
+            .unwrap();
+
+        assert!(matches!(sent, SentBatch::Ack));
+    }
+
+    #[test]
+    fn a_job_timeout_defaults_to_five_minutes_and_cannot_be_zero() {
+        let mut config = job_config();
+        config["url"] = json!("http://localhost:1");
+        let config: HttpBulkConfig = serde_json::from_value(config).unwrap();
+        let job = config.upsert.unwrap().result.job.unwrap();
+        assert_eq!(job.timeout_ms, 300_000);
+
+        let mut zero = job_config_with_timeout(0);
+        zero["url"] = json!("http://localhost:1");
+        let zero: HttpBulkConfig = serde_json::from_value(zero).unwrap();
+        let error = HttpBulkPublisher::new(&zero).err().expect("rejected");
+        assert!(error.to_string().contains("timeout_ms"), "{error}");
     }
 
     #[tokio::test]
@@ -1203,6 +1415,44 @@ mod tests {
             let config = json!({"url": "http://h", "upsert": {"path": "/d"}, "delete": delete});
             let error = refused(config);
             assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_document_template_wraps_every_document() {
+        let server = server(|_| (200, "{}".to_string())).await;
+        let wrapped = publisher(
+            &server,
+            json!({"upsert": {
+                "path": "/docs",
+                "format": "json_array",
+                "envelope": "{\"value\":{documents}}",
+                "document": "{\"@search.action\":\"merge\",\"key\":\"${payload:id}\",\"fields\":{document}}"
+            }}),
+        );
+        wrapped
+            .send_batch(documents(&[r#"{"id":"a","n":1}"#, r#"{"id":"b","n":2}"#]))
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(server.requests()[0].body.clone()).unwrap(),
+            concat!(
+                r#"{"value":[{"@search.action":"merge","key":"a","fields":{"id":"a","n":1}},"#,
+                r#"{"@search.action":"merge","key":"b","fields":{"id":"b","n":2}}]}"#
+            )
+        );
+
+        for (document, reason) in [
+            ("{\"doc\":1}", "{document}"),
+            ("[{document}]", "JSON object"),
+        ] {
+            let config = json!({
+                "url": "http://localhost:1",
+                "upsert": {"path": "/docs", "document": document}
+            });
+            let config: HttpBulkConfig = serde_json::from_value(config).unwrap();
+            let error = HttpBulkPublisher::new(&config).map(|_| ()).unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
         }
     }
 }

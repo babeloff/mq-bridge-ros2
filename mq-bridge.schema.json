@@ -1755,10 +1755,92 @@
         "url"
       ]
     },
-    "HttpBulkConfig": {
-      "description": "HTTP APIs that take or return many JSON documents in one request, such as search engines.\n\nAs an output, a batch of upserts is sent as one NDJSON or JSON-array body and deletes as a\nlist of ids; `result` describes how the target reports success. As an input, `read` pages\nthrough a JSON listing by a cursor. The endpoint knows no product by name.",
+    "HttpBulkAuth": {
+      "description": "How `http_bulk` requests are authenticated beyond `headers`. Set at most one field.",
       "type": "object",
       "properties": {
+        "aws_sigv4": {
+          "description": "AWS Signature Version 4 on every request. Needs the `aws` feature.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkAwsSigV4"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "oauth2": {
+          "description": "OAuth2 client credentials: a bearer token is fetched, cached and refreshed.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkOAuth2"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "HttpBulkAwsSigV4": {
+      "description": "AWS Signature Version 4 signing for `http_bulk`.",
+      "type": "object",
+      "properties": {
+        "access_key": {
+          "description": "Access key id. Unset = the default AWS credential chain.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "description": "AWS region, e.g. `eu-west-1`.",
+          "type": "string"
+        },
+        "secret_key": {
+          "description": "Secret access key.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        },
+        "service": {
+          "description": "Service name to sign for, e.g. `es` or `aoss`.",
+          "type": "string"
+        },
+        "session_token": {
+          "description": "Session token of temporary credentials.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "password"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "region",
+        "service"
+      ]
+    },
+    "HttpBulkConfig": {
+      "description": "HTTP APIs that take or return many JSON documents in one request, such as search engines.\n\nAs an output, a batch of upserts is sent as one NDJSON or JSON-array body and deletes as a\nlist of ids; `result` describes how the target reports success. As an input, `read` pages\nthrough a JSON listing by a cursor. With `query` it answers a batch of lookups in one\nrequest. The endpoint knows no product by name.",
+      "type": "object",
+      "properties": {
+        "auth": {
+          "description": "Credentials that are fetched or computed per request: an OAuth2 token or AWS SigV4.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkAuth"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "compression": {
           "description": "(Publisher only) Compression of request bodies (`none`, `gzip`, `zstd`, `lz4`).",
           "$ref": "#/$defs/Compression",
@@ -1817,6 +1899,17 @@
             "null"
           ]
         },
+        "query": {
+          "description": "(Publisher only) The request that answers lookups. Excludes `upsert` and `delete`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkQuery"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "read": {
           "description": "(Consumer only) The request that reads a page of documents. Required for an input.",
           "anyOf": [
@@ -1850,7 +1943,7 @@
           }
         },
         "upsert": {
-          "description": "(Publisher only) The request that writes documents. Required for an output.",
+          "description": "(Publisher only) The request that writes documents. An output needs it or `query`.",
           "anyOf": [
             {
               "$ref": "#/$defs/HttpBulkUpsert"
@@ -2016,6 +2109,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "timeout_ms": {
+          "description": "How long the job may run before its documents fail as retryable.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 300000,
+          "minimum": 0
         }
       },
       "additionalProperties": false,
@@ -2046,6 +2146,109 @@
       "additionalProperties": false,
       "required": [
         "success"
+      ]
+    },
+    "HttpBulkOAuth2": {
+      "description": "OAuth2 client credentials grant for `http_bulk`.",
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "description": "Client id.",
+          "type": "string"
+        },
+        "client_secret": {
+          "description": "Client secret.",
+          "type": "string",
+          "format": "password"
+        },
+        "scope": {
+          "description": "Scopes to ask for, separated by spaces.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_url": {
+          "description": "Token endpoint, e.g. `https://login.example.com/oauth2/token`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "token_url",
+        "client_id",
+        "client_secret"
+      ]
+    },
+    "HttpBulkQuery": {
+      "description": "The `http_bulk` request that answers a batch of lookups, one answer per message in order.",
+      "type": "object",
+      "properties": {
+        "content_type": {
+          "description": "`Content-Type` header. Defaults to `application/x-ndjson` or `application/json`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "envelope": {
+          "description": "`json_array` only: the body around the array, e.g. `{\"docs\": {requests}}`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "description": "JSON pointer in an answer to its error text. An answer that has it fails its message.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "description": "Body shape: `ndjson` (default) or `json_array`.",
+          "$ref": "#/$defs/HttpBulkFormat",
+          "default": "ndjson"
+        },
+        "found": {
+          "description": "JSON pointer in an answer to a boolean; `false` or missing means not found.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "description": "HTTP method. Defaults to `POST`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Path and query appended to `url`, e.g. `/books/_mget`.",
+          "type": "string"
+        },
+        "request": {
+          "description": "Template of one message's part of the body, e.g. `{\"_id\": \"${payload:id}\"}`.",
+          "type": "string"
+        },
+        "responses": {
+          "description": "JSON pointer to the array of answers, e.g. `/responses`. Empty = the response is the array.",
+          "type": "string",
+          "default": ""
+        },
+        "value": {
+          "description": "JSON pointer in an answer to the value returned, e.g. `/_source`. Unset = the whole answer.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "request"
       ]
     },
     "HttpBulkRead": {
@@ -2172,6 +2375,13 @@
         },
         "content_type": {
           "description": "`Content-Type` header. Defaults to `application/x-ndjson` or `application/json`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "document": {
+          "description": "Template around each document, e.g. `{\"doc\": {document}, \"doc_as_upsert\": true}`.",
           "type": [
             "string",
             "null"

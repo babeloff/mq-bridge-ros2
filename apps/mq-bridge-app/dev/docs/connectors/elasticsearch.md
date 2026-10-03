@@ -11,7 +11,8 @@ mqb copy --drain --batch-size 5000 \
   'elasticsearch://localhost:9200/books?api_key=<api key>'
 ```
 
-`elasticsearch+https://host/books` connects over HTTPS.
+`elasticsearch+https://host/books` connects over HTTPS, and `?mode=update`
+merges each payload into the stored document instead of replacing it.
 
 ## Keep an index in sync with a Postgres table
 
@@ -51,6 +52,8 @@ See [Postgres CDC](../tutorials/postgres-cdc.md) for the publication and the slo
 | `index` | required | Index to write to; the path of the URI |
 | `api_key` | none | Sent as `Authorization: ApiKey <api key>` |
 | `id_field` | `id` | Top-level payload field that becomes the document `_id` |
+| `mode` | `index` | `index` replaces the document; `update` merges the payload into it and creates it if missing |
+| `auth` | none | `oauth2` or `aws_sigv4`, as on [`http_bulk`](./http-bulk.md#fields); in a URI, JSON: `auth={"aws_sigv4":{"region":"eu-central-1","service":"es"}}` |
 | `operation` | none | Template for a message's operation; `delete` or `d` removes the document |
 | `compression` | `none` | `gzip`, `zstd` or `lz4` request bodies |
 | `request_timeout_ms` | none | Request timeout |
@@ -88,8 +91,12 @@ output:
 - **A rejected document fails alone**, with Elasticsearch's reason, for example
   "failed to parse field [year] of type [integer]". Add a
   [`dlq`](../cookbook/dlq.md) to keep it.
-- **`index` replaces the whole document.** Partial updates through the `update`
-  action have not been tried.
+- **`index` replaces the whole document.** `mode: update` sends
+  `{"update":{"_id":…}}` and `{"doc":<payload>,"doc_as_upsert":true}` instead:
+  fields the payload leaves out keep their stored value. It was run against a
+  stub server only, not against Elasticsearch.
+- **`auth` was run against a stub server only**, for OAuth2 and for SigV4
+  (Amazon OpenSearch Service).
 - **The test ran with security disabled.** `api_key` is sent in the form
   Elasticsearch documents for an API key.
 - **Mappings and index settings are not managed.** Create the index first if

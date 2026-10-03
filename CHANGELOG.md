@@ -21,7 +21,27 @@ change: secret extraction now covers custom endpoints.
   is saved with `read.cursor_id` and `read.checkpoint_store` and works with `mqb copy --resume`. Reading
   was run against CouchDB's change feed, Qdrant, Meilisearch and PostgREST. Behind the new
   `http-bulk` feature, which `full` and `portable` include. `EndpointType` gains the variant
-  `HttpBulk`.
+  `HttpBulk`. A polled job has a deadline, `result.job.timeout_ms` (default 5 minutes): when it
+  passes, or the poll keeps failing that long, the documents of that request fail as retryable
+  with the job id and the last state or poll error seen.
+- **`http_bulk` answers lookups in bulk.** A `query` section makes the endpoint the `from` of a
+  `lookup`: every message renders `request`, one HTTP request carries the whole batch
+  (`ndjson`, or `json_array` inside an `envelope` with a `{requests}` marker), and the answers
+  are matched by position in the array at `responses`, with optional pointers `value`, `found`
+  and `error`. It covers Elasticsearch `_msearch` and `_mget` and Qdrant's batch search. A
+  missing answer is `null`; an entry that reports an error makes the batch fall back to one
+  request per message, with a warning, so only that message fails. `query` excludes `upsert`,
+  `delete` and `operation`, and an output now needs `upsert` or `query`.
+- **`http_bulk` authentication: OAuth2 client credentials and AWS SigV4.** `auth.oauth2`
+  (`token_url`, `client_id`, `client_secret`, `scope`) fetches a token, caches it, replaces it
+  before it expires and once more after a 401; concurrent batches share one token request.
+  `auth.aws_sigv4` (`region`, `service`, optional static keys, else the default credential
+  chain) signs each request and needs the `aws` feature. Both apply to upserts, deletes,
+  queries, reads and job polls; the secrets are extracted like `headers`. The `aws` feature
+  now depends on `aws-sigv4` directly, a crate the AWS SDK already brought in.
+- **`http_bulk` partial updates.** `upsert.document` is a template around each document with a
+  `{document}` marker, for `ndjson` and `json_array`. The `elasticsearch` endpoint gains
+  `mode: update` (`{"doc":…,"doc_as_upsert":true}` behind an `update` action) and `auth`.
 - **`typesense` and `elasticsearch` endpoints.** Each is an `http_bulk` output with the
   requests filled in, so it takes a few fields (`url`, `collection` or `index`, `api_key`,
   `operation`) and a URI of its own: `mqb copy … 'typesense://host:8108/books?api_key=…'`,
@@ -48,7 +68,7 @@ change: secret extraction now covers custom endpoints.
   `SentBatch::from_outcomes` builds a partial result from per-message outcomes, and
   `support::ndjson::chunk` frames payloads as size-limited NDJSON request bodies.
   `support::http_status` classifies an HTTP status as retryable or not,
-  `support::poll_job::poll_until` waits for an asynchronous job to end,
+  `support::poll_job::poll_until` waits for an asynchronous job to end or a deadline to pass,
   `support::change_op::ChangeOp` sorts a change record into upsert, delete or truncate, and
   `plugin::test_support::StubHttpServer` replaces the remote system in a test. See
   [docs/PLUGINS.md](docs/PLUGINS.md#shared-helpers).
