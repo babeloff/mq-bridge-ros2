@@ -1000,4 +1000,23 @@ mod filter_expression_deserialization_tests {
             matches!(&endpoint.middlewares[0], Middleware::Filter(expression) if expression == "amount > 100")
         );
     }
+
+    #[test]
+    fn unknown_field_in_file_and_object_store_endpoint_is_rejected() {
+        let error = serde_yaml_ng::from_str::<Endpoint>("file:\n  path: x\n  fromat: raw\n")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown field `fromat`"), "{error}");
+
+        // The flattened consumer mode's keys are still accepted.
+        serde_yaml_ng::from_str::<Endpoint>("file:\n  path: x\n  mode: consume\n  delete: true\n")
+            .unwrap();
+
+        let error = serde_yaml_ng::from_str::<Endpoint>(
+            "object_store:\n  url: memory:///x\n  fromat: raw\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("fromat"), "{error}");
+    }
 }

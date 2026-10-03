@@ -636,6 +636,23 @@ fn apply_server_failure_policy(
     }
 }
 
+/// Rejected credentials (or a server that can never serve the request): retrying a one-shot
+/// job against them only delays the error. A continuous route keeps retrying, since
+/// credentials can be rotated under it.
+fn is_authentication_failure(error: &anyhow::Error) -> bool {
+    const MARKERS: &[&str] = &[
+        "password authentication failed",
+        "access_refused",
+        "authentication failed",
+        "access denied for user",
+        "invalid username or password",
+        "wrongpass",
+        "needs a replica set",
+    ];
+    let text = format!("{error:#}").to_ascii_lowercase();
+    MARKERS.iter().any(|marker| text.contains(marker))
+}
+
 /// Read positions of sources without a durable checkpoint, kept for one route run so a
 /// reconnect continues where it was instead of starting over.
 pub(crate) type RunPositions = Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
@@ -1499,6 +1516,7 @@ impl Route {
                                         e.downcast_ref::<ProcessingError>().is_some_and(|pe| matches!(pe, ProcessingError::NonRetryable(_)))
                                         || e.downcast_ref::<ConsumerError>().is_some_and(|ce| matches!(ce, ConsumerError::Permanent(_)))
                                         || e.is::<crate::errors::InvalidConfig>()
+                                        || (exit_on_empty && is_authentication_failure(&e))
                                         || is_end_of_stream;
 
                                     // EndOfStream is a clean terminal, not a failure, so
@@ -2649,6 +2667,20 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn authentication_failures_are_told_apart_from_unreachable_hosts() {
+        let auth = anyhow::anyhow!("connect").context(
+            "error returned from database: password authentication failed for user \"app\"",
+        );
+        assert!(is_authentication_failure(&auth));
+        assert!(is_authentication_failure(&anyhow::anyhow!(
+            "ACCESS_REFUSED - Login was refused"
+        )));
+        assert!(!is_authentication_failure(&anyhow::anyhow!(
+            "Connection refused (os error 61)"
+        )));
+    }
     use crate::models::{
         Endpoint, EndpointType, FaultMode, FileConfig, MemoryConfig, Middleware, MongoDbConfig,
         NameBy, RandomPanicMiddleware, RouteOptions, SqlxConfig,

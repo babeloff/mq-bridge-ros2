@@ -281,7 +281,6 @@ impl MessageConsumer for TransformConsumer {
             match outcome {
                 Ok(()) => return Ok(Received { message, commit }),
                 Err(error) => {
-                    crate::middleware::note_rejected_input_message();
                     tracing::error!(
                         message_id = format_args!("{:032x}", message.message_id),
                         "Rejecting invalid input message: {error}"
@@ -318,7 +317,6 @@ impl MessageConsumer for TransformConsumer {
                     }
                     Err(rejected) => {
                         let (message, error) = *rejected;
-                        crate::middleware::note_rejected_input_message();
                         tracing::error!(
                             message_id = format_args!("{:032x}", message.message_id),
                             "Rejecting invalid input message: {error}"

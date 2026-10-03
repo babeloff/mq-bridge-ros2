@@ -700,6 +700,8 @@ stream. File compression/encryption supports only the default `consume` mode. `c
 too: the header row is written into the first member, so the decoded stream is a normal CSV
 file.
 
+A `csv` sink takes its columns from the first row it writes, in that row's field order.
+
 A file **source** must declare the same `compression`/`encryption` the data was written with.
 A mismatch (wrong key, wrong codec, or a missing field) is a permanent decode failure: the
 route ends `failed` with the error in its status, rather than completing as if the file were
@@ -1631,6 +1633,9 @@ The value is a single nested endpoint, which must be valid as a **consumer**. Th
 is acknowledged immediately, before the caller has necessarily received it — so a crash in
 between loses it. Use it for polling APIs, not for guaranteed delivery.
 
+The reply carries the triggering request's message id, which is what matches it to its caller.
+The id of the message that was read is in the metadata `mqb.reader.message_id`.
+
 ### `sequence`
 
 Reads several inputs one after another. Each is drained before the next begins, and the last
@@ -1766,6 +1771,9 @@ output:
 
 `raw: true` sends `body` byte-for-byte; the default JSON-encodes it as a string. Like
 `response`, a `static` output enables the HTTP inline fast path.
+
+As an input it produces the message without end. In a drain (`mqb copy --drain`,
+`exit_on_empty`) it emits one batch and ends.
 
 #### Placeholders
 

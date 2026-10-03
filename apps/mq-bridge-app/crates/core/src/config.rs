@@ -1129,8 +1129,11 @@ impl AppConfig {
 
             for (route_name, route_config) in routes {
                 let normalized_route_name = route_name.trim().to_string();
+                // A `null` output that carries middlewares still runs them, so it stays a publisher.
                 let output =
-                    if matches!(route_config.route.output.endpoint_type, EndpointType::Null) {
+                    if matches!(route_config.route.output.endpoint_type, EndpointType::Null)
+                        && route_config.route.output.middlewares.is_empty()
+                    {
                         ConsumerOutputConfig::None
                     } else if let Some(existing) = self.publishers.iter().find(|publisher| {
                         endpoint_value(&publisher.endpoint)
@@ -2107,6 +2110,40 @@ output:
         // And the legacy flag still migrates rather than being lost in the route.
         config.migrate_legacy_routes();
         assert_eq!(config.security_mode(), ConfigSecurityMode::Balanced);
+    }
+
+    #[test]
+    fn a_null_output_keeps_its_middlewares() {
+        let mut config: AppConfig = serde_yaml_ng::from_str(
+            r#"
+routes:
+  plain:
+    input:
+      memory: { topic: "a" }
+    output: "null"
+  limited:
+    input:
+      memory: { topic: "b" }
+    output:
+      "null": null
+      middlewares:
+        - limiter: { messages_per_second: 5 }
+"#,
+        )
+        .unwrap();
+        config.migrate_legacy_routes();
+
+        let output = |name: &str| {
+            let consumer = config.consumers.iter().find(|c| c.name == name).unwrap();
+            consumer.output.clone()
+        };
+        assert!(matches!(output("plain"), ConsumerOutputConfig::None));
+        assert!(matches!(
+            output("limited"),
+            ConsumerOutputConfig::Publisher { .. }
+        ));
+        assert_eq!(config.publishers.len(), 1);
+        assert_eq!(config.publishers[0].endpoint.middlewares.len(), 1);
     }
 
     #[test]

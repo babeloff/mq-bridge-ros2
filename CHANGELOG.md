@@ -4,8 +4,9 @@ All notable changes to `mq-bridge`. Newest first.
 
 ## 0.4.18
 
-A new generic output for search engines, plus documentation and packaging work. One behaviour
-change: secret extraction now covers custom endpoints.
+A new generic output for search engines, plus documentation and packaging work. This release
+changes behaviour in several places, listed under "Behaviour changes": read that section before
+upgrading.
 
 ### Added
 
@@ -104,6 +105,49 @@ change: secret extraction now covers custom endpoints.
   keywords and categories now cover CDC, Parquet and object storage as well as the brokers. The
   homepage points at the book instead of the repository.
 - **`AGENTS.md` holds the contributor context** that was in `CLAUDE.md`, which now imports it.
+
+### Behaviour changes
+
+Each of these changes what an existing setup sees. Check them before upgrading.
+
+- **Replies carry the request's message id.** On NATS, memory and MongoDB request/reply, and on
+  the `static` and `reader` endpoints, a reply's `message_id` is now the request's id and no
+  longer the responder's. **Anything that keyed on the responder's id sees new values: a
+  `deduplication` on a `request` endpoint's `forward_to` starts from an empty history after the
+  upgrade.** `reader` keeps the pulled message's own id in the metadata `mqb.reader.message_id`.
+- **Unknown fields in a `file` or `object_store` endpoint are rejected.** `file: { path: x,
+  fromat: raw }` used to load and run with the default format. It now fails with the field's
+  name, as the other endpoints did.
+- **The CSV sink keeps the first row's field order.** Columns were written alphabetically, so
+  the column order of an existing CSV export changes. The order is read once per file.
+- **The SQL cursor source emits Postgres `json`, `jsonb` and array columns as nested JSON.**
+  They arrived as strings: `"j":"{\"k\": 1}"` is now `"j":{"k":1}`, and `"{1,2}"` is `[1,2]`.
+  `numeric` stays a string, which keeps its precision.
+- **`mqb copy` logs to stderr.** Only the `copied …` summary is on stdout, so a script can read
+  it. `MQB_LOG_STDOUT=1` puts the log lines back on stdout.
+- **`mqb copy` exits 1 when rows it read could not be decrypted**, for example an `encryption`
+  with the wrong key. It printed `copied 0 of 1_000 rows` and exited 0. Rows a `transform`
+  rejects are still reported in the summary with exit 0.
+- **`mqb copy` reports dead-lettered rows separately**: `copied 0 rows, dead-lettered 1_000`
+  where it said `copied 1_000 rows`. The exit code is still 0.
+- **`mqb --config <file>` fails when the file does not exist.** It started with default
+  settings and waited. The implicit `config.yml` is still optional.
+- **`static` as a `--drain` source emits one batch and ends.** It never ended.
+- **A SQLite sink creates its database file** when the URL names no `mode`. It failed with
+  `unable to open database file` unless the URL carried `mode=rwc`.
+- **`mqb copy --drain` stops at once on an authentication failure** (a wrong Postgres, MySQL,
+  RabbitMQ or Redis password, MongoDB `capture_all` without a replica set) instead of retrying
+  for the start window. A bridge keeps retrying, and so does an unreachable host.
+- **An unreachable MQTT broker (sink) or Kafka broker (source) fails the start** after the
+  start window, as other endpoints do. `copy --drain` used to retry until stopped.
+- **A SQL cursor source without a checkpoint continues after a reconnect** instead of reading
+  the table from the first row again. The position is held in memory for the life of the
+  route, so a restart of the process still starts over unless `--resume` or a checkpoint is set.
+- **A `null` output keeps its middlewares in the app's config.** `output: { "null": null,
+  middlewares: [...] }` was loaded as no output at all.
+- **`mqb copy` warns** when the target is `response:` and the source cannot take a reply, and
+  when a SQL source has neither `cursor_column` nor `delete_after_read`, which leases the rows
+  for a minute and leaves them in place.
 
 ### Fixed
 

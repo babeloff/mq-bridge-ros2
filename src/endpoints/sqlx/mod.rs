@@ -2232,6 +2232,8 @@ struct JsonColumn {
     /// `"name":` — quoted, escaped and colon-terminated, ready to memcpy into a payload.
     key: Vec<u8>,
     ordinal: usize,
+    /// The text value is already JSON and is embedded as it is.
+    raw_json: bool,
 }
 
 /// The column layout of a batch, resolved once from its first row.
@@ -2252,10 +2254,20 @@ impl JsonRowSchema {
                 JsonColumn {
                     key,
                     ordinal: col.ordinal(),
+                    raw_json: false,
                 }
             })
             .collect();
         Self { columns }
+    }
+
+    fn mark_raw_json(&mut self, row: &sqlx::any::AnyRow, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        for (col, meta) in self.columns.iter_mut().zip(row.columns()) {
+            col.raw_json = names.iter().any(|n| n == meta.name());
+        }
     }
 
     /// Write one row as a JSON object straight into `buf`. Going through
@@ -2273,6 +2285,13 @@ impl JsonRowSchema {
                 buf.push(b',');
             }
             buf.extend_from_slice(&col.key);
+            if col.raw_json {
+                match row.try_get::<Option<&str>, _>(col.ordinal) {
+                    Ok(Some(json)) if !json.is_empty() => buf.extend_from_slice(json.as_bytes()),
+                    _ => buf.extend_from_slice(b"null"),
+                }
+                continue;
+            }
             let kind = value_kind(row, col.ordinal).unwrap_or(sqlx::any::AnyTypeInfoKind::Null);
             write_json_value(row, col.ordinal, kind, buf);
         }
@@ -2479,7 +2498,12 @@ const MYSQL_COLUMN_TYPES_SQL: &str = "SELECT COLUMN_NAME AS name, LOWER(DATA_TYP
 /// a `DATETIME` column — including the ones `auto_create_table` writes — breaks the read.
 /// Any introspection failure (or an unsupported driver) falls back to `*`, preserving the
 /// previous behaviour.
-async fn build_cursor_projection(pool: &AnyPool, driver_name: &str, table: &str) -> String {
+async fn build_cursor_projection(
+    pool: &AnyPool,
+    driver_name: &str,
+    table: &str,
+) -> (String, Vec<String>) {
+    let star = || ("*".to_string(), Vec::new());
     type SafeFn = fn(&str) -> bool;
     type CastFn = fn(&str) -> String;
 
@@ -2520,7 +2544,7 @@ async fn build_cursor_projection(pool: &AnyPool, driver_name: &str, table: &str)
                 |ident| format!("CAST({ident} AS TEXT) AS {ident}"),
             )
         }
-        _ => return "*".to_string(),
+        _ => return star(),
     };
 
     let mut query = sqlx::query(sql);
@@ -2529,28 +2553,36 @@ async fn build_cursor_projection(pool: &AnyPool, driver_name: &str, table: &str)
     }
     let rows = match query.fetch_all(pool).await {
         Ok(rows) if !rows.is_empty() => rows,
-        Ok(_) => return "*".to_string(),
+        Ok(_) => return star(),
         Err(e) => {
             warn!(table = %table, error = %e, "Could not introspect {driver_name} columns; falling back to SELECT * (timestamp/decimal/uuid/etc. columns may fail to decode)");
-            return "*".to_string();
+            return star();
         }
     };
     let mut parts = Vec::with_capacity(rows.len());
+    let mut raw_json = Vec::new();
     for row in &rows {
         let name: String = match row.try_get("name") {
             Ok(n) => n,
-            Err(_) => return "*".to_string(),
+            Err(_) => return star(),
         };
         let typname: String = row.try_get("typname").unwrap_or_default();
         let ident = quote_ident_for(driver_name, &name);
         if is_safe(&typname) {
             parts.push(ident);
+        } else if driver_name == "PostgreSQL" && matches!(typname.as_str(), "json" | "jsonb") {
+            parts.push(cast(&ident));
+            raw_json.push(name);
+        } else if driver_name == "PostgreSQL" && typname.starts_with('_') {
+            // Array types: the text form is `{1,2}`, so render them as a JSON array.
+            parts.push(format!("to_jsonb({ident})::text AS {ident}"));
+            raw_json.push(name);
         } else {
             // Cast to a string type so `Any` can decode it; keep the column name via alias.
             parts.push(cast(&ident));
         }
     }
-    parts.join(", ")
+    (parts.join(", "), raw_json)
 }
 
 /// A permanent (non-transient) failure: the `Any` driver cannot decode a column type, so
@@ -2761,6 +2793,8 @@ pub struct SqlxCursorReader {
     checkpoint: Option<Arc<dyn crate::checkpoint::CheckpointStore>>,
     last_value: Arc<Mutex<Option<SqlCursor>>>,
     run_position: Option<(crate::route::RunPositions, String)>,
+    /// Columns the projection renders as JSON text (Postgres `json`/`jsonb` and arrays).
+    raw_json_columns: Vec<String>,
     /// Page queries, built once: only the bound cursor and limit vary between polls.
     sql_first: String,
     sql_next: String,
@@ -2876,7 +2910,8 @@ impl SqlxCursorReader {
         };
         info!(table = %config.table, cursor_id = ?config.cursor_id, has_checkpoint = %last_value.is_some(), "SQLx cursor reader initialized");
 
-        let projection = build_cursor_projection(&pool, &driver_name, &config.table).await;
+        let (projection, raw_json_columns) =
+            build_cursor_projection(&pool, &driver_name, &config.table).await;
 
         let sql_first = format!(
             "SELECT {0} FROM {1} ORDER BY {2} ASC LIMIT {3}",
@@ -2908,6 +2943,7 @@ impl SqlxCursorReader {
             checkpoint,
             last_value: Arc::new(Mutex::new(last_value)),
             run_position,
+            raw_json_columns,
             source_metadata,
         })
     }
@@ -3014,7 +3050,8 @@ impl MessageConsumer for SqlxCursorReader {
         // same query/column order. Value *kinds* are still read per row (SQLite types
         // values, not columns).
         let cursor_col = resolve_cursor_column(&rows[0], &self.cursor_column);
-        let schema = JsonRowSchema::from_row(&rows[0]);
+        let mut schema = JsonRowSchema::from_row(&rows[0]);
+        schema.mark_raw_json(&rows[0], &self.raw_json_columns);
 
         // Extract (cursor, message) for every fetched row.
         let mut fetched: Vec<(SqlCursor, CanonicalMessage)> = Vec::with_capacity(rows.len());

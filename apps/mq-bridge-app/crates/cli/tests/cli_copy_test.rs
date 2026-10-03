@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 fn cli() -> Command {
@@ -3474,6 +3474,11 @@ fn a_dlq_captures_the_rows_a_sink_permanently_rejects() {
         "every rejected row must reach the dlq endpoint",
     );
     assert_eq!(fixture.requests(), rows.len(), "one attempt per row");
+    let summary = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        summary.contains("copied 0 rows, dead-lettered 4"),
+        "the summary must not count dead-lettered rows as copied: {summary}"
+    );
 }
 
 /// Extra fields cannot be kept -- there is no column for them -- but losing

@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 static REJECTED_INPUT_MESSAGES: AtomicU64 = AtomicU64::new(0);
 
-/// Input messages a consumer middleware rejected and acked (failed to decrypt or
-/// transform), process-wide. A one-shot job reads it to tell a lossy run from a clean one.
+/// Input messages the `encryption` middleware could not decrypt and acked, process-wide.
+/// A one-shot job reads it to tell a lossy run from a clean one.
 pub fn rejected_input_messages() -> u64 {
     REJECTED_INPUT_MESSAGES.load(Ordering::Relaxed)
 }

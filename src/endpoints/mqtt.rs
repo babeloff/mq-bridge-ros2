@@ -223,6 +223,9 @@ impl PublishConfirm {
 /// reconnect and redeliver in-flight QoS 1/2 publishes.
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Below the route's 5 s start window, so the cause is reported with the start failure.
+const PUBLISHER_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+
 pub struct MqttPublisher {
     state: Arc<RwLock<MqttState>>,
     topic: String,
@@ -275,6 +278,19 @@ impl MqttPublisher {
             confirm,
             None, // publishers don't subscribe
         ));
+
+        // The event loop connects in the background and retries forever, so without this
+        // a publisher for an unreachable broker would look started.
+        let deadline = tokio::time::Instant::now() + PUBLISHER_CONNECT_TIMEOUT;
+        while !is_connected.load(Ordering::Relaxed) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "the MQTT broker did not accept the connection within {:?}",
+                    PUBLISHER_CONNECT_TIMEOUT
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         Ok(MqttState {
             client,

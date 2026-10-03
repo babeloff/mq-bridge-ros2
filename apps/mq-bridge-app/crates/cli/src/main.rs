@@ -1253,7 +1253,10 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
 }
 
 /// Warns about two combinations that run without an error and move less than expected.
-fn warn_about_surprising_copy(input: &mq_bridge::models::Endpoint, output: &mq_bridge::models::Endpoint) {
+fn warn_about_surprising_copy(
+    input: &mq_bridge::models::Endpoint,
+    output: &mq_bridge::models::Endpoint,
+) {
     let source = input.endpoint_type.name();
     if output.endpoint_type.name() == "response"
         && matches!(
@@ -1261,14 +1264,23 @@ fn warn_about_surprising_copy(input: &mq_bridge::models::Endpoint, output: &mq_b
             "file" | "sqlx" | "object_store" | "static" | "clickhouse" | "dir_spool"
         )
     {
-        warn!("`response:` replies to the source, and a {source} source takes no replies: every row is read and discarded");
+        warn!(
+            "`response:` replies to the source, and a {source} source takes no replies: every row is read and discarded"
+        );
     }
     if source == "sqlx" {
         let config = serde_json::to_value(&input.endpoint_type).unwrap_or_default();
         let sqlx = &config["sqlx"];
-        let unset = |field: &str| matches!(&sqlx[field], serde_json::Value::Null | serde_json::Value::Bool(false));
+        let unset = |field: &str| {
+            matches!(
+                &sqlx[field],
+                serde_json::Value::Null | serde_json::Value::Bool(false)
+            )
+        };
         if unset("cursor_column") && unset("delete_after_read") && unset("select_query") {
-            warn!("the source table is read as a work queue: rows are leased and left in place, so a repeated copy first finds nothing and later copies them again. Set `cursor_column` or `delete_after_read=true`");
+            warn!(
+                "the source table is read as a work queue: rows are leased and left in place, so a repeated copy first finds nothing and later copies them again. Set `cursor_column` or `delete_after_read=true`"
+            );
         }
     }
 }
@@ -1367,7 +1379,7 @@ struct Throughput {
     /// Messages taken off the source, filtered or not. The rate is derived from
     /// this, since the elapsed time covers reading all of them.
     read: u64,
-    /// Rows a source middleware rejected: failed to decrypt or transform.
+    /// Rows the source could not decrypt.
     rejected: u64,
     /// Rows a `dlq` middleware diverted to its dead-letter target.
     dead_lettered: u64,
@@ -1502,7 +1514,7 @@ fn copy_result(
 
     if moved.rejected > 0 {
         anyhow::bail!(
-            "copy rejected {} of the rows it read ({}): see the errors above",
+            "copy could not decrypt {} of the rows it read ({}): see the errors above",
             grouped(moved.rejected),
             moved.rows_display()
         );

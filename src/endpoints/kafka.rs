@@ -326,6 +326,9 @@ impl MessagePublisher for KafkaPublisher {
     }
 }
 
+/// Below the route's 5 s start window, so the cause is reported with the start failure.
+const BROKER_PROBE_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// Keeps the end-of-partition event this consumer asks for out of the error log.
 struct QuietEofContext;
 
@@ -498,6 +501,16 @@ impl KafkaConsumer {
         client_config.set("enable.partition.eof", "true");
 
         let consumer: StreamConsumer = client_config.create_with_context(QuietEofContext)?;
+        // librdkafka connects in the background and retries forever; probe once so an
+        // unreachable broker fails the start instead of looking like an empty topic.
+        let consumer = tokio::task::spawn_blocking(move || {
+            consumer
+                .client()
+                .fetch_metadata(None, BROKER_PROBE_TIMEOUT)
+                .map(|_| consumer)
+        })
+        .await?
+        .map_err(|e| anyhow!("Kafka broker not reachable: {e}"))?;
         if !topic.is_empty() {
             consumer.subscribe(&[topic])?
         }

@@ -109,6 +109,16 @@ mqb copy \
 | `--concurrency <N>` | `4` | Route concurrency. |
 | `--batch-size <N>` | `1024` | Batch size. |
 
+`copy` prints the `copied …` summary on stdout and its log lines on stderr, so a script can
+read the summary alone. Set `MQB_LOG_STDOUT=1` to get the log lines on stdout as before
+0.4.18. It exits 1 when it could not deliver every row it read, and when rows could not be
+decrypted. Rows sent to a `dlq` are reported apart from the copied ones
+(`copied 0 rows, dead-lettered 1_000`) and leave the exit code at 0.
+
+Two `copy` processes can listen on the same HTTP address: the port is opened with
+`SO_REUSEPORT` and the kernel spreads the connections over them. That is how several
+processes share one port; a second process started by mistake raises no error.
+
 > Note: `copy`'s defaults (`--concurrency 4`, `--batch-size 1024`) are higher than the
 > library's route defaults (`concurrency: 1`, `batch_size: 512`), because `copy` is built for
 > bulk throughput. See [Performance tuning](../operations/tuning.md).

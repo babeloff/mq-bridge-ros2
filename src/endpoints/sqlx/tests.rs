@@ -1982,3 +1982,33 @@ fn deadlock_and_serialization_failures_are_retryable() {
         assert!(!is_deterministic_sqlstate(code), "{code}");
     }
 }
+
+#[test]
+fn sqlite_sink_url_gets_create_mode_only_for_a_missing_file() {
+    let dir = tempdir().unwrap();
+    let missing = format!("sqlite://{}", dir.path().join("new.db").display());
+    assert_eq!(
+        sqlite_url_creating_missing_file(&missing),
+        Some(format!("{missing}?mode=rwc"))
+    );
+    assert_eq!(
+        sqlite_url_creating_missing_file(&format!("{missing}?cache=shared")),
+        Some(format!("{missing}?cache=shared&mode=rwc"))
+    );
+    assert_eq!(
+        sqlite_url_creating_missing_file(&format!("{missing}?mode=ro")),
+        None
+    );
+    assert_eq!(sqlite_url_creating_missing_file("sqlite::memory:"), None);
+    assert_eq!(
+        sqlite_url_creating_missing_file("postgres://localhost/db"),
+        None
+    );
+
+    let existing = dir.path().join("old.db");
+    std::fs::write(&existing, b"").unwrap();
+    assert_eq!(
+        sqlite_url_creating_missing_file(&format!("sqlite://{}", existing.display())),
+        None
+    );
+}
