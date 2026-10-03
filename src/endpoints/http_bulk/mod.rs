@@ -25,6 +25,7 @@ use crate::models::HttpBulkConfig;
 use anyhow::{bail, Context};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::time::Duration;
+use tracing::warn;
 
 const JSON: &str = "application/json";
 /// Most characters of a response body quoted in an error.
@@ -102,13 +103,20 @@ impl Connection {
             (None, Some(_)) => bail!("http_bulk tls.key_file needs tls.cert_file"),
             (None, None) => {}
         }
+        let auth = auth::Auth::new(config.auth.as_ref(), config.tls.required)?;
+        if sends_credentials_in_clear(&url, &headers, &auth) {
+            warn!(
+                host = url.host_str(),
+                "http_bulk sends its headers and credentials unencrypted; use an https URL"
+            );
+        }
         Ok(Self {
             http: builder
                 .build()
                 .context("Failed to build http_bulk client")?,
             base: url.as_str().trim_end_matches('/').to_string(),
             headers,
-            auth: auth::Auth::new(config.auth.as_ref(), config.tls.required)?,
+            auth,
         })
     }
 
@@ -126,10 +134,46 @@ impl Connection {
     }
 }
 
+/// Whether the URL names this machine, where clear-text credentials never leave it.
+fn is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(name)) => name == "localhost",
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
+fn sends_credentials_in_clear(url: &url::Url, headers: &HeaderMap, auth: &auth::Auth) -> bool {
+    url.scheme() == "http"
+        && !is_loopback(url)
+        && (!headers.is_empty() || !matches!(auth, auth::Auth::None))
+}
+
 fn quoted(text: &str) -> String {
     match text.char_indices().nth(QUOTED_RESPONSE_CHARS) {
         Some((end, _)) => format!("{}…", &text[..end]),
         None => text.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod clear_text_tests {
+    use super::*;
+
+    #[test]
+    fn only_remote_http_with_headers_or_auth_sends_credentials_in_clear() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("secret"));
+        let clear = |url: &str, headers: &HeaderMap| {
+            sends_credentials_in_clear(&url::Url::parse(url).unwrap(), headers, &auth::Auth::None)
+        };
+        assert!(clear("http://search.example:7700", &headers));
+        assert!(!clear("http://search.example:7700", &HeaderMap::new()));
+        assert!(!clear("https://search.example:7700", &headers));
+        assert!(!clear("http://localhost:7700", &headers));
+        assert!(!clear("http://127.0.0.1:7700", &headers));
+        assert!(!clear("http://[::1]:7700", &headers));
     }
 }
 

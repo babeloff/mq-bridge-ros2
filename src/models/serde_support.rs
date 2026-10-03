@@ -698,4 +698,42 @@ mod tests {
         let error = deserialize_middlewares_from_value(value).unwrap_err();
         assert!(error.to_string().contains("found 'typo'"));
     }
+
+    #[test]
+    fn every_serialized_file_config_key_is_accepted_by_the_endpoint() {
+        let modes = [
+            FileConsumerMode::Consume { delete: true },
+            FileConsumerMode::Subscribe { delete: true },
+            FileConsumerMode::GroupSubscribe {
+                group_id: "group".to_string(),
+                read_from_tail: true,
+            },
+        ];
+        for mode in modes {
+            let config = FileConfig {
+                path: "messages.jsonl".to_string(),
+                idempotency: Some(true),
+                delimiter: Some("\n".to_string()),
+                mode: Some(mode),
+                source_metadata: true,
+                ..Default::default()
+            };
+            let file = serde_json::to_value(&config).unwrap();
+            let endpoint: Endpoint = serde_json::from_value(serde_json::json!({ "file": file }))
+                .unwrap_or_else(|error| panic!("{file}: {error}"));
+            let EndpointType::File(parsed) = endpoint.endpoint_type else {
+                panic!("{file} did not parse as a file endpoint");
+            };
+            assert_eq!(serde_json::to_value(&parsed).unwrap(), file);
+        }
+    }
+
+    #[test]
+    fn file_endpoint_rejects_an_unknown_key() {
+        let error = serde_json::from_value::<Endpoint>(serde_json::json!({
+            "file": { "path": "messages.jsonl", "delet": true }
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `delet`"));
+    }
 }

@@ -132,13 +132,7 @@ impl OAuth2 {
             if tls_required {
                 bail!("http_bulk tls.required needs an https auth.oauth2.token_url");
             }
-            let local = match url.host() {
-                Some(url::Host::Domain(name)) => name == "localhost",
-                Some(url::Host::Ipv4(address)) => address.is_loopback(),
-                Some(url::Host::Ipv6(address)) => address.is_loopback(),
-                None => false,
-            };
-            if !local {
+            if !super::is_loopback(&url) {
                 warn!(
                     token_url = %config.token_url,
                     "http_bulk sends the OAuth2 client secret unencrypted; use an https token_url"

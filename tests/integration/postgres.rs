@@ -276,12 +276,16 @@ pub async fn test_postgres_cursor_timestamptz_to_json() {
             "created_at should be an RFC-ish string, got {:?}",
             rows[0].get("created_at")
         );
-        // NUMERIC and TEXT[] also arrive as strings; native types keep their JSON types.
+        // NUMERIC arrives as a string, TEXT[] as a JSON array; native types keep their JSON types.
         assert!(
             rows[0].get("amount").unwrap().is_string(),
             "numeric -> string"
         );
-        assert!(rows[0].get("tags").unwrap().is_string(), "array -> string");
+        assert_eq!(
+            rows[0].get("tags"),
+            Some(&serde_json::json!(["a", "b"])),
+            "array -> JSON array"
+        );
         assert!(rows[0].get("id").unwrap().is_i64(), "bigint stays numeric");
         assert!(
             rows[0].get("active").unwrap().is_boolean(),

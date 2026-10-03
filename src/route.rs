@@ -650,7 +650,25 @@ fn is_authentication_failure(error: &anyhow::Error) -> bool {
         "needs a replica set",
     ];
     let text = format!("{error:#}").to_ascii_lowercase();
-    MARKERS.iter().any(|marker| text.contains(marker))
+    let generic_marker_counts = !is_other_grpc_status(error);
+    MARKERS.iter().any(|marker| {
+        text.contains(marker) && (generic_marker_counts || *marker != "authentication failed")
+    })
+}
+
+/// A gRPC status other than `Unauthenticated`, whose message may only quote a peer's failure.
+#[cfg(feature = "grpc")]
+fn is_other_grpc_status(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::endpoints::grpc::GrpcStatusError>()
+            .is_some_and(|status| status.code() != tonic::Code::Unauthenticated)
+    })
+}
+
+#[cfg(not(feature = "grpc"))]
+fn is_other_grpc_status(_error: &anyhow::Error) -> bool {
+    false
 }
 
 /// Read positions of sources without a durable checkpoint, kept for one route run so a
@@ -2679,6 +2697,22 @@ mod tests {
         )));
         assert!(!is_authentication_failure(&anyhow::anyhow!(
             "Connection refused (os error 61)"
+        )));
+    }
+
+    #[cfg(feature = "grpc")]
+    #[test]
+    fn a_grpc_status_is_an_authentication_failure_only_when_unauthenticated() {
+        use crate::endpoints::grpc::GrpcStatusError;
+        let status = |status: tonic::Status| anyhow::Error::new(GrpcStatusError::from(status));
+        assert!(is_authentication_failure(&status(
+            tonic::Status::unauthenticated("authentication failed")
+        )));
+        assert!(!is_authentication_failure(
+            &status(tonic::Status::unavailable("upstream authentication failed")).context("send")
+        ));
+        assert!(is_authentication_failure(&status(
+            tonic::Status::unavailable("ACCESS_REFUSED - Login was refused")
         )));
     }
     use crate::models::{
