@@ -61,6 +61,22 @@ mqb copy \
 Each restart resumes from the last `id` seen (persisted via `cursor_id`)
 instead of re-copying from the start.
 
+**Table to table, or file to table, by column name:**
+
+```bash
+mqb copy --drain \
+  --from 'postgres://user:pass@src/app?table=orders&cursor_column=id' \
+  --to 'postgres://user:pass@dst/app?table=orders&columns=auto&key=id'
+
+mqb copy --drain \
+  --from 'file://orders.csv?format=csv' \
+  --to 'sqlite://app.db?table=orders&columns=auto&key=id'
+```
+
+`columns=auto` writes each top-level field of a record into the column of the same name; the
+table must exist. `key=id` makes a rerun update the rows instead of failing on the duplicate
+key. See [Writing by column name](#writing-by-column-name).
+
 **Custom multi-column insert, MySQL:**
 
 ```bash
@@ -81,6 +97,9 @@ mqb copy --drain \
 | `checkpoint_store` | (Consumer, `cursor_column` mode) Where to persist the resume cursor. Absent → a `mqb_cursors_<table>` table in the **source** database; a bare name reuses the source datastore with that table; a URL (`file://`, `postgres://`, `mysql://`, `mongodb://`, `s3://`/`gs://`/`az://`/`abfs://`) selects an external backend. Treated as a secret since it may embed credentials. |
 | `timestamps` | (Consumer, `cursor_column` mode) `text` (default) renders `timestamptz` as Postgres prints it, `2026-10-04 09:15:23.923277+00`. `rfc3339` renders it in UTC as `2026-10-04T09:15:23.923277Z`, which other systems parse; a `timestamp` without zone gets the `T` but no offset. |
 | `auto_create_table` | Publisher creates the destination table if missing. |
+| `columns` | (Publisher) `auto` writes each JSON field into the table column of the same name. The table must exist. |
+| `key` | (Publisher, with `columns`) Key column(s), comma-separated. A row with the same key is updated; needs a `UNIQUE` or `PRIMARY KEY` on them. |
+| `extra_column` | (Publisher, with `columns`) Column that takes the fields without a column of their own, as one JSON object (`jsonb`, `json` or text). |
 | `insert_query` | Custom INSERT with `${payload:field}` / `${metadata:key}` tokens for multi-column writes. |
 | `bulk_copy` | PostgreSQL only — use `COPY FROM STDIN` for high-throughput bulk loads. |
 | `delete_after_read` | Consumer deletes rows after they're processed (mutually exclusive with `cursor_column`). |
@@ -128,3 +147,30 @@ mqb copy \
 FOR TABLE orders;`); `slot_name` is created automatically if missing.
 
 Full field list: [reference/postgres-cdc.md](../reference/postgres-cdc.md).
+
+## Writing by column name
+
+With `columns: auto` the sink reads the table's columns at start and builds the INSERT from each
+record. It works on PostgreSQL, MySQL/MariaDB and SQLite.
+
+- **Matching.** A field goes into the column with the same name; if there is none, a name that
+  differs only in case matches (`ID` → `id`). Fields without a column are not written, and the
+  first one is logged as a warning.
+- **`extra_column`.** Names a column that takes those fields instead, as one JSON object:
+  with `extra_column=extra`, `{"id":1,"color":"red"}` writes `id = 1` and
+  `extra = {"color":"red"}`. A record with no such field leaves the column out. An upsert
+  replaces the stored object; it does not merge into it.
+- **Missing fields.** A column a record does not name is left out of the statement: on insert it
+  gets its default, on update it keeps its value. An explicit `null` writes `NULL`.
+- **Types.** On PostgreSQL every value is cast to the column's type, so a `numeric`,
+  `timestamptz`, `uuid`, `jsonb` or enum column accepts the text a SQL source or a CSV file
+  delivers, and a JSON array goes into an array column. A nested object or array is written as
+  JSON text. A value the column cannot take fails the batch with the database's message.
+- **`key`.** Generates `ON CONFLICT (key) DO UPDATE` (PostgreSQL, SQLite) or
+  `ON DUPLICATE KEY UPDATE` (MySQL/MariaDB). When one batch has several records with the same
+  key, the last one wins.
+- **`bulk_copy`** (PostgreSQL) works with `columns: auto`, but not together with `key`.
+- **A record that cannot be mapped** — not a JSON object, or no field is a column — is rejected
+  alone; the rest of the batch is written.
+
+`columns` cannot be combined with `insert_query` or `auto_create_table`.

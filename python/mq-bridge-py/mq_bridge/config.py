@@ -94,6 +94,7 @@ PostgresConsume = str
 SpoolClaim = str
 SpoolDone = str
 SpoolFsync = str
+SqlColumns = str
 SqlTimestamps = str
 StaticConfig = str
 TransformErrorPolicy = str
@@ -193,6 +194,7 @@ __all__ = [
     "SpoolClaim",
     "SpoolDone",
     "SpoolFsync",
+    "SqlColumns",
     "SqlTimestamps",
     "SqlxConfig",
     "StaticConfig",

@@ -61,6 +61,20 @@ mixes JSON into its cells. The second is a behaviour change, listed below.
     overrides. A sink named `out.jsonl.gz` used to be written uncompressed.
   - A copy without `--drain` now exits when its route ends by itself, on a permanent error or
     the end of a stream. It used to wait for Ctrl-C.
+- **SQL sink: `columns: auto` and `key`.** A SQL sink could write a record's fields into columns
+  only through a hand-written `insert_query`, percent-encoded on the command line, and an upsert
+  needed its own `ON CONFLICT` clause. With `columns: auto` each top-level JSON field goes into
+  the table column of the same name, and `key: id` turns the insert into an upsert, so
+  `mqb copy --from 'postgres://…?table=orders&cursor_column=id' --to 'postgres://…?table=orders&columns=auto&key=id'`
+  copies a table and can be rerun.
+  - The table must exist. A column a record does not name keeps its default (insert) or its
+    value (update). A field without a column is not written and is logged once; with
+    `extra_column: <name>` those fields go into that column as one JSON object.
+  - PostgreSQL casts each value to the column type, so `numeric`, `timestamptz`, `uuid`,
+    `jsonb`, enum and array columns take the text a SQL or CSV source delivers.
+  - `bulk_copy` works with `columns: auto`, not with `key`. `columns` cannot be combined with
+    `insert_query` or `auto_create_table`.
+  - `SqlxConfig` gains the fields `columns`, `key` and `extra_column`, and `models` the type `SqlColumns`.
 - **SQL source: `timestamps: rfc3339`.** A Postgres `timestamptz` column is read in Postgres's
   text form, `2026-10-04 09:15:23.923277+00`, which few other systems parse. With
   `timestamps: rfc3339` a `cursor_column` source renders it in UTC as

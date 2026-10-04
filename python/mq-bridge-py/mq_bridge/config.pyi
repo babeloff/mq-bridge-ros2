@@ -729,12 +729,15 @@ class SqlxConfig(TypedDict, total=False):
     auto_create_table: bool
     bulk_copy: bool
     checkpoint_store: Optional[str]
+    columns: Optional[SqlColumns]
     create_publication: bool
     cursor_column: Optional[str]
     cursor_id: Optional[str]
     delete_after_read: bool
+    extra_column: Optional[str]
     idle_timeout_ms: Optional[int]
     insert_query: Optional[str]
+    key: Optional[str]
     lookup_query: Optional[str]
     max_connections: Optional[int]
     max_lifetime_ms: Optional[int]
@@ -870,6 +873,7 @@ PostgresConsume = Literal["capture_new", "capture_all", "snapshot"]
 SpoolClaim = Literal["exclusive", "warn", "off"]
 SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]
+SqlColumns = Literal["auto"]
 SqlTimestamps = Literal["text", "rfc3339"]
 StaticConfig = Union[str, Dict[str, Any]]
 TransformErrorPolicy = Literal["reject", "pass_through"]

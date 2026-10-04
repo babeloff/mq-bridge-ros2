@@ -30,6 +30,10 @@ field, otherwise the message is dead-lettered rather than written with a random 
 
 ## SQL (`sqlx`) — `ON CONFLICT` / `ON DUPLICATE KEY`
 
+For a table whose columns are the record's fields, `columns: auto` with `key: id` generates the
+upsert for you; see [Writing by column name](../connectors/postgres.md#writing-by-column-name).
+The rest of this section is for a hand-written `insert_query`.
+
 `insert_query` is user-supplied, so you write the dialect's upsert directly. This requires a
 pre-existing `UNIQUE`/`PRIMARY KEY` on the key column, and is incompatible with `bulk_copy`
 (COPY cannot express `ON CONFLICT`) — so you trade peak throughput for deduplication.

@@ -4723,6 +4723,16 @@
         }
       ]
     },
+    "SqlColumns": {
+      "description": "How a SQL sink maps a record to the columns of its table.",
+      "oneOf": [
+        {
+          "description": "Each top-level JSON field goes into the table column of the same name.",
+          "type": "string",
+          "const": "auto"
+        }
+      ]
+    },
     "SqlTimestamps": {
       "description": "How a SQL source renders timestamp columns.",
       "oneOf": [
@@ -4769,6 +4779,17 @@
           ],
           "format": "password"
         },
+        "columns": {
+          "description": "(Publisher only) `auto`: write each JSON field into the table column of the same name. The table must exist.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SqlColumns"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "create_publication": {
           "description": "(Consumer only, CDC) When `publication` is set, create it if missing (default false).\nNeeds table-owner privilege: it is auto-published `FOR TABLE {table}`.",
           "type": "boolean",
@@ -4793,6 +4814,13 @@
           "type": "boolean",
           "default": false
         },
+        "extra_column": {
+          "description": "(Publisher only, with `columns`) Column that takes the fields without a column of their own, as one JSON object.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "idle_timeout_ms": {
           "description": "Maximum idle time for a connection in milliseconds. Defaults to 600000ms (10 minutes).",
           "type": [
@@ -4804,6 +4832,13 @@
         },
         "insert_query": {
           "description": "(Publisher only) Optional. A custom SQL INSERT query. Use `?` as a placeholder for the payload.\nIf not provided, a default `INSERT INTO {table} (payload) VALUES (?)` is used.\n\nFor multi-column inserts, embed explicit source tokens directly in the query:\n`${metadata:<key>}` binds `message.metadata[\"<key>\"]`, and `${payload:<field>}`\nbinds the top-level JSON field `<field>` of the payload (types preserved:\nnumbers/bools stay numeric/bool). There is no fallback between the two: an\nabsent metadata key, non-JSON payload, or missing/non-scalar field binds SQL NULL.\nExample: `INSERT INTO orders (customer_id, sku, qty) VALUES (${metadata:customer_id}, ${payload:sku}, ${payload:qty})`.\nA query with no `${...}` tokens behaves exactly as before (whole payload bound once).\n`auto_create_table` is not supported together with a token-based query.\n\nTokens bind as text/number/bool; Postgres won't implicitly cast text into a\n`numeric`/`timestamptz` column (these arrive as JSON strings from a sql source).\nAdd an explicit cast next to the token — it is preserved verbatim in the SQL:\n`VALUES (${payload:amount}::numeric, ${payload:created_at}::timestamptz)`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "(Publisher only, with `columns`) Key column(s), comma-separated: a row with the same key is updated, not inserted again.",
           "type": [
             "string",
             "null"

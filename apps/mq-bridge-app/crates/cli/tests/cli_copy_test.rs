@@ -3633,6 +3633,55 @@ fn copy_limit_stops_after_n_matching_rows() {
     );
 }
 
+/// `columns=auto&key=id` writes fields into columns of the same name, and a rerun updates.
+#[cfg(any(feature = "full", feature = "sqlx"))]
+#[test]
+fn copy_writes_a_file_into_table_columns_and_can_be_rerun() {
+    let dir = TestDir::new();
+    let database = dir.path().join("columns.db");
+    sqlite_execute(
+        &database,
+        &["CREATE TABLE orders (id INTEGER PRIMARY KEY, sku TEXT, qty INTEGER DEFAULT 1)"],
+    );
+    let source = dir.path().join("in.csv");
+    let sink = format!(
+        "sqlite://{}?table=orders&columns=auto&key=id",
+        database.display()
+    );
+    for rows in ["ID,sku,qty\n1,a,2\n2,b,5\n", "ID,sku\n2,b2\n3,c\n"] {
+        std::fs::write(&source, rows).expect("write source");
+        let output = cli()
+            .args([
+                "copy",
+                &format!("file://{}?format=csv", source.display()),
+                &sink,
+                "--drain",
+            ])
+            .output()
+            .expect("run CLI copy");
+        assert!(output.status.success(), "{output:?}");
+    }
+
+    let target = dir.path().join("out.jsonl");
+    let output = cli()
+        .args([
+            "copy",
+            &format!(
+                "sqlite://{}?table=orders&cursor_column=id",
+                database.display()
+            ),
+            &format!("file://{}?format=raw", target.display()),
+            "--drain",
+        ])
+        .output()
+        .expect("run CLI copy");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read target"),
+        "{\"id\":1,\"sku\":\"a\",\"qty\":2}\n{\"id\":2,\"sku\":\"b2\",\"qty\":5}\n{\"id\":3,\"sku\":\"c\",\"qty\":1}\n"
+    );
+}
+
 /// A `.gz` path sets `compression` on both sides, so the round trip needs no parameter.
 #[test]
 fn copy_infers_compression_from_the_file_extension() {

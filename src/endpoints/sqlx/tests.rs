@@ -2023,3 +2023,220 @@ fn rfc3339_projection_applies_to_postgres_timestamps_only() {
     assert!(pg_rfc3339("PostgreSQL", "numeric", "\"n\"", Rfc3339).is_none());
     assert!(pg_rfc3339("MySQL", "timestamp", "`at`", Rfc3339).is_none());
 }
+
+async fn auto_columns_publisher(key: Option<&str>) -> (tempfile::TempDir, AnyPool, SqlxPublisher) {
+    let (dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER DEFAULT 7, extra TEXT)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let config = SqlxConfig {
+        url,
+        table: "t".to_string(),
+        columns: Some(crate::models::SqlColumns::Auto),
+        key: key.map(str::to_string),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    (dir, pool, publisher)
+}
+
+fn json_message(body: &str) -> CanonicalMessage {
+    CanonicalMessage::new(body.as_bytes().to_vec(), None)
+}
+
+async fn auto_rows(pool: &AnyPool) -> Vec<(i64, Option<String>, Option<i64>, Option<String>)> {
+    sqlx::query("SELECT id, name, qty, extra FROM t ORDER BY id")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| (r.get("id"), r.get("name"), r.get("qty"), r.get("extra")))
+        .collect()
+}
+
+#[tokio::test]
+async fn auto_columns_writes_fields_by_name_and_keeps_defaults() {
+    let (_dir, pool, publisher) = auto_columns_publisher(None).await;
+    let sent = publisher
+        .send_batch(vec![
+            json_message(r#"{"id":1,"name":"a","unknown":true}"#),
+            json_message(r#"{"id":2,"NAME":"b","qty":3,"extra":{"k":[1,2]}}"#),
+            json_message(r#"{"id":3,"name":null}"#),
+        ])
+        .await
+        .unwrap();
+    assert!(matches!(sent, SentBatch::Ack));
+    assert_eq!(
+        auto_rows(&pool).await,
+        vec![
+            (1, Some("a".to_string()), Some(7), None),
+            (
+                2,
+                Some("b".to_string()),
+                Some(3),
+                Some(r#"{"k":[1,2]}"#.to_string())
+            ),
+            (3, None, Some(7), None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn auto_columns_key_updates_only_the_named_columns() {
+    let (_dir, pool, publisher) = auto_columns_publisher(Some("id")).await;
+    publisher
+        .send_batch(vec![
+            json_message(r#"{"id":1,"name":"a","qty":1}"#),
+            json_message(r#"{"id":2,"name":"b","qty":2}"#),
+        ])
+        .await
+        .unwrap();
+    // A rerun, a partial update, a repeated key and a key-only record.
+    publisher
+        .send_batch(vec![
+            json_message(r#"{"id":1,"name":"a","qty":1}"#),
+            json_message(r#"{"id":2,"name":"b2"}"#),
+            json_message(r#"{"id":2,"name":"b3"}"#),
+            json_message(r#"{"id":1}"#),
+        ])
+        .await
+        .unwrap();
+    publisher
+        .send(json_message(r#"{"id":3,"name":"c"}"#))
+        .await
+        .unwrap();
+    assert_eq!(
+        auto_rows(&pool).await,
+        vec![
+            (1, Some("a".to_string()), Some(1), None),
+            (2, Some("b3".to_string()), Some(2), None),
+            (3, Some("c".to_string()), Some(7), None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn auto_columns_collects_unmapped_fields_in_the_extra_column() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER, extra TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let config = SqlxConfig {
+        url,
+        table: "t".to_string(),
+        columns: Some(crate::models::SqlColumns::Auto),
+        key: Some("id".to_string()),
+        extra_column: Some("extra".to_string()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    publisher
+        .send_batch(vec![
+            json_message(r#"{"id":1,"name":"a","color":"red","tags":[1,2]}"#),
+            json_message(r#"{"id":2,"name":"b"}"#),
+            json_message(r#"{"id":3,"color":"blue"}"#),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        auto_rows(&pool).await,
+        vec![
+            (
+                1,
+                Some("a".to_string()),
+                None,
+                Some(r#"{"color":"red","tags":[1,2]}"#.to_string())
+            ),
+            (2, Some("b".to_string()), None, None),
+            (3, None, None, Some(r#"{"color":"blue"}"#.to_string())),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn auto_columns_fails_only_the_record_it_cannot_map() {
+    let (_dir, pool, publisher) = auto_columns_publisher(None).await;
+    let sent = publisher
+        .send_batch(vec![
+            json_message(r#"{"id":1,"name":"a"}"#),
+            json_message("not json"),
+            json_message(r#"{"other":1}"#),
+        ])
+        .await
+        .unwrap();
+    let SentBatch::Partial { failed, .. } = sent else {
+        panic!("expected two failed records");
+    };
+    assert_eq!(failed.len(), 2);
+    assert!(failed
+        .iter()
+        .all(|(_, e)| matches!(e, PublisherError::NonRetryable(_))));
+    assert!(failed[1]
+        .1
+        .to_string()
+        .contains("columns: id, name, qty, extra"));
+    assert_eq!(auto_rows(&pool).await.len(), 1);
+}
+
+#[tokio::test]
+async fn auto_columns_splits_a_batch_over_the_bind_limit() {
+    let (_dir, pool, publisher) = auto_columns_publisher(None).await;
+    let messages = (0..20_000)
+        .map(|i| json_message(&format!(r#"{{"id":{i},"name":"n{i}"}}"#)))
+        .collect();
+    publisher.send_batch(messages).await.unwrap();
+    assert_eq!(auto_rows(&pool).await.len(), 20_000);
+}
+
+#[tokio::test]
+async fn auto_columns_rejects_a_config_it_cannot_serve() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let base = SqlxConfig {
+        url,
+        table: "t".to_string(),
+        columns: Some(crate::models::SqlColumns::Auto),
+        ..Default::default()
+    };
+    let error = |config: SqlxConfig| async move {
+        match SqlxPublisher::new(&config).await {
+            Ok(_) => panic!("config was accepted"),
+            Err(e) => format!("{e:#}"),
+        }
+    };
+    let missing = SqlxConfig {
+        table: "nope".to_string(),
+        ..base.clone()
+    };
+    assert!(error(missing).await.contains("table 'nope' does not exist"));
+    let bad_key = SqlxConfig {
+        key: Some("sku".to_string()),
+        ..base.clone()
+    };
+    assert!(error(bad_key)
+        .await
+        .contains("`key` column 'sku' is not a column"));
+    let both = SqlxConfig {
+        insert_query: Some("INSERT INTO t (id) VALUES (?)".to_string()),
+        ..base.clone()
+    };
+    assert!(error(both).await.contains("set only one"));
+    let key_only = SqlxConfig {
+        columns: None,
+        key: Some("id".to_string()),
+        ..base
+    };
+    assert!(error(key_only)
+        .await
+        .contains("`key` needs `columns: auto`"));
+}

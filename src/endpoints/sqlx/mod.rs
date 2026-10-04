@@ -22,6 +22,7 @@ use std::time::Duration;
 use tracing::{info, trace, warn};
 
 #[cfg(feature = "dedup")]
+mod columns;
 mod dedup;
 #[cfg(feature = "dedup")]
 pub(crate) use dedup::build_sql_dedup_store;
@@ -524,6 +525,8 @@ pub struct SqlxPublisher {
     lookup: Option<SqlLookup>,
     /// PostgreSQL with a writing `lookup_query`: a batch runs as one call to a generated function.
     pg_batch: Option<PgBatchLookup>,
+    /// Set by `columns: auto`: rows are built from the record's fields, not from `insert_query`.
+    auto: Option<columns::AutoColumns>,
 }
 
 /// The raw `lookup_query` a PostgreSQL batch function is generated from.
@@ -741,6 +744,43 @@ struct PgCopySink {
     table: String,
     columns: Vec<String>,
     sources: Vec<ColumnSource>,
+}
+
+/// Dedicated native Postgres pool: COPY needs the typed pg protocol, not the `Any` layer.
+async fn open_copy_pool(config: &SqlxConfig) -> anyhow::Result<PgPool> {
+    let url = build_sqlx_url_with_tls(config)?;
+    PgPoolOptions::new()
+        .max_connections(config.max_connections.unwrap_or(5))
+        // Match `create_sqlx_pool`: no liveness ping per acquire.
+        .test_before_acquire(config.test_before_acquire.unwrap_or(false))
+        .connect(&url)
+        .await
+        .context("bulk_copy: failed to open native PostgreSQL pool")
+}
+
+/// Appends one value in the PostgreSQL COPY *text* format, `\N` for NULL.
+fn push_copy_value(buf: &mut String, value: BindValue) {
+    match value {
+        BindValue::Null => buf.push_str("\\N"),
+        BindValue::Int(n) => buf.push_str(&n.to_string()),
+        BindValue::Float(f) => buf.push_str(&f.to_string()),
+        BindValue::Bool(b) => buf.push_str(if b { "t" } else { "f" }),
+        BindValue::Text(s) => buf.push_str(&copy_escape_text(&s)),
+    }
+}
+
+/// Runs one `COPY … FROM STDIN` with `buf` as its data.
+async fn copy_in(pool: &PgPool, stmt: &str, buf: &[u8]) -> Result<(), PublisherError> {
+    let mut copier = pool.copy_in_raw(stmt).await.map_err(classify_sql_error)?;
+    if let Err(e) = copier.send(buf).await {
+        // Tear the COPY down explicitly. `Drop` only buffers a CopyFail without
+        // awaiting the reply, so the connection could go back to the pool still in
+        // COPY-in state and poison the next query on it.
+        let _ = copier.abort("mq-bridge: COPY send failed").await;
+        return Err(classify_sql_error(e));
+    }
+    copier.finish().await.map_err(classify_sql_error)?;
+    Ok(())
 }
 
 /// Escape one text value for the PostgreSQL COPY *text* format (tab-separated, NL-terminated).
@@ -986,6 +1026,33 @@ impl SqlxPublisher {
                 driver_name,
                 table,
                 copy: None,
+                auto: None,
+            });
+        }
+
+        if config.key.is_some() && config.columns.is_none() {
+            return Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`key` needs `columns: auto`; with an `insert_query`, write the ON CONFLICT clause into the query"
+            ))));
+        }
+        if config.extra_column.is_some() && config.columns.is_none() {
+            return Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`extra_column` needs `columns: auto`"
+            ))));
+        }
+        if config.columns.is_some() {
+            let auto = columns::AutoColumns::new(&pool, &driver_name, config).await?;
+            return Ok(Self {
+                pg_batch: None,
+                pool,
+                _shared_pool: shared_pool,
+                insert_query: String::new(),
+                column_sources: Vec::new(),
+                lookup: None,
+                driver_name,
+                table,
+                copy: None,
+                auto: Some(auto),
             });
         }
 
@@ -1104,17 +1171,8 @@ impl SqlxPublisher {
                 ));
             }
             let columns = extract_copy_columns(&raw_insert_query, column_sources.len())?;
-            // Dedicated native Postgres pool: COPY needs the typed pg protocol, not the `Any` layer.
-            let url = build_sqlx_url_with_tls(config)?;
-            let pg_pool = PgPoolOptions::new()
-                .max_connections(config.max_connections.unwrap_or(5))
-                // Match `create_sqlx_pool`: no liveness ping per acquire.
-                .test_before_acquire(config.test_before_acquire.unwrap_or(false))
-                .connect(&url)
-                .await
-                .context("bulk_copy: failed to open native PostgreSQL pool")?;
             Some(PgCopySink {
-                pool: pg_pool,
+                pool: open_copy_pool(config).await?,
                 table: table.clone(),
                 columns,
                 sources: column_sources.clone(),
@@ -1133,6 +1191,7 @@ impl SqlxPublisher {
             copy,
             lookup: None,
             pg_batch: None,
+            auto: None,
         })
     }
 
@@ -1551,6 +1610,14 @@ impl MessagePublisher for SqlxPublisher {
         if self.lookup.is_some() {
             return self.lookup_one(&message).await;
         }
+        if let Some(auto) = &self.auto {
+            return match auto.send(&self.pool, vec![message]).await? {
+                SentBatch::Partial { mut failed, .. } if !failed.is_empty() => {
+                    Err(failed.swap_remove(0).1)
+                }
+                _ => Ok(Sent::Ack),
+            };
+        }
         trace!(message_id = %format!("{:032x}", message.message_id), table = %self.table, "Publishing to SQL");
         let query = sqlx::query(audited_sql(&self.insert_query));
         let query = if self.column_sources.is_empty() {
@@ -1576,6 +1643,10 @@ impl MessagePublisher for SqlxPublisher {
         if self.lookup.is_some() {
             return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
                 .await;
+        }
+
+        if let Some(auto) = &self.auto {
+            return auto.send(&self.pool, messages).await;
         }
 
         if let Some(sink) = &self.copy {
@@ -1747,30 +1818,12 @@ impl SqlxPublisher {
                 }
                 let value = resolve_source(msg, source, &payload_json);
                 reject_embedded_nul(source, &value)?;
-                match value {
-                    BindValue::Null => buf.push_str("\\N"),
-                    BindValue::Int(n) => buf.push_str(&n.to_string()),
-                    BindValue::Float(f) => buf.push_str(&f.to_string()),
-                    BindValue::Bool(b) => buf.push_str(if b { "t" } else { "f" }),
-                    BindValue::Text(s) => buf.push_str(&copy_escape_text(&s)),
-                }
+                push_copy_value(&mut buf, value);
             }
             buf.push('\n');
         }
 
-        let mut copier = sink
-            .pool
-            .copy_in_raw(&stmt)
-            .await
-            .map_err(classify_sql_error)?;
-        if let Err(e) = copier.send(buf.as_bytes()).await {
-            // Tear the COPY down explicitly. `Drop` only buffers a CopyFail without
-            // awaiting the reply, so the connection could go back to the pool still in
-            // COPY-in state and poison the next query on it.
-            let _ = copier.abort("mq-bridge: COPY send failed").await;
-            return Err(classify_sql_error(e));
-        }
-        copier.finish().await.map_err(classify_sql_error)?;
+        copy_in(&sink.pool, &stmt, buf.as_bytes()).await?;
 
         trace!(count = messages.len(), table = %sink.table, "Bulk-copied batch to PostgreSQL");
         Ok(SentBatch::Ack)
