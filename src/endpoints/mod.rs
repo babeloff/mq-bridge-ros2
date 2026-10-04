@@ -981,6 +981,35 @@ fn source_position_unavailable(route_name: &str) -> anyhow::Error {
 /// guards [`create_consumer_from_route_with_source_metadata`]; running it first keeps a route
 /// that is about to be rejected from opening the sink, which for `file` would create the part
 /// directory at `path`.
+/// A `file` route that reads the path it writes would feed itself.
+pub(crate) fn check_distinct_files(
+    route_name: &str,
+    input: &Endpoint,
+    output: &Endpoint,
+) -> Result<()> {
+    // An endpoint that does not resolve is reported where it is built.
+    let (Ok(input), Ok(output)) = (
+        resolve_endpoint(input, route_name),
+        resolve_endpoint(output, route_name),
+    ) else {
+        return Ok(());
+    };
+    let (EndpointType::File(source), EndpointType::File(sink)) =
+        (&input.endpoint_type, &output.endpoint_type)
+    else {
+        return Ok(());
+    };
+    let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+    if canonical(&source.path) == canonical(&sink.path) {
+        return Err(crate::errors::InvalidConfig(anyhow!(
+            "route '{route_name}': the file source and sink are the same path '{}'; the route would read its own output",
+            source.path
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 pub(crate) fn check_source_position_available(
     route_name: &str,
     input: &Endpoint,

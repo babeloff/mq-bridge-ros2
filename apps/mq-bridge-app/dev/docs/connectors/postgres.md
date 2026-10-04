@@ -35,9 +35,12 @@ The config key is `sqlx` for PostgreSQL, MySQL/MariaDB, and SQLite; the connecti
 
 ```bash
 mqb copy --drain \
-  --from postgres://user:pass@localhost/app?table=orders \
+  --from 'postgres://user:pass@localhost/app?table=orders&cursor_column=id' \
   --to null:
 ```
+
+`cursor_column` names a unique, increasing column to read in order. Without it the source
+treats the table as an mq-bridge work queue, which needs `id` and `locked_until` columns.
 
 **Write with auto-created table (destination):**
 

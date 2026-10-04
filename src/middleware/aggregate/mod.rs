@@ -157,7 +157,11 @@ impl Field {
         at: usize,
         sources: &mut Vec<Vec<String>>,
     ) -> anyhow::Result<Self> {
-        let invalid = || anyhow::anyhow!("aggregate: invalid field '{name}: {spec}'");
+        let invalid = || {
+            anyhow::anyhow!(
+                "aggregate: invalid field '{name}: {spec}'; a field is `count` or one of sum, min, max, last, mean, stddev, variance (path), ema, ema_stddev, ema_variance (path, alpha or half-life)"
+            )
+        };
         let mut label = serde_json::to_vec(name)?;
         label.push(b':');
         let spec = spec.trim();

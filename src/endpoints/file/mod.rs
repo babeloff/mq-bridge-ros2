@@ -1954,6 +1954,19 @@ fn read_record_sync<R: std::io::BufRead>(
     csv: &CsvDialect,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<usize> {
+    read_record_sync_checked(reader, delimiter, format, csv, buf, &mut false)
+}
+
+/// [`read_record_sync`]; `open_quote` is set when the input ended inside a quoted field.
+fn read_record_sync_checked<R: std::io::BufRead>(
+    reader: &mut R,
+    delimiter: &[u8],
+    format: &FileFormat,
+    csv: &CsvDialect,
+    buf: &mut Vec<u8>,
+    open_quote: &mut bool,
+) -> std::io::Result<usize> {
+    *open_quote = false;
     let start = buf.len();
     let mut total = read_until_bytes_sync(reader, delimiter, buf)?;
     if !matches!(format, FileFormat::Csv) {
@@ -1965,6 +1978,7 @@ fn read_record_sync<R: std::io::BufRead>(
         let from = buf.len();
         let n = read_until_bytes_sync(reader, delimiter, buf)?;
         if n == 0 {
+            *open_quote = true;
             break;
         }
         quotes.feed(&buf[from..]);
@@ -2006,6 +2020,7 @@ fn run_file_tail_task_sync(
     csv: CsvDialect,
     ready: Arc<AtomicBool>,
     drain_on_empty: Arc<AtomicBool>,
+    fatal_error_slot: Arc<StdMutex<Option<String>>>,
 ) {
     let mut last_position: u64 = initial_offset;
     let mut reader: Option<std::io::BufReader<std::fs::File>> = None;
@@ -2068,12 +2083,33 @@ fn run_file_tail_task_sync(
         // record is delivered — closing the race where the reader reaches EOF before
         // the route propagates its drain intent via `set_exit_on_empty`.
         let mut pending_partial = false;
+        let mut open_quote = false;
+        let mut fatal = None;
 
         if let Some(r) = reader.as_mut() {
             for _ in 0..BATCH_SIZE {
                 buf.clear();
-                match read_record_sync(r, &delimiter, &format, &csv, &mut buf) {
+                match read_record_sync_checked(
+                    r,
+                    &delimiter,
+                    &format,
+                    &csv,
+                    &mut buf,
+                    &mut open_quote,
+                ) {
                     Ok(0) => break, // EOF
+                    Ok(_) if open_quote => {
+                        if drain_on_empty.load(Ordering::SeqCst) {
+                            fatal = Some(format!(
+                                "csv: {path} ends inside a quoted field (record at byte {last_position}); the file looks truncated"
+                            ));
+                        } else {
+                            // Live tail: the writer may still close the quote.
+                            pending_partial = true;
+                            reader = None;
+                        }
+                        break;
+                    }
                     Ok(n) => {
                         if !buf.ends_with(&delimiter) {
                             if drain_on_empty.load(Ordering::SeqCst) {
@@ -2137,6 +2173,12 @@ fn run_file_tail_task_sync(
             }
             current_sleep = std::time::Duration::from_millis(1);
             signaled_eof = false; // data flowed; re-arm the EOF marker
+        }
+
+        if let Some(reason) = fatal {
+            tracing::error!("{reason}; closing stream");
+            *fatal_error_slot.lock().unwrap() = Some(reason);
+            break;
         }
 
         if lines_read_in_batch == 0 {
@@ -2999,6 +3041,8 @@ impl FileConsumer {
         let path_clone = path.to_string();
         let format_clone = format;
         let csv_clone = csv;
+        let fatal_error: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let fatal_error_clone = fatal_error.clone();
         std::thread::spawn(move || {
             run_file_tail_task_sync(
                 path_clone,
@@ -3010,6 +3054,7 @@ impl FileConsumer {
                 csv_clone,
                 ready_clone,
                 drain_on_empty_clone,
+                fatal_error_clone,
             );
         });
 
@@ -3021,7 +3066,7 @@ impl FileConsumer {
             offset_file,
             ready,
             pending_eof: false,
-            decode_error: None,
+            decode_error: Some(fatal_error),
             drain_on_empty,
         })))
     }
@@ -3686,6 +3731,8 @@ pub(crate) fn parse_message(
         }
         // Parquet objects are decoded whole by the object_store source; there are no lines.
         FileFormat::Parquet => None,
+        // A blank line is not a record, in any line format.
+        _ if buffer.is_empty() => None,
         FileFormat::Raw => {
             let mut msg = CanonicalMessage::new(buffer.to_vec(), None);
             msg.metadata

@@ -1,6 +1,6 @@
 // Headless `--config` runs through `aggregate` and the middlewares it is combined with:
 // `deduplication`, `transform` and `lookup`. Each route drains a file into a file.
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};

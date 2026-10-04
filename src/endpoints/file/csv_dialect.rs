@@ -72,7 +72,12 @@ impl CsvDialect {
             FileFormat::Csv => {
                 Self::from_config(config, delimiter).map_err(|e| InvalidConfig(e).into())
             }
-            _ => Ok(Self::default()),
+            _ => {
+                if *config != CsvConfig::default() {
+                    tracing::warn!("`csv` settings are ignored: they apply to `format: csv` only");
+                }
+                Ok(Self::default())
+            }
         }
     }
 

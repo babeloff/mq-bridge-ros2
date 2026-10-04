@@ -84,6 +84,47 @@ struct OutcomeGuard {
 pub(crate) struct DropReport {
     count: u64,
     last_cause: Option<String>,
+    /// Messages per distinct cause, for the first [`MAX_DROP_CAUSES`] causes seen.
+    causes: Vec<(String, u64)>,
+}
+
+const MAX_DROP_CAUSES: usize = 8;
+
+impl DropReport {
+    fn add(&mut self, cause: &PublisherError) {
+        let cause = cause.to_string();
+        self.count += 1;
+        if let Some((_, count)) = self.causes.iter_mut().find(|(known, _)| *known == cause) {
+            *count += 1;
+        } else if self.causes.len() < MAX_DROP_CAUSES {
+            self.causes.push((cause.clone(), 1));
+        }
+        self.last_cause = Some(cause);
+    }
+
+    /// The one cause, or the three most frequent with their counts.
+    fn causes_text(&self) -> String {
+        if self.causes.len() <= 1 {
+            return self
+                .last_cause
+                .as_deref()
+                .unwrap_or("unknown cause")
+                .to_string();
+        }
+        let mut causes: Vec<&(String, u64)> = self.causes.iter().collect();
+        causes.sort_by(|a, b| b.1.cmp(&a.1));
+        let shown: Vec<String> = causes
+            .iter()
+            .take(3)
+            .map(|(cause, count)| format!("{count} x {cause}"))
+            .collect();
+        let more = if causes.len() > 3 {
+            "; and other causes"
+        } else {
+            ""
+        };
+        format!("{}{more}", shown.join("; "))
+    }
 }
 
 /// How long a `send_batch` may stay pending before the route reports unhealthy.
@@ -172,7 +213,7 @@ impl Drop for OutcomeGuard {
                     s.error = Some(format!(
                         "dropped {} message(s): sink rejected them permanently and no dlq middleware is configured: {}",
                         drops.count,
-                        drops.last_cause.as_deref().unwrap_or("unknown cause")
+                        drops.causes_text()
                     ));
                 }
             }
@@ -691,10 +732,19 @@ fn record_dropped_messages(
     dropped: usize,
     cause: &PublisherError,
 ) {
+    record_dropped_causes(drops, std::iter::repeat_n(cause, dropped));
+}
+
+/// [`record_dropped_messages`] with a cause per message.
+fn record_dropped_causes<'a>(
+    drops: Option<&Arc<RwLock<DropReport>>>,
+    causes: impl Iterator<Item = &'a PublisherError>,
+) {
     let Some(drops) = drops else { return };
     let mut report = recover_write_lock(drops, "route_drop_report");
-    report.count += dropped as u64;
-    report.last_cause = Some(cause.to_string());
+    for cause in causes {
+        report.add(cause);
+    }
 }
 
 struct BatchScratch {
@@ -818,21 +868,15 @@ async fn send_batch_and_commit(
                 // Non-retryable entries in a mixed batch are Ack'ed (dropped) below,
                 // so account for them here before the transient path returns.
                 if !has_dlq_middleware {
-                    let mut dropped = 0usize;
-                    let mut cause = None;
-                    for (msg, e) in &failed {
-                        if matches!(e, PublisherError::NonRetryable(_)) {
-                            error!(
-                                "Dropping message (ID: {:032x}) due to non-retryable error: {}",
-                                msg.message_id, e
-                            );
-                            dropped += 1;
-                            cause.get_or_insert(e);
-                        }
+                    let permanent =
+                        |e: &&PublisherError| matches!(e, PublisherError::NonRetryable(_));
+                    for (msg, e) in failed.iter().filter(|(_, e)| permanent(&e)) {
+                        error!(
+                            "Dropping message (ID: {:032x}) due to non-retryable error: {}",
+                            msg.message_id, e
+                        );
                     }
-                    if let Some(cause) = cause {
-                        record_dropped_messages(drops, dropped, cause);
-                    }
+                    record_dropped_causes(drops, failed.iter().map(|(_, e)| e).filter(permanent));
                 }
                 let mut dispositions = map_responses_to_dispositions(
                     &scratch.message_ids,
@@ -873,9 +917,7 @@ async fn send_batch_and_commit(
                 );
             }
             if !has_dlq_middleware {
-                if let Some((_, first)) = failed.first() {
-                    record_dropped_messages(drops, failed.len(), first);
-                }
+                record_dropped_causes(drops, failed.iter().map(|(_, e)| e));
             }
             let err_tx = err_tx.clone();
             let dispositions = map_responses_to_dispositions(
@@ -1703,6 +1745,7 @@ impl Route {
     ) -> anyhow::Result<bool> {
         let (_internal_shutdown_tx, internal_shutdown_rx) = bounded(1);
         let shutdown_rx = shutdown_rx.unwrap_or(internal_shutdown_rx);
+        crate::endpoints::check_distinct_files(name, &self.input, &self.output)?;
         if let Some(result) = crate::endpoints::try_run_fast_path_route(
             self,
             name,

@@ -278,7 +278,21 @@ fn resolve_source(
                     BindValue::Null
                 }
             }
-            _ => BindValue::Null,
+            Some(serde_json::Value::Null) => BindValue::Null,
+            other => {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let reason = match other {
+                        Some(_) => "is an object or array",
+                        None => "is missing from the payload",
+                    };
+                    warn!(
+                        "`${{payload:{field}}}` binds NULL: the field {reason}. Tokens read top-level scalar fields only. Further occurrences are not logged."
+                    );
+                }
+                BindValue::Null
+            }
         },
     }
 }
@@ -451,6 +465,14 @@ async fn create_sqlx_pool(config: &SqlxConfig) -> anyhow::Result<AnyPool> {
     // per batch. Dead connections instead surface as a query error, which the route already
     // reconnects on.
     pool_options = pool_options.test_before_acquire(config.test_before_acquire.unwrap_or(false));
+
+    // The pool retries a refused connection silently until `acquire_timeout`; one direct
+    // attempt first reports why the server cannot be reached.
+    if !url.starts_with("sqlite") {
+        use sqlx::Connection;
+        let probe = sqlx::AnyConnection::connect(&url).await?;
+        probe.close().await.ok();
+    }
 
     Ok(pool_options.connect(&url).await?)
 }
@@ -796,14 +818,24 @@ fn sql_error_is_deterministic(e: &sqlx::Error) -> bool {
     // table fails fast (Postgres `42703`/`42P01` and MySQL `42S22`/`42S02` are
     // already caught by SQLSTATE above).
     let msg = db_err.message().to_ascii_lowercase();
-    msg.contains("no such column") || msg.contains("no such table")
+    msg.contains("no such column")
+        || msg.contains("no such table")
+        || msg.contains("has no column named")
+}
+
+/// The error without sqlx's ` at line N`: that is a line of the server's source, not of the query.
+fn sql_error_text(e: sqlx::Error) -> anyhow::Error {
+    match e.as_database_error() {
+        Some(db_err) => anyhow!("error returned from database: {}", db_err.message()),
+        None => anyhow!(e),
+    }
 }
 
 fn classify_sql_error(e: sqlx::Error) -> PublisherError {
     if sql_error_is_deterministic(&e) {
-        return PublisherError::NonRetryable(anyhow!(e));
+        return PublisherError::NonRetryable(sql_error_text(e));
     }
-    PublisherError::Retryable(anyhow!(e))
+    PublisherError::Retryable(sql_error_text(e))
 }
 
 /// Consumer-side twin of [`classify_sql_error`]. A deterministic schema/type/
@@ -813,9 +845,28 @@ fn classify_sql_error(e: sqlx::Error) -> PublisherError {
 /// (retryable) so restarts/failovers recover without losing messages.
 fn classify_sql_consumer_error(e: sqlx::Error) -> ConsumerError {
     if sql_error_is_deterministic(&e) {
-        ConsumerError::Permanent(anyhow!(e))
+        ConsumerError::Permanent(sql_error_text(e))
     } else {
-        ConsumerError::Connection(anyhow!(e))
+        ConsumerError::Connection(sql_error_text(e))
+    }
+}
+
+/// [`classify_sql_consumer_error`] for the work-queue reader, which needs its own columns.
+fn classify_queue_read_error(e: sqlx::Error) -> ConsumerError {
+    let missing_queue_column = sql_error_is_deterministic(&e)
+        && e.as_database_error().is_some_and(|db_err| {
+            let msg = db_err.message().to_ascii_lowercase();
+            ["id", "locked_until"].iter().any(|column| {
+                msg.contains(&format!("column \"{column}\" does not exist"))
+                    || msg.contains(&format!("no such column: {column}"))
+                    || msg.contains(&format!("unknown column '{column}'"))
+            })
+        });
+    match classify_sql_consumer_error(e) {
+        ConsumerError::Permanent(e) if missing_queue_column => ConsumerError::Permanent(e.context(
+            "the table is not an mq-bridge queue table (it lacks `id` or `locked_until`); set `cursor_column=<unique column>` to read a plain table",
+        )),
+        other => other,
     }
 }
 
@@ -1856,11 +1907,7 @@ impl SqlxConsumer {
         &self,
         limit: usize,
     ) -> Result<Vec<sqlx::any::AnyRow>, ConsumerError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(classify_sql_consumer_error)?;
+        let mut tx = self.pool.begin().await.map_err(classify_queue_read_error)?;
 
         let lock_query = format!(
             "SELECT id FROM {} WHERE locked_until IS NULL OR locked_until < NOW() ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED",
@@ -1871,7 +1918,7 @@ impl SqlxConsumer {
             .bind(limit as i64)
             .fetch_all(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?
+            .map_err(classify_queue_read_error)?
             .into_iter()
             .map(|row| row.get("id"))
             .collect();
@@ -1900,7 +1947,7 @@ impl SqlxConsumer {
         query
             .execute(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
         // Select the full rows that we just locked
         let select_query = format!(
@@ -1916,9 +1963,9 @@ impl SqlxConsumer {
         let rows = query
             .fetch_all(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
-        tx.commit().await.map_err(classify_sql_consumer_error)?;
+        tx.commit().await.map_err(classify_queue_read_error)?;
 
         Ok(rows)
     }
@@ -1933,7 +1980,7 @@ impl SqlxConsumer {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
         let select_query = format!(
             "SELECT id FROM {} WHERE locked_until IS NULL OR locked_until < datetime('now') ORDER BY id LIMIT ?",
@@ -1944,7 +1991,7 @@ impl SqlxConsumer {
             .bind(limit as i64)
             .fetch_all(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?
+            .map_err(classify_queue_read_error)?
             .into_iter()
             .map(|row| row.get("id"))
             .collect();
@@ -1971,7 +2018,7 @@ impl SqlxConsumer {
         query
             .execute(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
         let select_payload_query = format!(
             "SELECT id, payload FROM {} WHERE id IN ({})",
@@ -1984,9 +2031,9 @@ impl SqlxConsumer {
         let rows = query
             .fetch_all(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
-        tx.commit().await.map_err(classify_sql_consumer_error)?;
+        tx.commit().await.map_err(classify_queue_read_error)?;
 
         Ok(rows)
     }
@@ -2038,7 +2085,7 @@ impl MessageConsumer for SqlxConsumer {
                 .bind(max_messages as i64)
                 .fetch_all(&self.pool)
                 .await
-                .map_err(classify_sql_consumer_error)?,
+                .map_err(classify_queue_read_error)?,
             "MySQL" | "MariaDB" => self.fetch_and_lock_mysql(max_messages).await?,
             "SQLite" => self.fetch_and_lock_sqlite(max_messages).await?,
             _ => {
@@ -2049,7 +2096,7 @@ impl MessageConsumer for SqlxConsumer {
                     .bind(max_messages as i64)
                     .fetch_all(&self.pool)
                     .await
-                    .map_err(classify_sql_consumer_error)?
+                    .map_err(classify_queue_read_error)?
             }
         };
 

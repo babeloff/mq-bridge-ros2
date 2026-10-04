@@ -2780,21 +2780,31 @@ async fn test_file_csv_reads_crlf_files() {
     );
 }
 
-/// An unterminated quote at EOF yields what there is instead of hanging the reader.
+/// A truncated export must not load as if it were whole.
 #[tokio::test]
-async fn test_file_csv_unterminated_quote_at_eof_is_emitted() {
+async fn csv_drain_fails_on_a_quote_left_open_at_end_of_file() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("data.csv");
-    tokio::fs::write(&path, "a,b\n1,\"open\nstill open\n")
+    let file_path = dir.path().join("truncated.csv");
+    tokio::fs::write(&file_path, "id,name\n1,a\n2,\"cut off\n")
         .await
         .unwrap();
-    let rows = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        read_csv_rows(&csv_config(&path), 1),
-    )
-    .await
-    .expect("reader hung on an unterminated quote");
-    assert_eq!(rows, vec![json!({"a": "1", "b": "open\nstill open"})]);
+
+    let mut source = FileConsumer::new(&csv_config(&file_path)).await.unwrap();
+    source.set_exit_on_empty(true);
+
+    let mut rows = 0;
+    let error = loop {
+        match source.receive_batch(10).await {
+            Ok(batch) => rows += batch.messages.len(),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(rows, 1);
+    assert!(
+        matches!(error, crate::traits::ConsumerError::Permanent(_)),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("ends inside a quoted field"));
 }
 
 /// Pinned, not endorsed: CSV has no null, so `null` is written as the text `null` and
@@ -4024,4 +4034,23 @@ async fn test_file_csv_rejects_ambiguous_dialects() {
         ..csv_dialect_config(&path, CsvConfig::default())
     };
     assert!(FileConsumer::new(&config).await.is_err());
+}
+
+#[tokio::test]
+async fn blank_lines_are_not_records() {
+    for format in [FileFormat::Raw, FileFormat::Json] {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("blank.jsonl");
+        tokio::fs::write(&file_path, "{\"a\":1}\n\n\r\n{\"a\":2}\n")
+            .await
+            .unwrap();
+        let config = FileConfig {
+            path: file_path.to_str().unwrap().to_string(),
+            format,
+            ..Default::default()
+        };
+        let mut source = FileConsumer::new(&config).await.unwrap();
+        source.set_exit_on_empty(true);
+        assert_eq!(drain_count(&mut source).await, 2);
+    }
 }
