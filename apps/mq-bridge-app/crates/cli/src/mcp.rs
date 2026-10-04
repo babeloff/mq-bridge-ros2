@@ -9,18 +9,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use mq_bridge_app::mq_bridge::{
+    CanonicalMessage, Handled, Publisher, Sent, SentBatch,
     models::{Endpoint, EndpointType, Route},
     route::{RouteHandle, RouteOutcome},
-    CanonicalMessage, Handled, Publisher, Sent, SentBatch,
 };
 use mq_bridge_app::route_metrics::{
-    format_capture_time, is_redelivery, MessageCapture, RouteMetrics, RouteTiming,
-    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY,
+    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY, MessageCapture, RouteMetrics, RouteTiming,
+    format_capture_time, is_redelivery,
 };
 use mq_bridge_app::status_registry::{
     InstanceKind, StatusEntity, StatusLease, StatusRoute, StatusSnapshot, StatusSummary,
@@ -28,9 +28,10 @@ use mq_bridge_app::status_registry::{
 use mq_bridge_app::ui_app::{ConsumerStatusSnapshot, EndpointStatusSnapshot, RouteOutcomeSnapshot};
 use rmcp::schemars;
 use rmcp::{
+    ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
-    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt,
+    tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -651,7 +652,7 @@ impl BridgeMcp {
 
     #[tool(
         description = "Publish one message or a batch of messages to any endpoint. \
-            The target is supplied inline as endpoint JSON keyed by type (e.g. \
+            The endpoint is supplied inline in `publisher` as JSON keyed by type (e.g. \
             {\"kafka\": {\"url\": \"...\", \"topic\": \"...\"}}); this is independent of routes. \
             Provide either `message` or `messages`; each message has a `payload` and optional \
             `metadata` headers (e.g. `kind` for the message type, `correlation_id`). Returns the \
@@ -1295,13 +1296,12 @@ impl ServerHandler for BridgeMcp {
     }
 }
 
-const INSTRUCTIONS: &str =
-    "mq-bridge: a universal, protocol-agnostic message and data bridge. Move data between \
+const INSTRUCTIONS: &str = "mq-bridge: a universal, protocol-agnostic message and data bridge. Move data between \
      any of the supported endpoints (postgres, kafka, nats, mqtt, mongodb, redis, ibm-mq, \
      http, files, and more) ad hoc. `publish` and `start_route` take the endpoint(s) \
      inline as JSON keyed by type, e.g. {\"kafka\": {\"url\": \"...\", \"topic\": \
      \"...\"}}. Use `publish` to \
-     send messages to a target; `start_route` to move messages from a source (`input`) to \
+     send messages to the endpoint given in `publisher`; `start_route` to move messages from a source (`input`) to \
      a sink (`output`), optionally setting `exit_on_empty` to drain-then-exit; and \
      `list_routes` / `route_status` / `stop_route` to manage running routes. Prefer \
      `wait_route` over polling `route_status` for a drain-then-exit job: it is one call \
@@ -1315,8 +1315,7 @@ const INSTRUCTIONS: &str =
      (`latest`) only sees messages published after the subscription is created.";
 
 /// Appended to the instructions above only when `--agent-bus` is on.
-const AGENT_BUS_INSTRUCTIONS: &str =
-    " Agents on one machine can also message each other: `agent_send` delivers to a named \
+const AGENT_BUS_INSTRUCTIONS: &str = " Agents on one machine can also message each other: `agent_send` delivers to a named \
      peer and is always available, while `agent_listen` opens this server's own inbox and \
      is off until called — so nothing reaches this agent unless it opts in. Once \
      listening, collect mail with `route_messages` on route `agent-inbox`. `server_info` \
@@ -1545,7 +1544,7 @@ async fn run_http(server: BridgeMcp, bind: String) -> anyhow::Result<()> {
         service::TowerToHyperService,
     };
     use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService,
+        StreamableHttpService, session::local::LocalSessionManager,
     };
 
     // One shared server across all sessions, so routes, publishers and metrics
@@ -1904,10 +1903,12 @@ mod tool_tests {
         assert_eq!(stopped["discarded_captured_messages"], 0, "{stopped}");
 
         // A stopped route is gone from every reporting surface.
-        assert!(server
-            .route_status(params(json!({ "name": "drain-lifecycle" })))
-            .await
-            .is_err());
+        assert!(
+            server
+                .route_status(params(json!({ "name": "drain-lifecycle" })))
+                .await
+                .is_err()
+        );
         let listed = result_json(&server.list_routes().await.expect("list_routes succeeds"));
         assert_eq!(listed.as_array().expect("an array").len(), 0, "{listed}");
     }
@@ -2025,10 +2026,12 @@ mod tool_tests {
         assert!(server.route_status(params(name.clone())).await.is_err());
         assert!(server.stop_route(params(name.clone())).await.is_err());
         assert!(server.route_messages(params(name.clone())).await.is_err());
-        assert!(server
-            .wait_route(params(json!({ "name": "never-started" })))
-            .await
-            .is_err());
+        assert!(
+            server
+                .wait_route(params(json!({ "name": "never-started" })))
+                .await
+                .is_err()
+        );
     }
 
     /// A route that discarded messages explains itself in `wait_route`, not only

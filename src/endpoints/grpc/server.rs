@@ -334,7 +334,7 @@ enum Pending {
     /// Resolves to the disposition the consuming route committed.
     Receipt(oneshot::Receiver<MessageDisposition>),
     /// Never reached a consumer; answered with this reason.
-    Nack(&'static str),
+    Nack(String),
 }
 
 /// Unacknowledged messages retained for one subscriber, so a consumer reconnecting with
@@ -629,13 +629,13 @@ impl proto::bridge_server::Bridge for BridgeService {
         trace!(msg_id = %msg_id, topic = %topic, "BridgeService::publish received message");
         let receipt = match self.router.dispatch(msg).await {
             Ok(receipt) => receipt,
-            Err(_) => {
-                warn!(msg_id = %msg_id, topic = %topic, "BridgeService::publish failed: internal server queue is closed");
+            Err(e) => {
+                warn!(msg_id = %msg_id, topic = %topic, "BridgeService::publish failed: {e}");
                 return Ok(Response::new(proto::PublishResponse {
                     result: Some(proto::publish_response::Result::Ack(proto::Ack {
                         id: msg_id,
                         status: 1, // NACK
-                        reason: "Internal queue closed".to_string(),
+                        reason: e.to_string(),
                         metadata: Default::default(),
                     })),
                 }));
@@ -722,7 +722,7 @@ impl proto::bridge_server::Bridge for BridgeService {
                         result: Some(proto::publish_response::Result::Ack(proto::Ack {
                             id: msg_id,
                             status: proto::ack::Status::Nack as i32,
-                            reason: reason.to_string(),
+                            reason,
                             metadata: Default::default(),
                         })),
                     },
@@ -742,14 +742,12 @@ impl proto::bridge_server::Bridge for BridgeService {
                 trace!(msg_id = %msg_id, topic = %topic, "BridgeService::publish_batch received message");
                 let pending = match router.dispatch(msg).await {
                     Ok(receipt) => Pending::Receipt(receipt),
-                    Err(_) => {
-                        warn!(
-                            "publish_batch: internal server queue closed, stopping dispatch task"
-                        );
+                    Err(e) => {
+                        warn!(topic = %topic, "publish_batch: {e}, stopping dispatch task");
                         // Queued rather than sent directly, so this terminal NACK still
                         // arrives after the responses for the messages before it.
                         let _ = pending_tx
-                            .send((msg_id, Pending::Nack("Internal queue closed")))
+                            .send((msg_id, Pending::Nack(e.to_string())))
                             .await;
                         break;
                     }

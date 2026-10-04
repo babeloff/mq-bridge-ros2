@@ -208,6 +208,51 @@ pub async fn test_postgres_multicolumn() {
     .await;
 }
 
+/// `columns: auto` sends one statement text with bind types that change from record to record.
+pub async fn test_postgres_auto_columns_changing_bind_types() {
+    use mq_bridge::traits::MessagePublisher;
+    use mq_bridge::CanonicalMessage;
+    use sqlx::AnyPool;
+
+    setup_logging();
+    run_test_with_docker(DOCKER_COMPOSE_FILE, || async {
+        sqlx::any::install_default_drivers();
+        let pool = AnyPool::connect(DATABASE_URL).await.unwrap();
+        sqlx::query("DROP TABLE IF EXISTS prices")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE prices (id INTEGER PRIMARY KEY, price NUMERIC)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let config = mq_bridge::models::SqlxConfig {
+            url: DATABASE_URL.to_string(),
+            table: "prices".to_string(),
+            columns: Some(mq_bridge::models::SqlColumns::Auto),
+            max_connections: Some(1),
+            ..Default::default()
+        };
+        let publisher = SqlxPublisher::new(&config).await.unwrap();
+        for record in [
+            r#"{"id":1,"price":5}"#,
+            r#"{"id":2,"price":5.5}"#,
+            r#"{"id":3,"price":"8.25"}"#,
+        ] {
+            let msg = CanonicalMessage::new(record.as_bytes().to_vec(), None);
+            publisher.send(msg).await.unwrap();
+        }
+
+        let prices: Vec<String> = sqlx::query_scalar("SELECT price::text FROM prices ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(prices, ["5", "5.5", "8.25"]);
+    })
+    .await;
+}
+
 /// Regression: a source table with a `TIMESTAMPTZ` column (plus other types the sqlx `Any`
 /// driver cannot map: `NUMERIC`, `TEXT[]`) must be readable by the cursor reader instead of
 /// failing every read forever. Reads 7 columns and writes the rows to a JSON file.

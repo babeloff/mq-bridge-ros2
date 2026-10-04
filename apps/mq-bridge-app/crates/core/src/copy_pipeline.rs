@@ -81,8 +81,16 @@ pub fn configure_counter(input: &mut Endpoint) -> anyhow::Result<Arc<AtomicU64>>
 /// Anything less than outermost undercounts a drop: a counter sitting inside a
 /// URI-configured `transform` still tallies the rows that transform is about to
 /// reject.
-pub fn configure_delivered_counter(input: &mut Endpoint) -> anyhow::Result<Arc<AtomicU64>> {
-    let (entry, counter) = new_counter()?;
+///
+/// With `limit`, the source reports its end once that many messages came through.
+pub fn configure_delivered_counter(
+    input: &mut Endpoint,
+    limit: Option<u64>,
+) -> anyhow::Result<Arc<AtomicU64>> {
+    let (mut entry, counter) = new_counter()?;
+    if let (Middleware::Custom { config, .. }, Some(limit)) = (&mut entry, limit) {
+        config["limit"] = json!(limit);
+    }
     input.middlewares.insert(0, entry);
     Ok(counter)
 }
@@ -498,6 +506,7 @@ impl CustomMiddlewareFactory for CopyCounterFactory {
         Ok(Box::new(CountingConsumer {
             inner: consumer,
             counter,
+            limit: config.get("limit").and_then(serde_json::Value::as_u64),
         }))
     }
 }
@@ -505,6 +514,8 @@ impl CustomMiddlewareFactory for CopyCounterFactory {
 struct CountingConsumer {
     inner: Box<dyn MessageConsumer>,
     counter: Arc<AtomicU64>,
+    /// `copy --limit`: the source ends once this many messages were counted.
+    limit: Option<u64>,
 }
 
 #[async_trait]
@@ -518,6 +529,16 @@ impl MessageConsumer for CountingConsumer {
     }
 
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
+        let max_messages = match self.limit {
+            Some(limit) => {
+                let left = limit.saturating_sub(self.counter.load(Ordering::Relaxed));
+                if left == 0 {
+                    return Err(ConsumerError::EndOfStream);
+                }
+                max_messages.min(usize::try_from(left).unwrap_or(usize::MAX))
+            }
+            None => max_messages,
+        };
         let batch = self.inner.receive_batch(max_messages).await?;
         self.counter
             .fetch_add(batch.messages.len() as u64, Ordering::Relaxed);

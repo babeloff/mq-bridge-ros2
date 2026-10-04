@@ -29,6 +29,9 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::Mutex;
 use tracing::{info, instrument, trace, warn};
 
+mod csv_dialect;
+pub(crate) use csv_dialect::{CsvDialect, CsvSyntax};
+
 /// A sink that writes messages to a file, one per line.
 static FILE_LOCKS: Lazy<StdMutex<HashMap<String, Arc<Mutex<()>>>>> =
     Lazy::new(|| StdMutex::new(HashMap::new()));
@@ -49,12 +52,22 @@ fn get_file_lock(path: &str) -> Arc<Mutex<()>> {
 /// reader's quote-aware framing keeps it in one record, and so is one ending in a prefix
 /// of a multi-byte delimiter, which would otherwise complete it early. A leading U+FEFF
 /// is quoted so the reader cannot mistake it for a byte-order mark.
-fn csv_append_field(buf: &mut Vec<u8>, s: &str, delimiter: &[u8]) {
+///
+/// With `quote: none` such a field has no spelling, so it fails instead.
+fn csv_append_field(
+    buf: &mut Vec<u8>,
+    s: &str,
+    delimiter: &[u8],
+    syntax: CsvSyntax,
+) -> Result<(), serde_json::Error> {
     let bytes = s.as_bytes();
+    let separator = syntax.separator;
+    // Without a quote character this compares against the separator twice.
+    let quote = syntax.quote.unwrap_or(separator);
     // One byte pass instead of four `contains` scans.
     let special = bytes
         .iter()
-        .any(|b| matches!(b, b',' | b'"' | b'\n' | b'\r'))
+        .any(|&b| b == separator || b == quote || b == b'\n' || b == b'\r')
         || bytes.starts_with(UTF8_BOM);
     let has_delimiter = || match delimiter {
         [] | [b'\n'] | [b'\r', b'\n'] => false,
@@ -66,16 +79,24 @@ fn csv_append_field(buf: &mut Vec<u8>, s: &str, delimiter: &[u8]) {
     };
     if !special && !has_delimiter() {
         buf.extend_from_slice(bytes);
-        return;
+        return Ok(());
     }
-    buf.push(b'"');
+    if syntax.quote.is_none() {
+        return Err(invalid_data(
+            "the value holds the separator, a line break or the record delimiter, which \
+             `quote: none` cannot write"
+                .to_string(),
+        ));
+    }
+    buf.push(quote);
     for &b in bytes {
-        if b == b'"' {
-            buf.push(b'"');
+        if b == quote {
+            buf.push(quote);
         }
         buf.push(b);
     }
-    buf.push(b'"');
+    buf.push(quote);
+    Ok(())
 }
 
 /// Appends `s` to `buf` with JSON string escaping (no surrounding quotes).
@@ -125,23 +146,27 @@ fn json_append_escaped(buf: &mut Vec<u8>, s: &[u8]) {
     buf.extend_from_slice(&s[run..]);
 }
 
-fn csv_encode_row(fields: &[String], delimiter: &[u8]) -> Vec<u8> {
+fn csv_encode_row(
+    fields: &[String],
+    delimiter: &[u8],
+    syntax: CsvSyntax,
+) -> Result<Vec<u8>, serde_json::Error> {
     let mut buf = Vec::new();
     for (i, f) in fields.iter().enumerate() {
         if i > 0 {
-            buf.push(b',');
+            buf.push(syntax.separator);
         }
-        csv_append_field(&mut buf, f, delimiter);
+        csv_append_field(&mut buf, f, delimiter, syntax)?;
     }
-    quote_blank_record(&mut buf, fields.len());
-    buf
+    quote_blank_record(&mut buf, fields.len(), syntax);
+    Ok(buf)
 }
 
 /// A record of one empty field is written `""`: bare, it would be a blank line, which
 /// the reader skips.
-fn quote_blank_record(record: &mut Vec<u8>, fields: usize) {
-    if fields == 1 && record.is_empty() {
-        record.extend_from_slice(b"\"\"");
+fn quote_blank_record(record: &mut Vec<u8>, fields: usize, syntax: CsvSyntax) {
+    if let (1, true, Some(quote)) = (fields, record.is_empty(), syntax.quote) {
+        record.extend_from_slice(&[quote, quote]);
     }
 }
 
@@ -194,33 +219,84 @@ impl<'a> CsvPayloadRow<'a> {
     }
 }
 
-/// The payload's top-level keys in the order the producer wrote them. Runs once per
-/// file, for the row that establishes the header.
-fn keys_in_payload_order(payload: &[u8]) -> Option<Vec<String>> {
-    struct Keys;
-    impl<'de> serde::de::Visitor<'de> for Keys {
-        type Value = Vec<String>;
+type RawEntry<'a> = (String, &'a serde_json::value::RawValue);
+
+/// An object's entries in the order the producer wrote them, values left unparsed.
+fn entries_in_payload_order(object: &[u8]) -> Option<Vec<RawEntry<'_>>> {
+    struct Entries;
+    impl<'de> serde::de::Visitor<'de> for Entries {
+        type Value = Vec<RawEntry<'de>>;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("a JSON object")
         }
         fn visit_map<A: serde::de::MapAccess<'de>>(
             self,
             mut map: A,
-        ) -> Result<Vec<String>, A::Error> {
-            let mut keys: Vec<String> = Vec::new();
-            while let Some(key) = map.next_key::<String>()? {
-                map.next_value::<serde::de::IgnoredAny>()?;
-                if !keys.contains(&key) {
-                    keys.push(key);
-                }
+        ) -> Result<Self::Value, A::Error> {
+            let mut entries = Vec::new();
+            while let Some(entry) = map.next_entry()? {
+                entries.push(entry);
             }
-            Ok(keys)
+            Ok(entries)
         }
     }
     use serde::Deserializer;
-    serde_json::Deserializer::from_slice(payload)
-        .deserialize_map(Keys)
+    serde_json::Deserializer::from_slice(object)
+        .deserialize_map(Entries)
         .ok()
+}
+
+/// The CSV columns a payload spells out, in the order the producer wrote them. With
+/// `flatten`, a nested object contributes one `parent.child` column per leaf. Runs once
+/// per file, for the row that establishes the header.
+fn csv_columns(payload: &[u8], flatten: bool) -> Option<Vec<String>> {
+    fn collect(
+        object: &[u8],
+        prefix: &str,
+        flatten: bool,
+        columns: &mut Vec<String>,
+    ) -> Option<()> {
+        for (key, value) in entries_in_payload_order(object)? {
+            let name = format!("{prefix}{key}");
+            if flatten && is_filled_object(value) {
+                collect(
+                    value.get().as_bytes(),
+                    &format!("{name}."),
+                    flatten,
+                    columns,
+                )?;
+            } else if !columns.contains(&name) {
+                columns.push(name);
+            }
+        }
+        Some(())
+    }
+    let mut columns = Vec::new();
+    collect(payload, "", flatten, &mut columns)?;
+    Some(columns)
+}
+
+/// An object with at least one field; an empty one stays a cell of its own.
+fn is_filled_object(value: &serde_json::value::RawValue) -> bool {
+    value
+        .get()
+        .strip_prefix('{')
+        .is_some_and(|rest| !rest.trim_start().starts_with('}'))
+}
+
+/// The value a flattened `parent.child` column names, looked up through the nested objects.
+fn nested_value<'a>(
+    row: &CsvPayloadRow<'a>,
+    column: &str,
+) -> Option<&'a serde_json::value::RawValue> {
+    column.match_indices('.').find_map(|(dot, _)| {
+        let parent = row
+            .get(&column[..dot])
+            .filter(|value| is_filled_object(value))?;
+        let parent = CsvPayloadRow::parse(parent.get().as_bytes())?;
+        let rest = &column[dot + 1..];
+        parent.get(rest).or_else(|| nested_value(&parent, rest))
+    })
 }
 
 fn invalid_data(message: String) -> serde_json::Error {
@@ -240,7 +316,9 @@ fn csv_encode_message(
     hdr: &mut Option<Vec<String>>,
     row_buf: &mut Vec<u8>,
     delimiter: &[u8],
+    csv: &CsvDialect,
 ) -> Result<bool, serde_json::Error> {
+    let syntax = csv.syntax();
     // An object with no fields is rejected too: it carries no columns, so letting it
     // establish the header would fix an empty column set for the rest of the file.
     let Some(row) = CsvPayloadRow::parse(&msg.payload).filter(|row| row.len() > 0) else {
@@ -249,9 +327,10 @@ fn csv_encode_message(
         ));
     };
 
-    let new_cols = hdr
-        .is_none()
-        .then(|| keys_in_payload_order(&msg.payload).unwrap_or_else(|| row.sorted_keys()));
+    let new_cols = hdr.is_none().then(|| match &csv.columns {
+        Some(columns) => columns.to_vec(),
+        None => csv_columns(&msg.payload, csv.flatten).unwrap_or_else(|| row.sorted_keys()),
+    });
     let cols = match (&new_cols, &*hdr) {
         (Some(cols), _) | (None, Some(cols)) => cols,
         (None, None) => unreachable!("header is either set or being established"),
@@ -263,19 +342,28 @@ fn csv_encode_message(
     row_buf.reserve(msg.payload.len());
     // Columns this payload actually supplied, for the drift check below.
     let mut matched = 0usize;
+    // Flattened columns outnumber the payload's top-level keys, which voids the count below.
+    let mut flattened = false;
     for (i, c) in cols.iter().enumerate() {
         if i > 0 {
-            row_buf.push(b',');
+            row_buf.push(syntax.separator);
         }
-        if let Some(v) = row.get(c) {
-            csv_append_raw(row_buf, v, delimiter)
+        let value = row.get(c).or_else(|| {
+            let nested = csv.flatten.then(|| nested_value(&row, c)).flatten();
+            flattened |= nested.is_some();
+            nested
+        });
+        if let Some(v) = value {
+            csv_append_raw(row_buf, v, delimiter, syntax)
                 .map_err(|e| invalid_data(format!("CSV column '{c}': {e}")))?;
             matched += 1;
         }
     }
-    quote_blank_record(row_buf, cols.len());
+    quote_blank_record(row_buf, cols.len(), syntax);
 
-    if new_cols.is_none() && (matched < cols.len() || row.len() > matched) {
+    // Configured `columns` are a projection: keys outside them are dropped on purpose.
+    let has_extra_keys = !flattened && csv.columns.is_none() && row.len() > matched;
+    if new_cols.is_none() && (matched < cols.len() || has_extra_keys) {
         // Keys the payload has beyond the ones the header covers are dropped silently, and
         // missing ones become empty fields; both mean the file's schema drifted. Logged
         // once per process so a whole drifted stream doesn't flood the log.
@@ -296,6 +384,35 @@ fn csv_encode_message(
     Ok(established)
 }
 
+/// Appends `msg` as one CSV record to `out`, after the header record when this row
+/// establishes the columns. For sinks whose every output starts a CSV file of its own.
+#[cfg_attr(not(feature = "object-store"), allow(dead_code))]
+pub(crate) fn csv_append_record(
+    out: &mut Vec<u8>,
+    msg: &CanonicalMessage,
+    hdr: &mut Option<Vec<String>>,
+    row_buf: &mut Vec<u8>,
+    delimiter: &[u8],
+    csv: &CsvDialect,
+) -> Result<(), serde_json::Error> {
+    if csv_encode_message(msg, hdr, row_buf, delimiter, csv)? && csv.header {
+        let columns = hdr.as_deref().unwrap_or_default();
+        match csv_encode_row(columns, delimiter, csv.syntax()) {
+            Ok(line) => {
+                out.extend_from_slice(&line);
+                out.extend_from_slice(delimiter);
+            }
+            Err(e) => {
+                *hdr = None;
+                return Err(invalid_data(format!("CSV header: {e}")));
+            }
+        }
+    }
+    out.extend_from_slice(row_buf);
+    out.extend_from_slice(delimiter);
+    Ok(())
+}
+
 /// Appends one still-unparsed JSON value as a CSV field. Scalars are copied straight
 /// from the source bytes, so numbers keep their spelling; nested arrays/objects are
 /// written as their own JSON text, keeping the producer's key order.
@@ -306,23 +423,26 @@ fn csv_append_raw(
     buf: &mut Vec<u8>,
     raw: &serde_json::value::RawValue,
     delimiter: &[u8],
+    syntax: CsvSyntax,
 ) -> Result<(), serde_json::Error> {
     let text = raw.get();
     match text.as_bytes().first() {
         Some(b'"') => {
             let inner = &text[1..text.len() - 1];
             if inner.as_bytes().contains(&b'\\') {
-                csv_append_field(buf, &serde_json::from_str::<String>(text)?, delimiter);
+                let unescaped = serde_json::from_str::<String>(text)?;
+                csv_append_field(buf, &unescaped, delimiter, syntax)
             } else {
-                csv_append_field(buf, inner, delimiter);
+                csv_append_field(buf, inner, delimiter, syntax)
             }
         }
         // Raw line breaks are JSON whitespace; dropping them keeps the cell on one line.
-        Some(b'{') | Some(b'[') => csv_append_field(buf, &strip_json_line_breaks(text), delimiter),
+        Some(b'{') | Some(b'[') => {
+            csv_append_field(buf, &strip_json_line_breaks(text), delimiter, syntax)
+        }
         // Numbers, bools, null: never need quoting, but the scan is one pass anyway.
-        _ => csv_append_field(buf, text, delimiter),
+        _ => csv_append_field(buf, text, delimiter, syntax),
     }
-    Ok(())
 }
 
 /// Parses a single CSV line into fields. Supports quoted fields with escaped `""`.
@@ -339,7 +459,10 @@ fn csv_append_raw(
 /// quote and `"a"x` reads as `ax`. The two must never disagree about where a record ends.
 ///
 /// `bytes` must be valid UTF-8.
-fn emit_csv_field(out: &mut Vec<u8>, bytes: &[u8], pos: &mut usize) -> bool {
+fn emit_csv_field(out: &mut Vec<u8>, bytes: &[u8], pos: &mut usize, syntax: CsvSyntax) -> bool {
+    let separator = syntax.separator;
+    // No quote character: the separator check below wins, so a quote is never seen.
+    let quote = syntax.quote.unwrap_or(separator);
     let mut i = *pos;
     let mut in_quotes = false;
     // Mirrors the source parser's `cur.is_empty()`: whether this field has content yet.
@@ -348,9 +471,9 @@ fn emit_csv_field(out: &mut Vec<u8>, bytes: &[u8], pos: &mut usize) -> bool {
     while i < bytes.len() {
         let rest = &bytes[i..];
         let found = if in_quotes {
-            memchr::memchr(b'"', rest)
+            memchr::memchr(quote, rest)
         } else {
-            memchr::memchr2(b',', b'"', rest)
+            memchr::memchr2(separator, quote, rest)
         };
         let Some(offset) = found else {
             json_append_escaped(out, rest);
@@ -364,7 +487,7 @@ fn emit_csv_field(out: &mut Vec<u8>, bytes: &[u8], pos: &mut usize) -> bool {
         }
         let at = i + offset;
 
-        if !in_quotes && bytes[at] == b',' {
+        if !in_quotes && bytes[at] == separator {
             *pos = at + 1;
             return true;
         }
@@ -372,8 +495,8 @@ fn emit_csv_field(out: &mut Vec<u8>, bytes: &[u8], pos: &mut usize) -> bool {
         // A quote: closes an open section, escapes itself when doubled inside one,
         // opens a section on an empty field, and is literal data otherwise.
         if in_quotes {
-            if bytes.get(at + 1) == Some(&b'"') {
-                out.extend_from_slice(b"\\\"");
+            if bytes.get(at + 1) == Some(&quote) {
+                json_append_escaped(out, &[quote]);
                 empty = false;
                 i = at + 2;
                 continue;
@@ -382,7 +505,7 @@ fn emit_csv_field(out: &mut Vec<u8>, bytes: &[u8], pos: &mut usize) -> bool {
         } else if empty {
             in_quotes = true;
         } else {
-            out.extend_from_slice(b"\\\"");
+            json_append_escaped(out, &[quote]);
         }
         i = at + 1;
     }
@@ -402,22 +525,52 @@ pub(crate) struct CsvHeader {
     prefixes: Vec<Vec<u8>>,
     /// Combined length of `prefixes`, to size a row's output buffer in one shot.
     prefix_len: usize,
+    syntax: CsvSyntax,
+    /// Set until the source's first record settles the columns.
+    unread: Option<CsvDialect>,
 }
 
 impl CsvHeader {
-    /// Reads the header record. `bytes` must be valid UTF-8. A leading byte-order mark
-    /// (Excel's "CSV UTF-8") is encoding framing, not part of the first column's name.
+    /// The slot of a source that has not read a record yet.
+    pub(crate) fn unread(dialect: CsvDialect) -> Self {
+        Self {
+            prefixes: Vec::new(),
+            prefix_len: 0,
+            syntax: dialect.syntax(),
+            unread: Some(dialect),
+        }
+    }
+
+    /// Reads a header record in the default dialect.
+    #[cfg(test)]
     fn parse(bytes: &[u8]) -> Self {
-        let bytes = bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes);
+        Self::establish(&CsvDialect::default(), bytes).0
+    }
+
+    /// Settles the columns on a source's first record, and says whether that record is
+    /// data rather than a header. `first` must be valid UTF-8. A leading byte-order mark
+    /// (Excel's "CSV UTF-8") is encoding framing, not part of the first column's name.
+    fn establish(dialect: &CsvDialect, first: &[u8]) -> (Self, bool) {
+        let bytes = first.strip_prefix(UTF8_BOM).unwrap_or(first);
+        let syntax = dialect.resolve(bytes);
         // Kept JSON-escaped: escaping is one-to-one, so comparing them compares the names.
         let mut names: Vec<Vec<u8>> = Vec::new();
-        let mut pos = 0;
-        loop {
-            let mut name = Vec::with_capacity(16);
-            let more = emit_csv_field(&mut name, bytes, &mut pos);
-            names.push(name);
-            if !more {
-                break;
+        match &dialect.columns {
+            Some(columns) => names.extend(columns.iter().map(|column| {
+                let mut name = Vec::with_capacity(column.len());
+                json_append_escaped(&mut name, column.as_bytes());
+                name
+            })),
+            None => {
+                let mut pos = 0;
+                loop {
+                    let mut name = Vec::with_capacity(16);
+                    let more = emit_csv_field(&mut name, bytes, &mut pos, syntax);
+                    names.push(name);
+                    if !more {
+                        break;
+                    }
+                }
             }
         }
         dedup_column_names(&mut names);
@@ -436,10 +589,13 @@ impl CsvHeader {
             })
             .collect();
         let prefix_len = prefixes.iter().map(Vec::len).sum();
-        Self {
+        let header = Self {
             prefixes,
             prefix_len,
-        }
+            syntax,
+            unread: None,
+        };
+        (header, !dialect.header)
     }
 
     /// The decoded column names, in file order.
@@ -465,10 +621,13 @@ impl CsvHeader {
         out.push(b'{');
         let mut pos = 0;
         let mut has_more = true;
+        let mut missing = 0usize;
         for prefix in &self.prefixes {
             out.extend_from_slice(prefix);
             if has_more {
-                has_more = emit_csv_field(&mut out, bytes, &mut pos);
+                has_more = emit_csv_field(&mut out, bytes, &mut pos, self.syntax);
+            } else {
+                missing += 1;
             }
             out.push(b'"');
         }
@@ -476,8 +635,26 @@ impl CsvHeader {
 
         if has_more {
             self.warn_extra_fields(bytes, pos);
+        } else if missing > 0 {
+            self.warn_missing_fields(missing);
         }
         out
+    }
+
+    /// A short row usually means the separator or the header is not what the file uses.
+    #[cold]
+    fn warn_missing_fields(&self, missing: usize) {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        const MSG: &str = "CSV row has fewer fields than the header has \
+                           columns; the missing ones are read as empty. Check \
+                           `csv.separator`. Further occurrences are logged at debug level.";
+        let columns = self.prefixes.len();
+        let separator = (self.syntax.separator as char).escape_default().to_string();
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            warn!(columns, missing, separator, "{MSG}");
+        } else {
+            tracing::debug!(columns, missing, separator, "{MSG}");
+        }
     }
 
     /// Extra fields have no column to land in, so they are dropped. Say so once: the row
@@ -490,7 +667,7 @@ impl CsvHeader {
         loop {
             scratch.clear();
             fields += 1;
-            if !emit_csv_field(&mut scratch, bytes, &mut pos) {
+            if !emit_csv_field(&mut scratch, bytes, &mut pos, self.syntax) {
                 break;
             }
         }
@@ -508,38 +685,33 @@ impl CsvHeader {
     }
 }
 
-pub(crate) fn parse_delimiter(
-    delimiter: Option<&str>,
-    format: &FileFormat,
-) -> anyhow::Result<Vec<u8>> {
+pub(crate) fn parse_delimiter(delimiter: Option<&str>) -> anyhow::Result<Vec<u8>> {
     let bytes = match delimiter {
         Some(s) if s.starts_with("0x") => {
             let hex = s.trim_start_matches("0x");
             if hex.len() != 2 {
-                return Err(anyhow::anyhow!(
+                return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                     "Hex delimiter must be 1 byte (2 hex chars)"
-                ));
+                ))
+                .into());
             }
             (0..hex.len())
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
                 .collect::<Result<Vec<u8>, _>>()
-                .map_err(|e| anyhow::anyhow!("Invalid hex delimiter: {}", e))?
+                .map_err(|e| {
+                    crate::errors::InvalidConfig(anyhow::anyhow!("Invalid hex delimiter: {}", e))
+                })?
         }
         Some(s) => s.as_bytes().to_vec(),
         None => vec![b'\n'],
     };
 
     if bytes.is_empty() {
-        return Err(anyhow::anyhow!("Delimiter cannot be empty"));
+        return Err(
+            crate::errors::InvalidConfig(anyhow::anyhow!("Delimiter cannot be empty")).into(),
+        );
     }
-    // A comma or quote in the record separator is indistinguishable from CSV syntax.
-    if matches!(format, FileFormat::Csv) && bytes.iter().any(|b| matches!(b, b',' | b'"')) {
-        return Err(anyhow::anyhow!(
-            "CSV record delimiter must not contain ',' or '\"'"
-        ));
-    }
-
     Ok(bytes)
 }
 
@@ -564,21 +736,31 @@ pub(crate) struct CsvQuoteState {
     field_is_empty: bool,
     pending_quote: bool,
     started: bool,
+    syntax: CsvSyntax,
 }
 
 impl Default for CsvQuoteState {
     fn default() -> Self {
+        Self::new(CsvSyntax::default())
+    }
+}
+
+impl CsvQuoteState {
+    pub(crate) fn new(syntax: CsvSyntax) -> Self {
         Self {
             in_quotes: false,
             field_is_empty: true,
             pending_quote: false,
             started: false,
+            syntax,
         }
     }
-}
 
-impl CsvQuoteState {
     pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        // Without a quote character nothing can open a quoted section.
+        let Some(quote) = self.syntax.quote else {
+            return;
+        };
         // A leading BOM is framing, so it must not make the first field non-empty.
         let bytes = if self.started {
             bytes
@@ -589,19 +771,19 @@ impl CsvQuoteState {
         for &b in bytes {
             if self.pending_quote {
                 self.pending_quote = false;
-                if b == b'"' {
+                if b == quote {
                     continue;
                 }
                 self.in_quotes = false;
             }
             if self.in_quotes {
-                if b == b'"' {
+                if b == quote {
                     self.pending_quote = true;
                 }
-            } else if b == b'"' && self.field_is_empty {
+            } else if b == quote && self.field_is_empty {
                 self.in_quotes = true;
             } else {
-                self.field_is_empty = b == b',';
+                self.field_is_empty = b == self.syntax.separator;
             }
         }
     }
@@ -619,6 +801,7 @@ async fn read_record<R: AsyncBufReadExt + Unpin>(
     reader: &mut R,
     delimiter: &[u8],
     format: &FileFormat,
+    csv: &CsvDialect,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<usize> {
     let start = buf.len();
@@ -626,7 +809,7 @@ async fn read_record<R: AsyncBufReadExt + Unpin>(
     if !matches!(format, FileFormat::Csv) {
         return Ok(total);
     }
-    let mut quotes = CsvQuoteState::default();
+    let mut quotes = CsvQuoteState::new(csv.resolve(&buf[start..]));
     quotes.feed(&buf[start..]);
     while total > 0 && quotes.in_quotes() {
         let from = buf.len();
@@ -668,6 +851,7 @@ pub struct FilePublisher {
     file_lock: Arc<Mutex<()>>,
     delimiter: Vec<u8>,
     format: FileFormat,
+    csv: CsvDialect,
     name_by: NameBy,
     part_extension: String,
     covered_ranges: Arc<Mutex<CoveredRanges>>,
@@ -684,21 +868,24 @@ pub struct FilePublisher {
 /// publisher and consumer: both need their Cargo feature enabled.
 fn validate_member_settings(config: &FileConfig) -> anyhow::Result<()> {
     if config.format == FileFormat::Parquet {
-        return Err(anyhow::anyhow!(
+        return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
             "file 'format: parquet' is not supported (a Parquet file can't be appended to); parquet is only supported by object_store"
-        ));
+        ))
+        .into());
     }
     #[cfg(not(feature = "compression"))]
     if config.compression != Compression::None {
-        return Err(anyhow::anyhow!(
+        return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
             "file 'compression' requires the `compression` feature"
-        ));
+        ))
+        .into());
     }
     #[cfg(not(feature = "encryption"))]
     if config.encryption.is_some() {
-        return Err(anyhow::anyhow!(
+        return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
             "file 'encryption' requires the `encryption` feature"
-        ));
+        ))
+        .into());
     }
     Ok(())
 }
@@ -796,7 +983,14 @@ impl FilePublisher {
         let mut reader = std::io::BufReader::new(self.decoded_reader(file));
         let mut buf = Vec::new();
         while buf.is_empty() {
-            if read_record_sync(&mut reader, &self.delimiter, &FileFormat::Csv, &mut buf)? == 0 {
+            if read_record_sync(
+                &mut reader,
+                &self.delimiter,
+                &FileFormat::Csv,
+                &self.csv,
+                &mut buf,
+            )? == 0
+            {
                 return Ok(None);
             }
             if buf.ends_with(&self.delimiter) {
@@ -806,8 +1000,30 @@ impl FilePublisher {
                 buf.pop();
             }
         }
-        let header = CsvHeader::parse(String::from_utf8_lossy(&buf).as_bytes());
+        let (header, _) = CsvHeader::establish(&self.csv, String::from_utf8_lossy(&buf).as_bytes());
         Ok(Some(header.column_names()))
+    }
+
+    /// The header line for the file a row just started; `None` under `header: false`.
+    /// A header that cannot be written is forgotten again, so the next row retries it.
+    fn csv_header_line(
+        &self,
+        hdr: &mut Option<Vec<String>>,
+    ) -> Result<Option<Vec<u8>>, serde_json::Error> {
+        if !self.csv.header {
+            return Ok(None);
+        }
+        let columns = hdr.as_deref().unwrap_or_default();
+        match csv_encode_row(columns, &self.delimiter, self.csv.syntax()) {
+            Ok(mut line) => {
+                line.extend_from_slice(&self.delimiter);
+                Ok(Some(line))
+            }
+            Err(e) => {
+                *hdr = None;
+                Err(invalid_data(format!("CSV header: {e}")))
+            }
+        }
     }
 
     /// The file's plaintext, undoing whatever compression/encryption the sink applies.
@@ -843,9 +1059,10 @@ impl FilePublisher {
         let by_source_position = name_by == NameBy::SourcePosition;
         if by_source_position {
             if matches!(config.format, FileFormat::Csv) {
-                return Err(anyhow::anyhow!(
+                return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                     "file 'name_by: source_position' does not support CSV (per-part headers are unimplemented)"
-                ));
+                ))
+                .into());
             }
             tokio::fs::create_dir_all(path).await.with_context(|| {
                 format!("Failed to create part-file sink directory: {path_str}")
@@ -869,7 +1086,9 @@ impl FilePublisher {
         }
 
         let file_lock = get_file_lock(path_str);
-        let delimiter = parse_delimiter(config.delimiter.as_deref(), &config.format)?;
+        let delimiter = parse_delimiter(config.delimiter.as_deref())?;
+        let csv = CsvDialect::for_format(&config.format, &config.csv, &delimiter)?;
+        csv.check_sink()?;
         let format = config.format.clone();
         // Part names must advertise what the bytes actually are: a compressed or sealed part
         // holds one member, so it earns the same suffixes the appending sink's file would.
@@ -914,6 +1133,7 @@ impl FilePublisher {
                 .transpose()?
                 .map(Arc::new),
             csv_header: Arc::new(Mutex::new(None)),
+            csv,
         })
     }
 
@@ -1058,7 +1278,7 @@ impl FilePublisher {
             None
         };
         if let Some(hdr) = csv_header_guard.as_mut() {
-            if hdr.is_none() && !file_is_empty {
+            if hdr.is_none() && !file_is_empty && self.csv.reads_header_back() {
                 **hdr = self.existing_csv_header().await;
             }
         }
@@ -1070,18 +1290,21 @@ impl FilePublisher {
             let encoded = match self.format {
                 FileFormat::Csv => {
                     let hdr = csv_header_guard.as_mut().expect("csv header lock held");
-                    match csv_encode_message(&msg, hdr, &mut csv_row_buf, &self.delimiter) {
-                        Ok(header_established) => {
-                            if header_established && file_is_empty {
-                                raw.extend_from_slice(&csv_encode_row(
-                                    hdr.as_ref().expect("header set above"),
-                                    &self.delimiter,
-                                ));
-                                raw.extend_from_slice(&self.delimiter);
+                    match csv_encode_message(
+                        &msg,
+                        hdr,
+                        &mut csv_row_buf,
+                        &self.delimiter,
+                        &self.csv,
+                    ) {
+                        Ok(true) if file_is_empty => self.csv_header_line(hdr).map(|line| {
+                            if let Some(line) = line {
+                                raw.extend_from_slice(&line);
                                 wrote_csv_header = true;
                             }
-                            Ok(None)
-                        }
+                            None
+                        }),
+                        Ok(_) => Ok(None),
                         Err(e) => Err(e),
                     }
                 }
@@ -1278,18 +1501,18 @@ impl MessagePublisher for FilePublisher {
             let serialized_msg = match self.format {
                 FileFormat::Csv => {
                     let hdr = csv_header_guard.as_mut().expect("csv header lock held");
-                    match csv_encode_message(&msg, hdr, &mut csv_row_buf, &self.delimiter) {
-                        Ok(header_established) => {
-                            if header_established && file_is_empty {
-                                let mut line = csv_encode_row(
-                                    hdr.as_ref().expect("header set above"),
-                                    &self.delimiter,
-                                );
-                                line.extend_from_slice(&self.delimiter);
-                                csv_header_line = Some(line);
-                            }
-                            Ok(None)
-                        }
+                    match csv_encode_message(
+                        &msg,
+                        hdr,
+                        &mut csv_row_buf,
+                        &self.delimiter,
+                        &self.csv,
+                    ) {
+                        Ok(true) if file_is_empty => self.csv_header_line(hdr).map(|line| {
+                            csv_header_line = line;
+                            None
+                        }),
+                        Ok(_) => Ok(None),
                         Err(e) => Err(e),
                     }
                 }
@@ -1443,7 +1666,15 @@ async fn create_file_event_store(
                     s.lines_in_memory = s.lines_in_memory.saturating_sub(count);
                 }
 
-                if let Err(e) = remove_lines_from_file(&path, count, &delimiter, &format).await {
+                if let Err(e) = remove_lines_from_file(
+                    &path,
+                    count,
+                    &delimiter,
+                    &format,
+                    &CsvDialect::default(),
+                )
+                .await
+                {
                     tracing::error!("Failed to remove lines from file {}: {}", path, e);
                     // Note: In this simplified model, if deletion fails, lines_in_memory
                     // might become out of sync, leading to reprocessing on restart.
@@ -1501,7 +1732,15 @@ async fn create_file_event_store(
             let lines_to_skip = state.lines_in_memory;
             while lines_skipped < lines_to_skip {
                 let mut buf = Vec::new();
-                match read_record(&mut reader, &delimiter, &format_clone, &mut buf).await {
+                match read_record(
+                    &mut reader,
+                    &delimiter,
+                    &format_clone,
+                    &CsvDialect::default(),
+                    &mut buf,
+                )
+                .await
+                {
                     Ok(0) => break, // EOF
                     Ok(_) => lines_skipped += 1,
                     Err(e) => {
@@ -1529,7 +1768,15 @@ async fn create_file_event_store(
 
             loop {
                 let mut buffer = Vec::new();
-                match read_record(&mut reader, &delimiter, &format_clone, &mut buffer).await {
+                match read_record(
+                    &mut reader,
+                    &delimiter,
+                    &format_clone,
+                    &CsvDialect::default(),
+                    &mut buffer,
+                )
+                .await
+                {
                     Ok(0) => break,
                     Ok(_) => {
                         if buffer.ends_with(&delimiter) {
@@ -1584,6 +1831,7 @@ async fn remove_lines_from_file(
     count: usize,
     delimiter: &[u8],
     format: &FileFormat,
+    csv: &CsvDialect,
 ) -> anyhow::Result<()> {
     let unique_id = fast_uuid_v7::gen_id_str();
     let temp_path = format!("{}.{}.tmp", path, unique_id);
@@ -1596,7 +1844,7 @@ async fn remove_lines_from_file(
     let mut lines_skipped = 0;
     while lines_skipped < count {
         let mut buf = Vec::new();
-        if read_record(&mut reader, delimiter, format, &mut buf).await? == 0 {
+        if read_record(&mut reader, delimiter, format, csv, &mut buf).await? == 0 {
             break;
         }
         lines_skipped += 1;
@@ -1653,6 +1901,10 @@ struct FileTailConsumer {
 fn sniff_compression_magic(path: &str) -> Option<&'static str> {
     use std::io::Read;
     let mut head = [0u8; 4];
+    // A pipe cannot be read twice: sniffing would swallow its first bytes.
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let mut f = std::fs::File::open(path).ok()?;
     let n = f.read(&mut head).ok()?;
     compression_magic_name(&head[..n])
@@ -1681,6 +1933,9 @@ fn looks_encrypted_at_rest(path: &str) -> bool {
         CIPHER_AES_GCM, CIPHER_XCHACHA, ENVELOPE_VERSION, MIN_ENVELOPE_LEN,
     };
     use std::io::Read;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
     let Ok(mut f) = std::fs::File::open(path) else {
         return false;
     };
@@ -1704,19 +1959,34 @@ fn read_record_sync<R: std::io::BufRead>(
     reader: &mut R,
     delimiter: &[u8],
     format: &FileFormat,
+    csv: &CsvDialect,
     buf: &mut Vec<u8>,
 ) -> std::io::Result<usize> {
+    read_record_sync_checked(reader, delimiter, format, csv, buf, &mut false)
+}
+
+/// [`read_record_sync`]; `open_quote` is set when the input ended inside a quoted field.
+fn read_record_sync_checked<R: std::io::BufRead>(
+    reader: &mut R,
+    delimiter: &[u8],
+    format: &FileFormat,
+    csv: &CsvDialect,
+    buf: &mut Vec<u8>,
+    open_quote: &mut bool,
+) -> std::io::Result<usize> {
+    *open_quote = false;
     let start = buf.len();
     let mut total = read_until_bytes_sync(reader, delimiter, buf)?;
     if !matches!(format, FileFormat::Csv) {
         return Ok(total);
     }
-    let mut quotes = CsvQuoteState::default();
+    let mut quotes = CsvQuoteState::new(csv.resolve(&buf[start..]));
     quotes.feed(&buf[start..]);
     while total > 0 && quotes.in_quotes() {
         let from = buf.len();
         let n = read_until_bytes_sync(reader, delimiter, buf)?;
         if n == 0 {
+            *open_quote = true;
             break;
         }
         quotes.feed(&buf[from..]);
@@ -1755,14 +2025,18 @@ fn run_file_tail_task_sync(
     group_id: Option<String>,
     delimiter: Vec<u8>,
     format: FileFormat,
+    csv: CsvDialect,
     ready: Arc<AtomicBool>,
     drain_on_empty: Arc<AtomicBool>,
+    fatal_error_slot: Arc<StdMutex<Option<String>>>,
 ) {
     let mut last_position: u64 = initial_offset;
     let mut reader: Option<std::io::BufReader<std::fs::File>> = None;
     let mut current_sleep = std::time::Duration::from_millis(1);
     const MAX_SLEEP: std::time::Duration = std::time::Duration::from_millis(50);
     let mut initialized = false;
+    // A pipe, FIFO or terminal: read once without seeking, and its end is final.
+    let mut stream = false;
     // Tracks whether we've already emitted the empty end-of-file marker for the
     // current drained state, so we signal it once per EOF transition rather than
     // on every idle poll.
@@ -1771,7 +2045,8 @@ fn run_file_tail_task_sync(
     let mut buf = Vec::with_capacity(1024);
     let mut records_buf: Vec<u8> = Vec::with_capacity(128 * BATCH_SIZE);
     let mut spans: Vec<RecordSpan> = Vec::with_capacity(BATCH_SIZE);
-    let mut csv_header: Option<Arc<CsvHeader>> = None;
+    let mut csv_header =
+        matches!(format, FileFormat::Csv).then(|| Arc::new(CsvHeader::unread(csv.clone())));
 
     loop {
         if reader.is_none() {
@@ -1784,14 +2059,18 @@ fn run_file_tail_task_sync(
                 }
             };
 
-            if let Ok(metadata) = file.metadata() {
+            let metadata = file.metadata().ok();
+            stream = metadata.as_ref().is_some_and(|m| !m.file_type().is_file());
+            if let Some(metadata) = metadata.filter(|_| !stream) {
                 if metadata.len() < last_position {
                     tracing::warn!("File {} was truncated. Resetting position to 0.", path);
                     last_position = 0;
                 }
             }
 
-            if let Err(e) = file.seek(std::io::SeekFrom::Start(last_position)) {
+            if stream {
+                // Not seekable.
+            } else if let Err(e) = file.seek(std::io::SeekFrom::Start(last_position)) {
                 tracing::error!("Failed to seek in {}: {}", path, e);
                 last_position = 0; // Reset on seek failure
                 if let Err(e) = file.seek(std::io::SeekFrom::Start(0)) {
@@ -1818,15 +2097,46 @@ fn run_file_tail_task_sync(
         // record is delivered — closing the race where the reader reaches EOF before
         // the route propagates its drain intent via `set_exit_on_empty`.
         let mut pending_partial = false;
+        let mut open_quote = false;
+        let mut fatal = None;
+        let mut stream_ended = false;
+        // The end of a stream is final, as the end of a file is under a drain.
+        let complete = stream || drain_on_empty.load(Ordering::SeqCst);
 
         if let Some(r) = reader.as_mut() {
             for _ in 0..BATCH_SIZE {
+                // A slow writer must not hold back what has already arrived.
+                if stream && lines_read_in_batch > 0 && r.buffer().is_empty() {
+                    break;
+                }
                 buf.clear();
-                match read_record_sync(r, &delimiter, &format, &mut buf) {
-                    Ok(0) => break, // EOF
+                match read_record_sync_checked(
+                    r,
+                    &delimiter,
+                    &format,
+                    &csv,
+                    &mut buf,
+                    &mut open_quote,
+                ) {
+                    Ok(0) => {
+                        stream_ended = stream;
+                        break; // EOF
+                    }
+                    Ok(_) if open_quote => {
+                        if complete {
+                            fatal = Some(format!(
+                                "csv: {path} ends inside a quoted field (record at byte {last_position}); the file looks truncated"
+                            ));
+                        } else {
+                            // Live tail: the writer may still close the quote.
+                            pending_partial = true;
+                            reader = None;
+                        }
+                        break;
+                    }
                     Ok(n) => {
                         if !buf.ends_with(&delimiter) {
-                            if drain_on_empty.load(Ordering::SeqCst) {
+                            if complete {
                                 // Drain mode (exit_on_empty): the file is complete, so a
                                 // final record with no trailing delimiter is a whole
                                 // record. Emit it once, advancing past it; the next read
@@ -1864,6 +2174,10 @@ fn run_file_tail_task_sync(
                         spans.push((start, records_buf.len(), last_position));
                         lines_read_in_batch += 1;
                     }
+                    Err(e) if stream => {
+                        fatal = Some(format!("Error reading {path}: {e}"));
+                        break;
+                    }
                     Err(e) => {
                         tracing::error!("Error reading {}: {}", path, e);
                         reader = None; // Force reopen on next loop
@@ -1887,6 +2201,16 @@ fn run_file_tail_task_sync(
             }
             current_sleep = std::time::Duration::from_millis(1);
             signaled_eof = false; // data flowed; re-arm the EOF marker
+        }
+
+        if let Some(reason) = fatal {
+            tracing::error!("{reason}; closing stream");
+            *fatal_error_slot.lock().unwrap() = Some(reason);
+            break;
+        }
+
+        if stream_ended {
+            break; // Closing the channel ends the route: a stream does not resume.
         }
 
         if lines_read_in_batch == 0 {
@@ -1922,6 +2246,7 @@ struct FileQueueConsumer {
     /// Needed on the commit path too: deleting acked records re-splits the file, and CSV
     /// records do not map one-to-one onto delimiters.
     format: FileFormat,
+    csv: CsvDialect,
     ready: Arc<AtomicBool>,
     /// See [`FileTailConsumer::pending_eof`].
     pending_eof: bool,
@@ -1936,6 +2261,7 @@ fn run_file_queue_task(
     runtime_handle: tokio::runtime::Handle,
     delimiter: Vec<u8>,
     format: FileFormat,
+    csv: CsvDialect,
     ready: Arc<AtomicBool>,
     extra_lines: ExtraLines,
 ) {
@@ -1945,7 +2271,7 @@ fn run_file_queue_task(
     // Emit the empty end-of-file marker once per drained state; see the tail task.
     let mut signaled_eof = false;
     let mut buf = Vec::new();
-    let mut csv_header: Option<CsvHeader> = None;
+    let mut csv_header = matches!(format, FileFormat::Csv).then(|| CsvHeader::unread(csv.clone()));
 
     loop {
         buf.clear();
@@ -1973,7 +2299,7 @@ fn run_file_queue_task(
 
             while skipped < skip_count {
                 buf.clear();
-                match read_record_sync(&mut reader, &delimiter, &format, &mut buf) {
+                match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
                     Ok(0) => break,
                     Ok(_) => skipped += 1,
                     Err(e) => {
@@ -1989,7 +2315,7 @@ fn run_file_queue_task(
                 // read early, or an empty batch would pose as EOF.
                 while batch.len() < 128 {
                     buf.clear();
-                    match read_record_sync(&mut reader, &delimiter, &format, &mut buf) {
+                    match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
                         Ok(0) => break,
                         Ok(_) => {
                             if buf.ends_with(&delimiter) {
@@ -2015,7 +2341,7 @@ fn run_file_queue_task(
                                 // precedes it, so remove it now, outside the line accounting.
                                 None if skip_count == 0 && lines_read == 0 && blanks == 0 => {
                                     if let Err(e) = runtime_handle.block_on(remove_lines_from_file(
-                                        &path, 1, &delimiter, &format,
+                                        &path, 1, &delimiter, &format, &csv,
                                     )) {
                                         tracing::error!(
                                             "Failed to remove CSV header line from {}: {}",
@@ -2075,11 +2401,13 @@ fn run_file_queue_task(
 /// `make_reader` builds the decoding [`Read`](std::io::Read) chain
 /// (decrypt frames and/or decompress members) over a freshly opened file.
 #[cfg(any(feature = "compression", feature = "encryption"))]
+#[allow(clippy::too_many_arguments)]
 fn run_file_member_consume_task_sync<F>(
     path: String,
     msg_tx: async_channel::Sender<Vec<CanonicalMessage>>,
     delimiter: Vec<u8>,
     format: FileFormat,
+    csv: CsvDialect,
     ready: Arc<AtomicBool>,
     decode_error_slot: Arc<StdMutex<Option<String>>>,
     make_reader: F,
@@ -2144,12 +2472,13 @@ fn run_file_member_consume_task_sync<F>(
         let mut reader = std::io::BufReader::new(make_reader(file));
 
         // Skip records emitted on a previous pass (file re-read from the start).
-        let mut csv_header: Option<CsvHeader> = None;
+        let mut csv_header =
+            matches!(format, FileFormat::Csv).then(|| CsvHeader::unread(csv.clone()));
         let mut skipped = 0;
         let mut decode_error = false;
         while skipped < records_emitted {
             buf.clear();
-            match read_record_sync(&mut reader, &delimiter, &format, &mut buf) {
+            match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
                 Ok(0) => break,
                 Ok(_) => skipped += 1,
                 Err(e) => {
@@ -2186,7 +2515,7 @@ fn run_file_member_consume_task_sync<F>(
         let mut batch = Vec::with_capacity(256);
         loop {
             buf.clear();
-            match read_record_sync(&mut reader, &delimiter, &format, &mut buf) {
+            match read_record_sync(&mut reader, &delimiter, &format, &csv, &mut buf) {
                 Ok(0) => break,
                 Ok(_) => {
                     if !buf.ends_with(&delimiter) {
@@ -2470,7 +2799,9 @@ impl FileConsumer {
     }
 
     async fn new_backend(config: &FileConfig) -> anyhow::Result<Self> {
-        let delimiter = parse_delimiter(config.delimiter.as_deref(), &config.format)?;
+        let delimiter = parse_delimiter(config.delimiter.as_deref())?;
+        let csv = CsvDialect::for_format(&config.format, &config.csv, &delimiter)?;
+        csv.check_source()?;
         let format = config.format.clone();
         if matches!(format, FileFormat::Csv)
             && matches!(
@@ -2478,9 +2809,10 @@ impl FileConsumer {
                 Some(FileConsumerMode::Subscribe { delete: true })
             )
         {
-            return Err(anyhow::anyhow!(
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                 "FileFormat::Csv is not supported with Subscribe {{ delete: true }} mode"
-            ));
+            ))
+            .into());
         }
         validate_member_settings(config)?;
         if config.compression != Compression::None || config.encryption.is_some() {
@@ -2488,42 +2820,45 @@ impl FileConsumer {
                 &config.mode,
                 None | Some(FileConsumerMode::Consume { delete: false })
             ) {
-                return Err(anyhow::anyhow!(
+                return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                     "file 'compression'/'encryption' is only supported with the default `consume` mode (no delete, no group_id)"
-                ));
+                ))
+                .into());
             }
             // Member-based files (compressed and/or encrypted) have no seekable
             // line offsets, so they use a dedicated reader that decodes from the
             // start of the file.
             #[cfg(any(feature = "compression", feature = "encryption"))]
-            return Self::new_member_consumer(config, delimiter, format).await;
+            return Self::new_member_consumer(config, delimiter, format, csv).await;
         }
         // No codec configured: guard against reading a compressed file as plaintext,
         // which would otherwise split the raw bytes on newlines and emit binary garbage
         // as "messages" under a clean success. A known compressor magic at offset 0 is
         // unambiguous here (a JSON/text member never starts with these bytes).
         if let Some(codec) = sniff_compression_magic(&config.path) {
-            return Err(anyhow::anyhow!(
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                 "file '{}' begins with a {codec} magic header but no `compression` is configured; \
                  set `compression: {codec}` (and any `encryption`) to match how it was written",
                 config.path
-            ));
+            ))
+            .into());
         }
         // Same guard for encryption: the envelope is behind an 8-byte frame prefix,
         // so a compressor magic never shows up at offset 0 for an encrypted file.
         if looks_encrypted_at_rest(&config.path) {
-            return Err(anyhow::anyhow!(
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                 "file '{}' looks encrypted but no `encryption` is configured; \
                  set `encryption` (and any `compression`) to match how it was written",
                 config.path
-            ));
+            ))
+            .into());
         }
         match &config.mode {
             None | Some(FileConsumerMode::Consume { delete: false }) => {
-                Self::new_tail(&config.path, false, None, delimiter.clone(), format).await
+                Self::new_tail(&config.path, false, None, delimiter.clone(), format, csv).await
             }
             Some(FileConsumerMode::Subscribe { delete: false }) => {
-                Self::new_tail(&config.path, true, None, delimiter.clone(), format).await
+                Self::new_tail(&config.path, true, None, delimiter.clone(), format, csv).await
             }
             Some(FileConsumerMode::GroupSubscribe {
                 group_id,
@@ -2536,6 +2871,7 @@ impl FileConsumer {
                     Some(group_id.clone()),
                     delimiter.clone(),
                     format,
+                    csv,
                 )
                 .await
             }
@@ -2554,6 +2890,7 @@ impl FileConsumer {
 
                 let delimiter_clone = delimiter.clone();
                 let format_clone = format.clone();
+                let csv_clone = csv.clone();
                 std::thread::spawn(move || {
                     run_file_queue_task(
                         path_clone,
@@ -2563,6 +2900,7 @@ impl FileConsumer {
                         runtime,
                         delimiter_clone,
                         format_clone,
+                        csv_clone,
                         ready_clone,
                         extra_lines_clone,
                     );
@@ -2578,6 +2916,7 @@ impl FileConsumer {
                     buffer: Arc::new(Mutex::new(Vec::new())),
                     delimiter,
                     format,
+                    csv,
                     ready,
                     pending_eof: false,
                 })))
@@ -2626,6 +2965,7 @@ impl FileConsumer {
         config: &FileConfig,
         delimiter: Vec<u8>,
         format: FileFormat,
+        csv: CsvDialect,
     ) -> anyhow::Result<Self> {
         let (msg_tx, msg_rx) = async_channel::bounded(100);
         let ready = Arc::new(AtomicBool::new(false));
@@ -2661,12 +3001,14 @@ impl FileConsumer {
 
         let path_clone = config.path.clone();
         let format_clone = format;
+        let csv_clone = csv;
         std::thread::spawn(move || {
             run_file_member_consume_task_sync(
                 path_clone,
                 msg_tx,
                 delimiter,
                 format_clone,
+                csv_clone,
                 ready_clone,
                 decode_error_clone,
                 make_reader,
@@ -2692,6 +3034,7 @@ impl FileConsumer {
         group_id: Option<String>,
         delimiter: Vec<u8>,
         format: FileFormat,
+        csv: CsvDialect,
     ) -> anyhow::Result<Self> {
         let (msg_tx, msg_rx) = async_channel::bounded(100);
         let mut initial_offset = 0;
@@ -2729,6 +3072,9 @@ impl FileConsumer {
 
         let path_clone = path.to_string();
         let format_clone = format;
+        let csv_clone = csv;
+        let fatal_error: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+        let fatal_error_clone = fatal_error.clone();
         std::thread::spawn(move || {
             run_file_tail_task_sync(
                 path_clone,
@@ -2737,8 +3083,10 @@ impl FileConsumer {
                 group_id,
                 delimiter,
                 format_clone,
+                csv_clone,
                 ready_clone,
                 drain_on_empty_clone,
+                fatal_error_clone,
             );
         });
 
@@ -2750,7 +3098,7 @@ impl FileConsumer {
             offset_file,
             ready,
             pending_eof: false,
-            decode_error: None,
+            decode_error: Some(fatal_error),
             drain_on_empty,
         })))
     }
@@ -2977,6 +3325,7 @@ impl FileConsumer {
                 let batch_for_commit = batch.clone();
                 let delimiter = c.delimiter.clone();
                 let format = c.format.clone();
+                let csv = c.csv.clone();
 
                 let commit = Box::new(
                     move |dispositions: Vec<crate::traits::MessageDisposition>| {
@@ -3025,7 +3374,8 @@ impl FileConsumer {
                                 };
                                 let _guard = lock.lock().await;
                                 if let Err(e) =
-                                    remove_lines_from_file(&path, lines, &delimiter, &format).await
+                                    remove_lines_from_file(&path, lines, &delimiter, &format, &csv)
+                                        .await
                                 {
                                     tracing::error!("Failed to remove lines from {}: {}", path, e);
                                 }
@@ -3243,17 +3593,30 @@ pub(crate) fn decode_records(
     let mut spans = spans;
     let mut out = Vec::with_capacity(spans.len());
 
-    if matches!(format, FileFormat::Csv) && csv_header.is_none() {
+    let pending = match format {
+        FileFormat::Csv => pending_csv_dialect(csv_header.as_deref()),
+        _ => None,
+    };
+    if let Some(dialect) = pending {
         let blank = spans
             .iter()
             .take_while(|&&(start, end, _)| start == end)
             .count();
-        let Some((&(start, end, _), rest)) = spans[blank..].split_first() else {
+        let Some((&(start, end, position), rest)) = spans[blank..].split_first() else {
             return out;
         };
-        *csv_header = Some(Arc::new(CsvHeader::parse(
-            String::from_utf8_lossy(&buf[start..end]).as_bytes(),
-        )));
+        let first = String::from_utf8_lossy(&buf[start..end]);
+        let (header, is_data) = CsvHeader::establish(&dialect, first.as_bytes());
+        if is_data {
+            let bom = if buf[start..end].starts_with(UTF8_BOM) {
+                UTF8_BOM.len()
+            } else {
+                0
+            };
+            let span = (start + bom, end, position);
+            out.extend(decode_one(buf, &span, format, Some(&header), with_offset));
+        }
+        *csv_header = Some(Arc::new(header));
         spans = rest;
     }
 
@@ -3352,6 +3715,15 @@ fn dedup_column_names(names: &mut [Vec<u8>]) {
     }
 }
 
+/// The dialect a header slot still waits to read its first record with. An empty slot
+/// waits with the default dialect; a settled one waits for nothing.
+fn pending_csv_dialect(slot: Option<&CsvHeader>) -> Option<CsvDialect> {
+    match slot {
+        None => Some(CsvDialect::default()),
+        Some(header) => header.unread.clone(),
+    }
+}
+
 /// Decodes one CSV record against an established header.
 ///
 /// Validated once per record so the field walk can stay byte-wise, and lossy so an
@@ -3373,16 +3745,26 @@ pub(crate) fn parse_message(
     csv_header: &mut Option<CsvHeader>,
 ) -> Option<CanonicalMessage> {
     match format {
-        FileFormat::Csv => match csv_header {
-            _ if buffer.is_empty() => None,
-            None => {
-                *csv_header = Some(CsvHeader::parse(String::from_utf8_lossy(buffer).as_bytes()));
-                None
+        FileFormat::Csv => {
+            if buffer.is_empty() {
+                return None;
             }
-            Some(header) => decode_csv_row(header, buffer),
-        },
+            let mut buffer = buffer;
+            if let Some(dialect) = pending_csv_dialect(csv_header.as_ref()) {
+                let first = String::from_utf8_lossy(buffer);
+                let (header, is_data) = CsvHeader::establish(&dialect, first.as_bytes());
+                *csv_header = Some(header);
+                if !is_data {
+                    return None;
+                }
+                buffer = buffer.strip_prefix(UTF8_BOM).unwrap_or(buffer);
+            }
+            decode_csv_row(csv_header.as_ref()?, buffer)
+        }
         // Parquet objects are decoded whole by the object_store source; there are no lines.
         FileFormat::Parquet => None,
+        // A blank line is not a record, in any line format.
+        _ if buffer.is_empty() => None,
         FileFormat::Raw => {
             let mut msg = CanonicalMessage::new(buffer.to_vec(), None);
             msg.metadata

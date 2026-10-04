@@ -43,15 +43,14 @@ pub struct NatsPublisher {
 
 impl NatsPublisher {
     pub async fn new(config: &NatsConfig) -> anyhow::Result<Self> {
-        let subject = config
-            .subject
-            .as_deref()
-            .ok_or_else(|| anyhow!("Subject is required for NATS publisher"))?;
+        let subject = config.subject.as_deref().ok_or_else(|| {
+            crate::errors::InvalidConfig(anyhow!("Subject is required for NATS publisher"))
+        })?;
         let stream_name = if !config.no_jetstream {
             config
                 .stream
                 .as_deref()
-                .ok_or_else(|| anyhow!("stream must be provided when JetStream is enabled"))?
+                .ok_or_else(|| crate::errors::InvalidConfig(anyhow!("stream must be provided when JetStream is enabled: set `stream`, or `no_jetstream: true` for core NATS")))?
         } else {
             config.stream.as_deref().unwrap_or_default()
         };
@@ -307,14 +306,12 @@ impl NatsConsumer {
         let source_metadata = crate::canonical_message::source_metadata_enabled_for_endpoint(
             source_metadata || config.source_metadata,
         );
-        let subject = config
-            .subject
-            .as_deref()
-            .ok_or_else(|| anyhow!("Subject is required for NATS consumer"))?;
-        let stream_name = config
-            .stream
-            .as_deref()
-            .ok_or_else(|| anyhow!("Stream name is required for NATS consumer"))?;
+        let subject = config.subject.as_deref().ok_or_else(|| {
+            crate::errors::InvalidConfig(anyhow!("Subject is required for NATS consumer"))
+        })?;
+        let stream_name = config.stream.as_deref().ok_or_else(|| {
+            crate::errors::InvalidConfig(anyhow!("Stream name is required for NATS consumer"))
+        })?;
 
         let deliver_policy = match config.deliver_policy {
             Some(crate::models::NatsDeliverPolicy::All) | None => {

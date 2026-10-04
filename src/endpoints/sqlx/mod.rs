@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, trace, warn};
 
+mod columns;
 #[cfg(feature = "dedup")]
 mod dedup;
 #[cfg(feature = "dedup")]
@@ -278,7 +279,21 @@ fn resolve_source(
                     BindValue::Null
                 }
             }
-            _ => BindValue::Null,
+            Some(serde_json::Value::Null) => BindValue::Null,
+            other => {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    let reason = match other {
+                        Some(_) => "is an object or array",
+                        None => "is missing from the payload",
+                    };
+                    warn!(
+                        "`${{payload:{field}}}` binds NULL: the field {reason}. Tokens read top-level scalar fields only. Further occurrences are not logged."
+                    );
+                }
+                BindValue::Null
+            }
         },
     }
 }
@@ -452,6 +467,17 @@ async fn create_sqlx_pool(config: &SqlxConfig) -> anyhow::Result<AnyPool> {
     // reconnects on.
     pool_options = pool_options.test_before_acquire(config.test_before_acquire.unwrap_or(false));
 
+    // The pool retries a refused connection silently until `acquire_timeout`; one direct
+    // attempt first reports why the server cannot be reached.
+    if !url.starts_with("sqlite") {
+        use sqlx::Connection;
+        let limit = Duration::from_millis(config.acquire_timeout_ms.unwrap_or(30_000));
+        let probe = tokio::time::timeout(limit, sqlx::AnyConnection::connect(&url))
+            .await
+            .map_err(|_| anyhow!("connecting to the database timed out after {limit:?}"))??;
+        probe.close().await.ok();
+    }
+
     Ok(pool_options.connect(&url).await?)
 }
 
@@ -502,6 +528,8 @@ pub struct SqlxPublisher {
     lookup: Option<SqlLookup>,
     /// PostgreSQL with a writing `lookup_query`: a batch runs as one call to a generated function.
     pg_batch: Option<PgBatchLookup>,
+    /// Set by `columns: auto`: rows are built from the record's fields, not from `insert_query`.
+    auto: Option<columns::AutoColumns>,
 }
 
 /// The raw `lookup_query` a PostgreSQL batch function is generated from.
@@ -721,6 +749,48 @@ struct PgCopySink {
     sources: Vec<ColumnSource>,
 }
 
+/// Dedicated native Postgres pool: COPY needs the typed pg protocol, not the `Any` layer.
+async fn open_copy_pool(config: &SqlxConfig) -> anyhow::Result<PgPool> {
+    let url = build_sqlx_url_with_tls(config)?;
+    PgPoolOptions::new()
+        .max_connections(config.max_connections.unwrap_or(5))
+        // Match `create_sqlx_pool`: no liveness ping per acquire.
+        .test_before_acquire(config.test_before_acquire.unwrap_or(false))
+        .connect(&url)
+        .await
+        .context("bulk_copy: failed to open native PostgreSQL pool")
+}
+
+/// Appends one value in the PostgreSQL COPY *text* format, `\N` for NULL.
+fn push_copy_value(buf: &mut String, value: BindValue) {
+    match value {
+        BindValue::Null => buf.push_str("\\N"),
+        BindValue::Int(n) => buf.push_str(&n.to_string()),
+        BindValue::Float(f) => buf.push_str(&f.to_string()),
+        BindValue::Bool(b) => buf.push_str(if b { "t" } else { "f" }),
+        BindValue::Text(s) => buf.push_str(&copy_escape_text(&s)),
+    }
+}
+
+/// Sends `buf` as the data of a started `COPY … FROM STDIN` and ends it.
+async fn copy_in<C>(
+    mut copier: sqlx::postgres::PgCopyIn<C>,
+    buf: &[u8],
+) -> Result<(), PublisherError>
+where
+    C: std::ops::DerefMut<Target = sqlx::PgConnection>,
+{
+    if let Err(e) = copier.send(buf).await {
+        // Tear the COPY down explicitly. `Drop` only buffers a CopyFail without
+        // awaiting the reply, so the connection could go back to the pool still in
+        // COPY-in state and poison the next query on it.
+        let _ = copier.abort("mq-bridge: COPY send failed").await;
+        return Err(classify_sql_error(e));
+    }
+    copier.finish().await.map_err(classify_sql_error)?;
+    Ok(())
+}
+
 /// Escape one text value for the PostgreSQL COPY *text* format (tab-separated, NL-terminated).
 fn copy_escape_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -796,14 +866,24 @@ fn sql_error_is_deterministic(e: &sqlx::Error) -> bool {
     // table fails fast (Postgres `42703`/`42P01` and MySQL `42S22`/`42S02` are
     // already caught by SQLSTATE above).
     let msg = db_err.message().to_ascii_lowercase();
-    msg.contains("no such column") || msg.contains("no such table")
+    msg.contains("no such column")
+        || msg.contains("no such table")
+        || msg.contains("has no column named")
+}
+
+/// The error without sqlx's ` at line N`: that is a line of the server's source, not of the query.
+fn sql_error_text(e: sqlx::Error) -> anyhow::Error {
+    match e.as_database_error() {
+        Some(db_err) => anyhow!("error returned from database: {}", db_err.message()),
+        None => anyhow!(e),
+    }
 }
 
 fn classify_sql_error(e: sqlx::Error) -> PublisherError {
     if sql_error_is_deterministic(&e) {
-        return PublisherError::NonRetryable(anyhow!(e));
+        return PublisherError::NonRetryable(sql_error_text(e));
     }
-    PublisherError::Retryable(anyhow!(e))
+    PublisherError::Retryable(sql_error_text(e))
 }
 
 /// Consumer-side twin of [`classify_sql_error`]. A deterministic schema/type/
@@ -813,9 +893,28 @@ fn classify_sql_error(e: sqlx::Error) -> PublisherError {
 /// (retryable) so restarts/failovers recover without losing messages.
 fn classify_sql_consumer_error(e: sqlx::Error) -> ConsumerError {
     if sql_error_is_deterministic(&e) {
-        ConsumerError::Permanent(anyhow!(e))
+        ConsumerError::Permanent(sql_error_text(e))
     } else {
-        ConsumerError::Connection(anyhow!(e))
+        ConsumerError::Connection(sql_error_text(e))
+    }
+}
+
+/// [`classify_sql_consumer_error`] for the work-queue reader, which needs its own columns.
+fn classify_queue_read_error(e: sqlx::Error) -> ConsumerError {
+    let missing_queue_column = sql_error_is_deterministic(&e)
+        && e.as_database_error().is_some_and(|db_err| {
+            let msg = db_err.message().to_ascii_lowercase();
+            ["id", "locked_until"].iter().any(|column| {
+                msg.contains(&format!("column \"{column}\" does not exist"))
+                    || msg.contains(&format!("no such column: {column}"))
+                    || msg.contains(&format!("unknown column '{column}'"))
+            })
+        });
+    match classify_sql_consumer_error(e) {
+        ConsumerError::Permanent(e) if missing_queue_column => ConsumerError::Permanent(e.context(
+            "the table is not an mq-bridge queue table (it lacks `id` or `locked_until`); set `cursor_column=<unique column>` to read a plain table",
+        )),
+        other => other,
     }
 }
 
@@ -935,6 +1034,33 @@ impl SqlxPublisher {
                 driver_name,
                 table,
                 copy: None,
+                auto: None,
+            });
+        }
+
+        if config.key.is_some() && config.columns.is_none() {
+            return Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`key` needs `columns: auto`; with an `insert_query`, write the ON CONFLICT clause into the query"
+            ))));
+        }
+        if config.extra_column.is_some() && config.columns.is_none() {
+            return Err(anyhow!(crate::errors::InvalidConfig(anyhow!(
+                "`extra_column` needs `columns: auto`"
+            ))));
+        }
+        if config.columns.is_some() {
+            let auto = columns::AutoColumns::new(&pool, &driver_name, config).await?;
+            return Ok(Self {
+                pg_batch: None,
+                pool,
+                _shared_pool: shared_pool,
+                insert_query: String::new(),
+                column_sources: Vec::new(),
+                lookup: None,
+                driver_name,
+                table,
+                copy: None,
+                auto: Some(auto),
             });
         }
 
@@ -1053,17 +1179,8 @@ impl SqlxPublisher {
                 ));
             }
             let columns = extract_copy_columns(&raw_insert_query, column_sources.len())?;
-            // Dedicated native Postgres pool: COPY needs the typed pg protocol, not the `Any` layer.
-            let url = build_sqlx_url_with_tls(config)?;
-            let pg_pool = PgPoolOptions::new()
-                .max_connections(config.max_connections.unwrap_or(5))
-                // Match `create_sqlx_pool`: no liveness ping per acquire.
-                .test_before_acquire(config.test_before_acquire.unwrap_or(false))
-                .connect(&url)
-                .await
-                .context("bulk_copy: failed to open native PostgreSQL pool")?;
             Some(PgCopySink {
-                pool: pg_pool,
+                pool: open_copy_pool(config).await?,
                 table: table.clone(),
                 columns,
                 sources: column_sources.clone(),
@@ -1082,6 +1199,7 @@ impl SqlxPublisher {
             copy,
             lookup: None,
             pg_batch: None,
+            auto: None,
         })
     }
 
@@ -1500,6 +1618,14 @@ impl MessagePublisher for SqlxPublisher {
         if self.lookup.is_some() {
             return self.lookup_one(&message).await;
         }
+        if let Some(auto) = &self.auto {
+            return match auto.send(&self.pool, vec![message]).await? {
+                SentBatch::Partial { mut failed, .. } if !failed.is_empty() => {
+                    Err(failed.swap_remove(0).1)
+                }
+                _ => Ok(Sent::Ack),
+            };
+        }
         trace!(message_id = %format!("{:032x}", message.message_id), table = %self.table, "Publishing to SQL");
         let query = sqlx::query(audited_sql(&self.insert_query));
         let query = if self.column_sources.is_empty() {
@@ -1525,6 +1651,10 @@ impl MessagePublisher for SqlxPublisher {
         if self.lookup.is_some() {
             return crate::traits::send_batch_helper(self, messages, |p, m| Box::pin(p.send(m)))
                 .await;
+        }
+
+        if let Some(auto) = &self.auto {
+            return auto.send(&self.pool, messages).await;
         }
 
         if let Some(sink) = &self.copy {
@@ -1696,30 +1826,13 @@ impl SqlxPublisher {
                 }
                 let value = resolve_source(msg, source, &payload_json);
                 reject_embedded_nul(source, &value)?;
-                match value {
-                    BindValue::Null => buf.push_str("\\N"),
-                    BindValue::Int(n) => buf.push_str(&n.to_string()),
-                    BindValue::Float(f) => buf.push_str(&f.to_string()),
-                    BindValue::Bool(b) => buf.push_str(if b { "t" } else { "f" }),
-                    BindValue::Text(s) => buf.push_str(&copy_escape_text(&s)),
-                }
+                push_copy_value(&mut buf, value);
             }
             buf.push('\n');
         }
 
-        let mut copier = sink
-            .pool
-            .copy_in_raw(&stmt)
-            .await
-            .map_err(classify_sql_error)?;
-        if let Err(e) = copier.send(buf.as_bytes()).await {
-            // Tear the COPY down explicitly. `Drop` only buffers a CopyFail without
-            // awaiting the reply, so the connection could go back to the pool still in
-            // COPY-in state and poison the next query on it.
-            let _ = copier.abort("mq-bridge: COPY send failed").await;
-            return Err(classify_sql_error(e));
-        }
-        copier.finish().await.map_err(classify_sql_error)?;
+        let copier = sink.pool.copy_in_raw(&stmt).await;
+        copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
 
         trace!(count = messages.len(), table = %sink.table, "Bulk-copied batch to PostgreSQL");
         Ok(SentBatch::Ack)
@@ -1856,11 +1969,7 @@ impl SqlxConsumer {
         &self,
         limit: usize,
     ) -> Result<Vec<sqlx::any::AnyRow>, ConsumerError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(classify_sql_consumer_error)?;
+        let mut tx = self.pool.begin().await.map_err(classify_queue_read_error)?;
 
         let lock_query = format!(
             "SELECT id FROM {} WHERE locked_until IS NULL OR locked_until < NOW() ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED",
@@ -1871,7 +1980,7 @@ impl SqlxConsumer {
             .bind(limit as i64)
             .fetch_all(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?
+            .map_err(classify_queue_read_error)?
             .into_iter()
             .map(|row| row.get("id"))
             .collect();
@@ -1900,7 +2009,7 @@ impl SqlxConsumer {
         query
             .execute(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
         // Select the full rows that we just locked
         let select_query = format!(
@@ -1916,9 +2025,9 @@ impl SqlxConsumer {
         let rows = query
             .fetch_all(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
-        tx.commit().await.map_err(classify_sql_consumer_error)?;
+        tx.commit().await.map_err(classify_queue_read_error)?;
 
         Ok(rows)
     }
@@ -1933,7 +2042,7 @@ impl SqlxConsumer {
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
         let select_query = format!(
             "SELECT id FROM {} WHERE locked_until IS NULL OR locked_until < datetime('now') ORDER BY id LIMIT ?",
@@ -1944,7 +2053,7 @@ impl SqlxConsumer {
             .bind(limit as i64)
             .fetch_all(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?
+            .map_err(classify_queue_read_error)?
             .into_iter()
             .map(|row| row.get("id"))
             .collect();
@@ -1971,7 +2080,7 @@ impl SqlxConsumer {
         query
             .execute(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
         let select_payload_query = format!(
             "SELECT id, payload FROM {} WHERE id IN ({})",
@@ -1984,9 +2093,9 @@ impl SqlxConsumer {
         let rows = query
             .fetch_all(&mut *tx)
             .await
-            .map_err(classify_sql_consumer_error)?;
+            .map_err(classify_queue_read_error)?;
 
-        tx.commit().await.map_err(classify_sql_consumer_error)?;
+        tx.commit().await.map_err(classify_queue_read_error)?;
 
         Ok(rows)
     }
@@ -2038,7 +2147,7 @@ impl MessageConsumer for SqlxConsumer {
                 .bind(max_messages as i64)
                 .fetch_all(&self.pool)
                 .await
-                .map_err(classify_sql_consumer_error)?,
+                .map_err(classify_queue_read_error)?,
             "MySQL" | "MariaDB" => self.fetch_and_lock_mysql(max_messages).await?,
             "SQLite" => self.fetch_and_lock_sqlite(max_messages).await?,
             _ => {
@@ -2049,7 +2158,7 @@ impl MessageConsumer for SqlxConsumer {
                     .bind(max_messages as i64)
                     .fetch_all(&self.pool)
                     .await
-                    .map_err(classify_sql_consumer_error)?
+                    .map_err(classify_queue_read_error)?
             }
         };
 
@@ -2502,6 +2611,7 @@ async fn build_cursor_projection(
     pool: &AnyPool,
     driver_name: &str,
     table: &str,
+    timestamps: crate::models::SqlTimestamps,
 ) -> (String, Vec<String>) {
     let star = || ("*".to_string(), Vec::new());
     type SafeFn = fn(&str) -> bool;
@@ -2573,6 +2683,8 @@ async fn build_cursor_projection(
         } else if driver_name == "PostgreSQL" && matches!(typname.as_str(), "json" | "jsonb") {
             parts.push(cast(&ident));
             raw_json.push(name);
+        } else if let Some(rendered) = pg_rfc3339(driver_name, &typname, &ident, timestamps) {
+            parts.push(rendered);
         } else if driver_name == "PostgreSQL" && typname.starts_with('_') {
             // Array types: the text form is `{1,2}`, so render them as a JSON array.
             parts.push(format!("to_jsonb({ident})::text AS {ident}"));
@@ -2583,6 +2695,27 @@ async fn build_cursor_projection(
         }
     }
     (parts.join(", "), raw_json)
+}
+
+/// The projection for a Postgres timestamp column under `timestamps: rfc3339`.
+fn pg_rfc3339(
+    driver_name: &str,
+    typname: &str,
+    ident: &str,
+    timestamps: crate::models::SqlTimestamps,
+) -> Option<String> {
+    if driver_name != "PostgreSQL" || timestamps != crate::models::SqlTimestamps::Rfc3339 {
+        return None;
+    }
+    match typname {
+        "timestamptz" => Some(format!(
+            "to_char({ident} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS {ident}"
+        )),
+        "timestamp" => Some(format!(
+            "to_char({ident}, 'YYYY-MM-DD\"T\"HH24:MI:SS.US') AS {ident}"
+        )),
+        _ => None,
+    }
 }
 
 /// A permanent (non-transient) failure: the `Any` driver cannot decode a column type, so
@@ -2911,7 +3044,7 @@ impl SqlxCursorReader {
         info!(table = %config.table, cursor_id = ?config.cursor_id, has_checkpoint = %last_value.is_some(), "SQLx cursor reader initialized");
 
         let (projection, raw_json_columns) =
-            build_cursor_projection(&pool, &driver_name, &config.table).await;
+            build_cursor_projection(&pool, &driver_name, &config.table, config.timestamps).await;
 
         let sql_first = format!(
             "SELECT {0} FROM {1} ORDER BY {2} ASC LIMIT {3}",

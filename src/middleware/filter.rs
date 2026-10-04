@@ -48,6 +48,8 @@ pub(crate) struct CompiledFilter {
     /// Dotted paths the expression compares against a numeric literal.
     numeric_paths: Vec<String>,
     uses_all_metadata: bool,
+    /// Whether the expression holds a single `=`, the usual typo for `==`.
+    lone_equals: bool,
     warned_unusable_field: AtomicBool,
 }
 
@@ -380,8 +382,13 @@ impl FilterContext {
 impl CompiledFilter {
     pub(crate) fn new(expression: &str) -> anyhow::Result<Self> {
         let normalized = normalize_expression(expression);
-        let expression =
-            compile_expression(&normalized).map_err(|error| anyhow!(error.to_string()))?;
+        let expression = compile_expression(&normalized).map_err(|error| {
+            anyhow!(
+                "{error}. Comparisons are ==, !=, <, <=, >, >=, in and not in, combined with \
+                 and/or/not; string tests are functions, e.g. contains(name, \"x\")"
+            )
+        })?;
+        let lone_equals = has_lone_equals(&normalized);
         let fast_predicate = compile_fast_predicate(&expression);
         let (payload_paths, metadata_keys, uses_all_metadata, has_unsupported_path) =
             referenced_paths(&expression);
@@ -409,6 +416,7 @@ impl CompiledFilter {
             metadata_keys,
             numeric_paths,
             uses_all_metadata,
+            lone_equals,
             warned_unusable_field: AtomicBool::new(false),
         })
     }
@@ -516,6 +524,9 @@ impl CompiledFilter {
         };
         match evaluated {
             Variable::Bool(value) => Ok(value),
+            _ if self.lone_equals => bail!(
+                "filter expression did not evaluate to a boolean; it contains a single `=`, did you mean `==`?"
+            ),
             _ => bail!("filter expression did not evaluate to a boolean"),
         }
     }
@@ -829,6 +840,35 @@ fn text_typed_field_error(error: &str, text_fields: &[String]) -> anyhow::Error 
 ///
 /// The engine's lexer rejects the C-style spellings outright, and reaching for
 /// them is the first thing anyone does.
+/// Whether a `=` that is not part of `==`, `!=`, `<=` or `>=` stands outside string literals.
+fn has_lone_equals(expression: &str) -> bool {
+    let bytes = expression.as_bytes();
+    let mut quote = None;
+    let mut escaped = false;
+    for (i, &byte) in bytes.iter().enumerate() {
+        if let Some(delimiter) = quote {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == delimiter {
+                quote = None;
+            }
+        } else if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+        } else if byte == b'='
+            && bytes.get(i + 1) != Some(&b'=')
+            && !matches!(
+                i.checked_sub(1).map(|p| bytes[p]),
+                Some(b'=' | b'!' | b'<' | b'>')
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn normalize_expression(expression: &str) -> String {
     let mut normalized = String::with_capacity(expression.len());
     let mut chars = expression.chars().peekable();
@@ -1427,6 +1467,19 @@ mod tests {
             error.contains("did not evaluate to a boolean"),
             "got: {error}"
         );
+    }
+
+    #[test]
+    fn a_single_equals_sign_is_named_in_the_error() {
+        assert!(!has_lone_equals(
+            r#"a == "x=y" and b != 1 and c <= 2 and d >= 3"#
+        ));
+        let filter = CompiledFilter::new(r#"note = "x""#).unwrap();
+        let error = filter
+            .matches(&message(r#"{"note": "x"}"#, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("did you mean `==`"), "got: {error}");
     }
 
     #[test]

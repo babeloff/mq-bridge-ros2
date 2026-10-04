@@ -11,6 +11,7 @@ BufferMiddleware = dict
 ClickHouseConfig = dict
 CompressionMiddleware = dict
 CookieJarMiddleware = dict
+CsvConfig = dict
 DeadLetterQueueMiddleware = dict
 DeduplicationMiddleware = dict
 DelayMiddleware = dict
@@ -71,8 +72,10 @@ WebSocketConfig = dict
 ZeroMqConfig = dict
 AggregateConsistency = str
 AggregateEmit = str
+AggregateOnError = str
 CipherKind = str
 Compression = str
+CsvNested = str
 DatePartitionStyle = str
 DeliveryGuarantee = str
 FaultMode = str
@@ -91,6 +94,8 @@ PostgresConsume = str
 SpoolClaim = str
 SpoolDone = str
 SpoolFsync = str
+SqlColumns = str
+SqlTimestamps = str
 StaticConfig = str
 TransformErrorPolicy = str
 WeakJoinAck = str
@@ -109,6 +114,7 @@ __all__ = [
     "AggregateEmit",
     "AggregateEntry",
     "AggregateMiddleware",
+    "AggregateOnError",
     "AmqpConfig",
     "AwsConfig",
     "BufferMiddleware",
@@ -118,6 +124,8 @@ __all__ = [
     "CompressionMiddleware",
     "ConfigDocument",
     "CookieJarMiddleware",
+    "CsvConfig",
+    "CsvNested",
     "DatePartitionStyle",
     "DeadLetterQueueMiddleware",
     "DeduplicationMiddleware",
@@ -186,6 +194,8 @@ __all__ = [
     "SpoolClaim",
     "SpoolDone",
     "SpoolFsync",
+    "SqlColumns",
+    "SqlTimestamps",
     "SqlxConfig",
     "StaticConfig",
     "StreamBufferConfig",

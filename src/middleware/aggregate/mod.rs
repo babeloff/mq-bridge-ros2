@@ -6,7 +6,7 @@
 //! Keeps one state document per key in this process and updates it with every message.
 
 use crate::middleware::raw_json::RawPairs;
-use crate::models::{AggregateConsistency, AggregateEmit, AggregateMiddleware};
+use crate::models::{AggregateConsistency, AggregateEmit, AggregateMiddleware, AggregateOnError};
 use crate::support::interpolation::CompiledTemplate;
 use crate::traits::{
     BatchCommitFunc, BoxFuture, ConsumerError, EndpointStatus, MessageConsumer, MessageDisposition,
@@ -40,11 +40,24 @@ mod writer;
 const STATE: &str = "state";
 const META: &str = "meta";
 
+/// Metadata naming the entries, by `into`, a message left out under `on_error: skip`.
+pub const SKIPPED_KEY: &str = "mqb.aggregate.skipped";
+/// Metadata naming the entries, by `into`, whose state had already seen a later `time`.
+pub const LATE_KEY: &str = "mqb.aggregate.late";
+
 type Folded = Result<CanonicalMessage, (CanonicalMessage, PublisherError)>;
-/// One entry's result for a message: entry index, key, new state, JSON to write.
-type Update = (usize, String, Stored, Vec<u8>);
-/// Per message, the JSON each entry writes; `None` until that entry ran.
-type Emitted = anyhow::Result<Vec<Option<Vec<u8>>>>;
+/// One entry's result for a message: entry index, key, new state, JSON to write, late.
+type Update = (usize, String, Stored, Vec<u8>, bool);
+/// Per message, the JSON each entry writes and whether it came late; `None` until that
+/// entry ran.
+type Emitted = anyhow::Result<Vec<Option<(Vec<u8>, bool)>>>;
+
+/// The entries a message left out and the ones it reached late.
+#[derive(Default)]
+struct Notes {
+    skipped: Vec<usize>,
+    late: Vec<usize>,
+}
 
 /// Longest key of one state; with the `into` prefix it fits the store's key column.
 const MAX_KEY_LEN: usize = 384;
@@ -70,8 +83,13 @@ enum Fold {
         expression: Expression<Standard>,
         output: Option<Expression<Standard>>,
     },
-    /// Built-in aggregates over `f64`; `width` is the number of state slots.
-    Fields { fields: Vec<Field>, width: usize },
+    /// Built-in aggregates over `f64`; `width` is the number of state slots and `clock`
+    /// the slot holding the newest time seen, in seconds.
+    Fields {
+        fields: Vec<Field>,
+        width: usize,
+        clock: Option<usize>,
+    },
 }
 
 /// What one entry is configured with.
@@ -82,6 +100,26 @@ struct EntryConfig<'a> {
     output: Option<&'a str>,
     into: &'a str,
     emit: AggregateEmit,
+    /// The middleware reads a `time` from the message.
+    timed: bool,
+}
+
+/// How much the weight of earlier values shrinks with a new one.
+#[derive(Clone, Copy)]
+enum Decay {
+    /// To `1 - alpha` with every message.
+    Count(f64),
+    /// To half over this many seconds.
+    HalfLife(f64),
+}
+
+impl Decay {
+    fn over(self, elapsed: f64) -> f64 {
+        match self {
+            Self::Count(decay) => decay,
+            Self::HalfLife(seconds) => 0.5f64.powf(elapsed / seconds),
+        }
+    }
 }
 
 enum Op {
@@ -91,11 +129,10 @@ enum Op {
     Max,
     Last,
     Mean,
-    /// Holds the decay `1 - alpha`.
-    Ema(f64),
+    Ema(Decay),
     /// Sample variance, or its root, of values weighted by `decay`; 1 weights all equally.
     Spread {
-        decay: f64,
+        decay: Decay,
         root: bool,
     },
 }
@@ -112,14 +149,19 @@ struct Field {
 
 impl Field {
     /// Parses `count`, `sum(path)`, `min`, `max`, `last`, `mean`, `stddev`, `variance`, or
-    /// `ema(path, alpha)`, `ema_stddev`, `ema_variance`.
+    /// `ema(path, alpha)`, `ema_stddev`, `ema_variance`; a duration such as `5m` in place
+    /// of `alpha` is a half-life.
     fn new(
         name: &str,
         spec: &str,
         at: usize,
         sources: &mut Vec<Vec<String>>,
     ) -> anyhow::Result<Self> {
-        let invalid = || anyhow::anyhow!("aggregate: invalid field '{name}: {spec}'");
+        let invalid = || {
+            anyhow::anyhow!(
+                "aggregate: invalid field '{name}: {spec}'; a field is `count` or one of sum, min, max, last, mean, stddev, variance (path), ema, ema_stddev, ema_variance (path, alpha or half-life)"
+            )
+        };
         let mut label = serde_json::to_vec(name)?;
         label.push(b':');
         let spec = spec.trim();
@@ -146,14 +188,14 @@ impl Field {
             return Err(invalid());
         }
         let mut decay = || {
-            let alpha: f64 = args
-                .next()
-                .and_then(|a| a.parse().ok())
-                .ok_or_else(invalid)?;
+            let arg = args.next().ok_or_else(invalid)?;
+            let Ok(alpha) = arg.parse::<f64>() else {
+                return seconds(arg).map(Decay::HalfLife).ok_or_else(invalid);
+            };
             if !(alpha > 0.0 && alpha <= 1.0) {
                 anyhow::bail!("aggregate: field '{name}': alpha must be in (0, 1]");
             }
-            Ok(1.0 - alpha)
+            Ok(Decay::Count(1.0 - alpha))
         };
         let spread = |decay, root| Op::Spread { decay, root };
         let op = match function.trim() {
@@ -162,8 +204,8 @@ impl Field {
             "max" => Op::Max,
             "last" => Op::Last,
             "mean" => Op::Mean,
-            "stddev" => spread(1.0, true),
-            "variance" => spread(1.0, false),
+            "stddev" => spread(Decay::Count(1.0), true),
+            "variance" => spread(Decay::Count(1.0), false),
             "ema" => Op::Ema(decay()?),
             "ema_stddev" => spread(decay()?, true),
             "ema_variance" => spread(decay()?, false),
@@ -195,9 +237,17 @@ impl Field {
         }
     }
 
-    /// Folds `x` into the slots; `first` on a zeroed state. A result that is no longer
-    /// finite is not kept.
-    fn apply(&self, slots: &mut [f64], x: f64, first: bool) {
+    /// Whether it decays by time and so needs the state's clock.
+    fn timed(&self) -> bool {
+        let (Op::Ema(decay) | Op::Spread { decay, .. }) = self.op else {
+            return false;
+        };
+        matches!(decay, Decay::HalfLife(_))
+    }
+
+    /// Folds `x` into the slots, `elapsed` seconds after the last value; `first` on a
+    /// zeroed state. A result that is no longer finite is not kept.
+    fn apply(&self, slots: &mut [f64], x: f64, first: bool, elapsed: f64) {
         let a = self.at;
         let keep = |slot: &mut f64| {
             let next = *slot + x;
@@ -217,11 +267,13 @@ impl Field {
             }
             // Weighted sum and weight: the mean of the values seen, without a start bias.
             Op::Ema(decay) => {
+                let decay = decay.over(elapsed);
                 slots[a] = slots[a] * decay + x;
                 slots[a + 1] = slots[a + 1] * decay + 1.0;
             }
             // Weight, mean, weighted squared deviations, sum of squared weights (West 1979).
             Op::Spread { decay, .. } => {
+                let decay = decay.over(elapsed);
                 let weight = slots[a] * decay + 1.0;
                 let mean = slots[a + 1] + (x - slots[a + 1]) / weight;
                 let squares = slots[a + 2] * decay + (x - slots[a + 1]) * (x - mean);
@@ -257,6 +309,103 @@ impl Field {
     }
 }
 
+/// Folds the values of one message, at time `now`, into the slots of a `fields` entry.
+/// `true` when the state had already seen a later time: the message is then folded as if
+/// it came at that time.
+fn fold_slots(
+    fields: &[Field],
+    clock: Option<usize>,
+    slots: &mut [f64],
+    values: &[f64],
+    now: f64,
+    first: bool,
+) -> bool {
+    let elapsed = match clock {
+        Some(at) if !first => now - slots[at],
+        _ => 0.0,
+    };
+    for field in fields {
+        let x = values.get(field.source).copied().unwrap_or(0.0);
+        field.apply(slots, x, first, elapsed.max(0.0));
+    }
+    if let Some(at) = clock {
+        slots[at] = if first { now } else { slots[at].max(now) };
+    }
+    elapsed < 0.0
+}
+
+/// Seconds of a duration such as `500ms`, `30s`, `5m`, `2h` or `7d`.
+fn seconds(text: &str) -> Option<f64> {
+    let (number, unit) = text.split_at(text.find(|c: char| c.is_ascii_alphabetic())?);
+    let scale = match unit {
+        "ms" => 0.001,
+        "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        "d" => 86400.0,
+        _ => return None,
+    };
+    let seconds = number.trim().parse::<f64>().ok()? * scale;
+    (seconds.is_finite() && seconds > 0.0).then_some(seconds)
+}
+
+fn number(text: &str) -> Option<f64> {
+    text.trim().parse::<f64>().ok().filter(|x| x.is_finite())
+}
+
+/// Seconds since the epoch of an epoch number, taken as milliseconds above 1e11, or of an
+/// RFC 3339 time; one without a zone is UTC.
+fn timestamp(text: &str) -> Option<f64> {
+    if let Some(epoch) = number(text) {
+        return Some(if epoch.abs() > 1e11 {
+            epoch / 1000.0
+        } else {
+            epoch
+        });
+    }
+    let text = text.trim();
+    let bytes = text.as_bytes();
+    let part = |at: usize, len: usize| -> Option<i64> {
+        let digits = text.get(at..at + len)?;
+        digits
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| digits.parse().ok())?
+    };
+    let (year, month, day) = (part(0, 4)?, part(5, 2)?, part(8, 2)?);
+    let (hour, minute, second) = (part(11, 2)?, part(14, 2)?, part(17, 2)?);
+    let separated = bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && matches!(bytes[10], b'T' | b't' | b' ')
+        && bytes[13] == b':'
+        && bytes[16] == b':';
+    if !separated || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let rest = text.get(19..)?;
+    let zone = rest.find(['Z', 'z', '+', '-']).unwrap_or(rest.len());
+    let fraction = match &rest[..zone] {
+        "" => 0.0,
+        fraction => number(fraction).filter(|_| fraction.starts_with('.'))?,
+    };
+    let offset = match &rest[zone..] {
+        "" | "Z" | "z" => 0,
+        signed if signed.len() == 6 && signed.as_bytes()[3] == b':' => {
+            let sign = if signed.starts_with('-') { -1 } else { 1 };
+            let at = 19 + zone;
+            sign * (part(at + 1, 2)? * 3600 + part(at + 4, 2)? * 60)
+        }
+        _ => return None,
+    };
+    // Days since the epoch of a civil date (Hinnant).
+    let year = if month <= 2 { year - 1 } else { year };
+    let (era, of_era) = (year.div_euclid(400), year.rem_euclid(400));
+    let of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let days = era * 146_097 + of_era * 365 + of_era / 4 - of_era / 100 + of_year - 719_468;
+    let whole = days * 86_400 + hour * 3600 + minute * 60 + second - offset;
+    Some(whole as f64 + fraction)
+}
+
 /// Writes the result object of a `fields` entry.
 fn write_fields(fields: &[Field], slots: &[f64], out: &mut Vec<u8>) -> anyhow::Result<()> {
     out.push(b'{');
@@ -290,7 +439,16 @@ impl<'a> Doc<'a> {
 
     /// The number at `path`; numeric strings count, as a CSV source delivers them.
     fn number(&self, path: &[String]) -> Option<f64> {
-        let text = |text: &str| text.trim().parse::<f64>().ok().filter(|x| x.is_finite());
+        self.value(path, number)
+    }
+
+    /// The time at `path` in seconds since the epoch.
+    fn time(&self, path: &[String]) -> Option<f64> {
+        self.value(path, timestamp)
+    }
+
+    /// The number or string at `path`, read by `text`.
+    fn value(&self, path: &[String], text: fn(&str) -> Option<f64>) -> Option<f64> {
         match self {
             Self::Raw(pairs) => {
                 let (top, rest) = path.split_first()?;
@@ -304,7 +462,7 @@ impl<'a> Doc<'a> {
                 text(unquoted.unwrap_or(raw))
             }
             Self::Tree(tree) => match path.iter().try_fold(tree, |at, name| at.get(name))? {
-                Value::Number(n) => n.as_f64(),
+                Value::Number(n) => text(&n.to_string()),
                 Value::String(s) => text(s),
                 _ => None,
             },
@@ -332,6 +490,7 @@ impl Entry {
             output,
             into,
             emit,
+            timed,
         } = config;
         let fold = match (expression, fields) {
             (Some(expression), None) => Fold::Zen {
@@ -346,7 +505,12 @@ impl Entry {
                     width += field.width();
                     fields.push(field);
                 }
-                Fold::Fields { fields, width }
+                let clock = (timed || fields.iter().any(Field::timed)).then_some(width);
+                Fold::Fields {
+                    fields,
+                    width: width + usize::from(clock.is_some()),
+                    clock,
+                }
             }
             (None, Some(_)) => {
                 anyhow::bail!("aggregate: `fields` must not be empty and takes no `output`")
@@ -401,23 +565,43 @@ impl Entry {
 
     /// Reads a state of this entry from its JSON text in the store.
     fn parse_state(&self, json: &str) -> anyhow::Result<Stored> {
-        let Fold::Fields { width, .. } = &self.fold else {
+        let Fold::Fields { width, clock, .. } = &self.fold else {
             return Stored::parse(json);
         };
-        let slots: Vec<f64> = serde_json::from_str(json)
-            .ok()
-            .filter(|slots: &Vec<f64>| slots.len() == *width)
-            .context("aggregate: a stored state does not match the configured `fields`")?;
+        let mut slots: Vec<f64> = serde_json::from_str(json)
+            .context("aggregate: a stored `fields` state is not a list of numbers")?;
+        // A state stored before `time` was set has no clock yet.
+        if clock.is_some() && slots.len() + 1 == *width {
+            slots.push(0.0);
+        }
+        if slots.len() != *width {
+            anyhow::bail!("aggregate: a stored state does not match the configured `fields`");
+        }
         Ok(Stored::Floats(slots.into()))
     }
 
-    /// The next state and the JSON to emit for a `fields` entry.
+    /// Whether every value this entry reads is there; a missing one is NaN.
+    fn ready(&self, values: &[f64], now: f64) -> bool {
+        let Fold::Fields { fields, clock, .. } = &self.fold else {
+            return true;
+        };
+        let read = |field: &Field| matches!(field.op, Op::Count) || !values[field.source].is_nan();
+        fields.iter().all(read) && !(clock.is_some() && now.is_nan())
+    }
+
+    /// The next state and the JSON to emit for a `fields` entry, and whether it came late.
     fn fold_fields(
         &self,
         previous: Option<&Stored>,
         values: &[f64],
-    ) -> anyhow::Result<(Stored, Vec<u8>)> {
-        let Fold::Fields { fields, width } = &self.fold else {
+        now: f64,
+    ) -> anyhow::Result<(Stored, Vec<u8>, bool)> {
+        let Fold::Fields {
+            fields,
+            width,
+            clock,
+        } = &self.fold
+        else {
             unreachable!("only called for a `fields` entry")
         };
         let mut json = Vec::with_capacity(96);
@@ -430,17 +614,11 @@ impl Entry {
             (AggregateEmit::Previous, false) => write_fields(fields, &slots, &mut json)?,
             (AggregateEmit::Updated, _) => {}
         }
-        for field in fields {
-            field.apply(
-                &mut slots,
-                values.get(field.source).copied().unwrap_or(0.0),
-                first,
-            );
-        }
+        let late = fold_slots(fields, *clock, &mut slots, values, now, first);
         if self.emit == AggregateEmit::Updated {
             write_fields(fields, &slots, &mut json)?;
         }
-        Ok((Stored::Floats(slots), json))
+        Ok((Stored::Floats(slots), json, late))
     }
 
     /// The state key for this message; `None` when it is missing or empty.
@@ -496,6 +674,15 @@ struct Aggregate {
     reads_meta: bool,
     /// Payload paths the `fields` entries read, each once per message.
     sources: Vec<Vec<String>>,
+    /// Payload path of the message's time; the clock when unset.
+    time: Option<Vec<String>>,
+    /// An entry keeps a clock, so every message needs a time.
+    clocked: bool,
+    on_error: AggregateOnError,
+    /// States are read from the store and never changed.
+    read_only: bool,
+    /// The first skipped entry and the first late message were logged.
+    noted: [AtomicBool; 2],
     /// No entry is an expression: the payload is never parsed into a tree.
     plain: bool,
     /// Plain, and every result is one distinct top-level field appended to the payload.
@@ -553,6 +740,7 @@ impl Aggregate {
                     output: config.output.as_deref(),
                     into,
                     emit: config.emit,
+                    timed: config.time.is_some(),
                 },
                 &mut sources,
             )?),
@@ -570,6 +758,7 @@ impl Aggregate {
                     output: e.output.as_deref(),
                     into: &e.into,
                     emit: e.emit,
+                    timed: config.time.is_some(),
                 },
                 &mut sources,
             )?);
@@ -586,6 +775,19 @@ impl Aggregate {
             anyhow::bail!("aggregate: two entries write to the same `into`");
         }
         let plain = (entries.iter()).all(|e| matches!(e.fold, Fold::Fields { .. }));
+        let clocked = |e: &Entry| matches!(e.fold, Fold::Fields { clock: Some(_), .. });
+        let time: Option<Vec<String>> = (config.time.as_deref())
+            .map(|path| path.trim().split('.').map(str::to_string).collect());
+        if time
+            .as_ref()
+            .is_some_and(|path| path.iter().any(String::is_empty))
+            || (time.is_some() && !entries.iter().any(clocked))
+        {
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
+                "aggregate: `time` is a payload path and needs an entry with `fields`"
+            ))
+            .into());
+        }
         let max_keys = config.max_keys.unwrap_or(DEFAULT_MAX_KEYS);
         let tops: HashSet<&str> = entries.iter().map(|e| e.into[0].as_str()).collect();
         Ok(Self {
@@ -595,6 +797,11 @@ impl Aggregate {
                 && entries.iter().all(|e| e.label.is_some()),
             plain,
             sources,
+            time,
+            clocked: entries.iter().any(clocked),
+            on_error: config.on_error,
+            read_only: config.read_only,
+            noted: Default::default(),
             states: Mutex::new(entries.iter().map(|_| States::new(max_keys)).collect()),
             max_keys,
             warned: AtomicBool::new(false),
@@ -607,16 +814,39 @@ impl Aggregate {
 
     /// Like `new`, and opens the configured `store`.
     async fn connect(config: &AggregateMiddleware, route_name: &str) -> anyhow::Result<Self> {
-        let mut aggregate = Self::new(config)?;
+        // Whatever `new` rejects is a config that cannot work, so the route stops.
+        let mut aggregate = Self::new(config).map_err(|e| {
+            if e.is::<crate::errors::InvalidConfig>() {
+                e
+            } else {
+                crate::errors::InvalidConfig(e).into()
+            }
+        })?;
+        if config.read_only && config.store.is_none() {
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
+                "aggregate: `read_only` needs a `store` to read the states from"
+            ))
+            .into());
+        }
+        if config.store.is_none() && config.consistency != AggregateConsistency::SingleWriter {
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
+                "aggregate: without a `store` the states live in this process only and are \
+                 lost on restart; set a `store`, or `consistency: single_writer` to accept that"
+            ))
+            .into());
+        }
         if let Some(spec) = &config.store {
             let longest = aggregate.entries.iter().map(|e| e.store_key("").len());
             if longest.max().unwrap_or(0) + MAX_KEY_LEN > store::MAX_KEY_LEN {
                 anyhow::bail!("aggregate: an `into` path is too long to key a stored state");
             }
             let store = store::build_store(spec, route_name).await?;
+            // Read-only states are loaded per batch: another instance changes them.
             match config.consistency {
-                AggregateConsistency::Shared => aggregate.store = Some(store),
-                AggregateConsistency::SingleWriter => aggregate.write_behind(store),
+                AggregateConsistency::SingleWriter if !config.read_only => {
+                    aggregate.write_behind(store)
+                }
+                _ => aggregate.store = Some(store),
             }
         }
         Ok(aggregate)
@@ -656,9 +886,9 @@ impl Aggregate {
         let mut missing = vec![HashSet::new(); n];
         {
             let inner = writer.lock();
-            for keys in messages.iter().filter_map(|m| self.keys(m)) {
+            for keys in messages.iter().map(|m| self.keys(m)) {
                 for (i, key) in keys.into_iter().enumerate() {
-                    if !inner.states[i].contains_key(&key) {
+                    if let Some(key) = key.filter(|key| !inner.states[i].contains_key(key)) {
                         missing[i].insert(key);
                     }
                 }
@@ -695,11 +925,11 @@ impl Aggregate {
     ) -> anyhow::Result<Vec<Folded>> {
         let _gate = self.gate.lock().await;
         let n = self.entries.len();
-        let keys: Vec<Option<Vec<String>>> = messages.iter().map(|m| self.keys(m)).collect();
+        let keys: Vec<Vec<Option<String>>> = messages.iter().map(|m| self.keys(m)).collect();
         let mut pending = vec![HashSet::new(); n];
-        for keys in keys.iter().flatten() {
+        for keys in &keys {
             for (i, key) in keys.iter().enumerate() {
-                pending[i].insert(key.clone());
+                pending[i].extend(key.clone());
             }
         }
         let mut states: Vec<States> = (0..n).map(|_| States::new(0)).collect();
@@ -767,30 +997,83 @@ impl Aggregate {
         Ok(messages
             .into_iter()
             .zip(slots)
-            .map(
-                |(mut msg, slot)| match slot.and_then(|emitted| self.payload(&msg, emitted)) {
-                    Ok(payload) => {
-                        msg.payload = payload.into();
-                        Ok(msg)
-                    }
-                    Err(e) => Err((msg, PublisherError::NonRetryable(e))),
-                },
-            )
+            .map(|(msg, slot)| {
+                let outcome = slot.and_then(|emitted| self.payload(&msg, emitted));
+                self.settle(msg, outcome)
+            })
             .collect())
     }
 
-    /// The key of every entry for this message; `None` when one cannot be read.
-    fn keys(&self, msg: &CanonicalMessage) -> Option<Vec<String>> {
+    /// The key of every entry for this message; `None` where it cannot be read.
+    fn keys(&self, msg: &CanonicalMessage) -> Vec<Option<String>> {
+        let usable = |key: &String| key.len() <= MAX_KEY_LEN;
+        let none = || vec![None; self.entries.len()];
         if self.plain {
-            let doc = Doc::parse(&msg.payload).ok()?;
+            let Ok(doc) = Doc::parse(&msg.payload) else {
+                return none();
+            };
             return (self.entries.iter())
-                .map(|e| e.raw_key(msg, &doc).map(Cow::into_owned))
+                .map(|e| e.raw_key(msg, &doc).map(Cow::into_owned).filter(usable))
                 .collect();
         }
-        let doc: Variable = serde_json::from_slice(&msg.payload).ok()?;
-        let object = doc.as_object()?;
+        let Ok(doc) = serde_json::from_slice::<Variable>(&msg.payload) else {
+            return none();
+        };
+        let Some(object) = doc.as_object() else {
+            return none();
+        };
         let fields = object.borrow();
-        self.entries.iter().map(|e| e.key(msg, &fields)).collect()
+        (self.entries.iter())
+            .map(|e| e.key(msg, &fields).filter(usable))
+            .collect()
+    }
+
+    /// Puts the outcome of folding into the message. Under `on_error: skip` a message that
+    /// cannot be folded goes on unchanged.
+    fn settle(
+        &self,
+        mut msg: CanonicalMessage,
+        outcome: anyhow::Result<(Vec<u8>, Notes)>,
+    ) -> Folded {
+        let notes = match outcome {
+            Ok((payload, notes)) => {
+                msg.payload = payload.into();
+                notes
+            }
+            Err(e) if self.on_error == AggregateOnError::Skip => {
+                tracing::debug!("aggregate: passing a message on unchanged: {e:#}");
+                Notes {
+                    skipped: (0..self.entries.len()).collect(),
+                    late: Vec::new(),
+                }
+            }
+            Err(e) => return Err((msg, PublisherError::NonRetryable(e))),
+        };
+        let marks = [
+            (SKIPPED_KEY, notes.skipped, "left out by `on_error: skip`"),
+            (
+                LATE_KEY,
+                notes.late,
+                "older than the `time` its state had seen",
+            ),
+        ];
+        for ((key, entries, what), noted) in marks.into_iter().zip(&self.noted) {
+            if entries.is_empty() {
+                continue;
+            }
+            let names: Vec<String> = (entries.iter())
+                .map(|i| self.entries[*i].into.join("."))
+                .collect();
+            let names = names.join(",");
+            if !noted.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "aggregate: entry '{names}' was {what}; such messages carry the \
+                     metadata `{key}`. Logged once."
+                );
+            }
+            msg.metadata.insert(key.to_string(), names);
+        }
+        Ok(msg)
     }
 
     /// Folds the messages that still have a key in `only` (all when `None`) and returns the
@@ -798,7 +1081,7 @@ impl Aggregate {
     fn fold_round(
         &self,
         messages: &[CanonicalMessage],
-        keys: &[Option<Vec<String>>],
+        keys: &[Vec<Option<String>>],
         states: &mut [States],
         only: Option<&[HashSet<String>]>,
         slots: &mut [Emitted],
@@ -806,9 +1089,10 @@ impl Aggregate {
         let mut vm = VM::new();
         let mut touched = vec![HashSet::new(); self.entries.len()];
         for ((msg, keys), slot) in messages.iter().zip(keys).zip(slots) {
-            let affected = match (only, keys) {
-                (Some(only), Some(keys)) => keys.iter().zip(only).any(|(k, set)| set.contains(k)),
-                _ => true,
+            let affected = match only {
+                Some(only) => (keys.iter().zip(only))
+                    .any(|(key, set)| key.as_ref().is_some_and(|key| set.contains(key))),
+                None => true,
             };
             let Ok(emitted) = slot else { continue };
             if !affected {
@@ -816,10 +1100,22 @@ impl Aggregate {
             }
             match self.compute(msg, states, &mut vm, only) {
                 Ok(updates) => {
-                    for (i, key, next, json) in updates {
-                        touched[i].insert(key.clone());
-                        states[i].insert(key, next);
-                        emitted[i] = Some(json);
+                    let mut changed = Vec::with_capacity(updates.len());
+                    for (i, key, next, json, late) in updates {
+                        emitted[i] = Some((json, late));
+                        changed.push((i, key, next));
+                    }
+                    // The states are stored before the payload is written, so an output
+                    // that has no place in the payload fails here and changes no state.
+                    if let Err(e) = self.payload(msg, emitted.clone()) {
+                        *slot = Err(e);
+                        continue;
+                    }
+                    if !self.read_only {
+                        for (i, key, next) in changed {
+                            touched[i].insert(key.clone());
+                            states[i].insert(key, next);
+                        }
                     }
                 }
                 Err(e) => *slot = Err(e),
@@ -828,16 +1124,29 @@ impl Aggregate {
         touched
     }
 
-    /// Writes what the entries emitted into the message's payload.
+    /// Writes what the entries emitted into the message's payload. An entry that emitted
+    /// nothing was skipped.
     fn payload(
         &self,
         msg: &CanonicalMessage,
-        emitted: Vec<Option<Vec<u8>>>,
-    ) -> anyhow::Result<Vec<u8>> {
-        let values = (self.entries.iter().zip(emitted))
-            .filter_map(|(entry, json)| Some((entry.into.as_slice(), json?)))
-            .collect();
-        write_payload(&msg.payload, values)
+        emitted: Vec<Option<(Vec<u8>, bool)>>,
+    ) -> anyhow::Result<(Vec<u8>, Notes)> {
+        let mut notes = Notes::default();
+        let mut values = Vec::with_capacity(emitted.len());
+        for (i, (entry, emitted)) in self.entries.iter().zip(emitted).enumerate() {
+            let Some((json, late)) = emitted else {
+                notes.skipped.push(i);
+                continue;
+            };
+            if late {
+                notes.late.push(i);
+            }
+            values.push((entry.into.as_slice(), json));
+        }
+        if values.is_empty() {
+            return Ok((msg.payload.to_vec(), notes));
+        }
+        Ok((write_payload(&msg.payload, values)?, notes))
     }
 
     /// Updates the states message by message, in order. A failing message changes no state.
@@ -867,15 +1176,10 @@ impl Aggregate {
         let mut scratch = Scratch::default();
         messages
             .into_iter()
-            .map(|mut msg| {
+            .map(|msg| {
                 let dirty = dirty.as_deref_mut();
-                match self.update(&msg, states, &mut vm, &mut scratch, dirty) {
-                    Ok(payload) => {
-                        msg.payload = payload.into();
-                        Ok(msg)
-                    }
-                    Err(e) => Err((msg, PublisherError::NonRetryable(e))),
-                }
+                let outcome = self.update(&msg, states, &mut vm, &mut scratch, dirty);
+                self.settle(msg, outcome)
             })
             .collect()
     }
@@ -888,38 +1192,59 @@ impl Aggregate {
         vm: &mut VM,
         scratch: &mut Scratch,
         mut dirty: Option<&mut Vec<HashSet<String>>>,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<(Vec<u8>, Notes)> {
         if self.append {
             let dirty = dirty.as_deref_mut();
-            if let Some(payload) = self.update_appending(msg, states, scratch, dirty)? {
-                return Ok(payload);
+            if let Some(done) = self.update_appending(msg, states, scratch, dirty)? {
+                return Ok(done);
             }
         }
         let mut updates = self.compute(msg, states, vm, None)?;
-        let emitted = updates
-            .iter_mut()
-            .map(|update| Some(std::mem::take(&mut update.3)))
-            .collect();
-        let payload = self.payload(msg, emitted)?;
-        for (i, key, next, _) in updates {
+        let mut emitted = vec![None; self.entries.len()];
+        for update in &mut updates {
+            emitted[update.0] = Some((std::mem::take(&mut update.3), update.4));
+        }
+        let done = self.payload(msg, emitted)?;
+        for (i, key, next, ..) in updates {
             if let Some(dirty) = dirty.as_deref_mut() {
                 dirty[i].insert(key.clone());
             }
             states[i].insert(key, next);
         }
-        Ok(payload)
+        Ok(done)
     }
 
-    /// The value of every source path; fails when one is missing or not a number.
-    fn read_values(&self, doc: &Doc<'_>, values: &mut Vec<f64>) -> anyhow::Result<()> {
+    /// Reads every source path into `values` and returns the message's time in seconds.
+    /// A value that is missing or not a number fails, or is NaN under `on_error: skip`.
+    fn read_values(&self, doc: &Doc<'_>, values: &mut Vec<f64>) -> anyhow::Result<f64> {
+        let lenient = self.on_error == AggregateOnError::Skip;
         values.clear();
         for path in &self.sources {
-            let value = doc.number(path).with_context(|| {
-                format!("aggregate: field '{}' is not a number", path.join("."))
-            })?;
+            let value = match doc.number(path) {
+                Some(value) => value,
+                None if lenient => f64::NAN,
+                None => anyhow::bail!(
+                    "aggregate: field '{}' is missing or not a number",
+                    path.join(".")
+                ),
+            };
             values.push(value);
         }
-        Ok(())
+        let Some(path) = &self.time else {
+            let clock = || std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+            return Ok(match self.clocked {
+                true => clock().map_or(0.0, |since| since.as_secs_f64()),
+                false => 0.0,
+            });
+        };
+        match doc.time(path) {
+            Some(time) => Ok(time),
+            None if lenient => Ok(f64::NAN),
+            None => anyhow::bail!(
+                "aggregate: `time` field '{}' is missing or not a time",
+                path.join(".")
+            ),
+        }
     }
 
     /// The fast path of `fields`: reads only what it needs, updates the states in place and
@@ -930,7 +1255,7 @@ impl Aggregate {
         states: &mut [States],
         scratch: &mut Scratch,
         mut dirty: Option<&mut Vec<HashSet<String>>>,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
+    ) -> anyhow::Result<Option<(Vec<u8>, Notes)>> {
         let doc = Doc::parse(&msg.payload)?;
         let Doc::Raw(pairs) = &doc else {
             return Ok(None);
@@ -940,12 +1265,19 @@ impl Aggregate {
         let Some(end) = end.filter(|_| !pairs.is_empty() && !self.entries.iter().any(taken)) else {
             return Ok(None);
         };
-        self.read_values(&doc, &mut scratch.values)?;
+        let now = self.read_values(&doc, &mut scratch.values)?;
+        let lenient = self.on_error == AggregateOnError::Skip;
+        let mut notes = Notes::default();
         let mut keys = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
-            let key = entry
-                .raw_key(msg, &doc)
-                .context("aggregate: `key` has no value for this message")?;
+            let key = entry.raw_key(msg, &doc);
+            let whole = key.as_ref().is_some_and(|key| key.len() <= MAX_KEY_LEN)
+                && entry.ready(&scratch.values, now);
+            // An entry to skip takes the path that can leave one out.
+            if lenient && !whole {
+                return Ok(None);
+            }
+            let key = key.context("aggregate: `key` has no value for this message")?;
             if key.len() > MAX_KEY_LEN {
                 anyhow::bail!("aggregate: `key` is longer than {MAX_KEY_LEN} bytes");
             }
@@ -955,7 +1287,15 @@ impl Aggregate {
         let mut out = Vec::with_capacity(msg.payload.len() + 96 * self.entries.len());
         out.extend_from_slice(&msg.payload[..end]);
         for (i, (entry, key)) in self.entries.iter().zip(keys).enumerate() {
-            let (Fold::Fields { fields, width }, Some(label)) = (&entry.fold, &entry.label) else {
+            let (
+                Fold::Fields {
+                    fields,
+                    width,
+                    clock,
+                },
+                Some(label),
+            ) = (&entry.fold, &entry.label)
+            else {
                 unreachable!("`append` is set for top-level `fields` entries only")
             };
             if let Some(dirty) = dirty.as_deref_mut() {
@@ -977,16 +1317,15 @@ impl Aggregate {
                 (AggregateEmit::Previous, false) => write_fields(fields, slots, &mut out)?,
                 (AggregateEmit::Updated, _) => {}
             }
-            for field in fields {
-                let x = scratch.values.get(field.source).copied().unwrap_or(0.0);
-                field.apply(slots, x, first);
+            if fold_slots(fields, *clock, slots, &scratch.values, now, first) {
+                notes.late.push(i);
             }
             if entry.emit == AggregateEmit::Updated {
                 write_fields(fields, slots, &mut out)?;
             }
         }
         out.push(b'}');
-        Ok(Some(out))
+        Ok(Some((out, notes)))
     }
 
     /// Evaluates the entries of one message whose key is in `only` (every entry when
@@ -999,13 +1338,22 @@ impl Aggregate {
         only: Option<&[HashSet<String>]>,
     ) -> anyhow::Result<Vec<Update>> {
         let mut values = Vec::new();
-        let raw = match self.plain || !self.sources.is_empty() {
+        let mut now = 0.0;
+        let raw = match self.plain || !self.sources.is_empty() || self.time.is_some() {
             true => Some(Doc::parse(&msg.payload)?),
             false => None,
         };
         if let Some(raw) = &raw {
-            self.read_values(raw, &mut values)?;
+            now = self.read_values(raw, &mut values)?;
         }
+        // Under `on_error: skip` an entry that cannot be computed is left out.
+        let skip = |entry: &Entry, e: anyhow::Error| match self.on_error {
+            AggregateOnError::Skip => {
+                tracing::debug!("aggregate: skipping '{}': {e:#}", entry.into.join("."));
+                Ok(())
+            }
+            _ => Err(e),
+        };
         let tree = match self.plain {
             true => None,
             false => Some(self.tree(msg)?),
@@ -1028,33 +1376,59 @@ impl Aggregate {
                 (None, Some(raw)) => entry.raw_key(msg, raw).map(Cow::into_owned),
                 (None, None) => None,
             };
-            let key = key.context("aggregate: `key` has no value for this message")?;
-            if key.len() > MAX_KEY_LEN {
-                anyhow::bail!("aggregate: `key` is longer than {MAX_KEY_LEN} bytes");
-            }
+            let key = match key {
+                Some(key) if key.len() <= MAX_KEY_LEN => key,
+                Some(_) => {
+                    let long = "aggregate: `key` is longer than";
+                    skip(entry, anyhow::anyhow!("{long} {MAX_KEY_LEN} bytes"))?;
+                    continue;
+                }
+                None => {
+                    let missing = "aggregate: `key` has no value for this message";
+                    skip(entry, anyhow::anyhow!(missing))?;
+                    continue;
+                }
+            };
             if only.is_some_and(|only| !only[i].contains(&key)) {
                 continue;
             }
             let previous = states.get(&key);
             let Fold::Zen { expression, output } = &entry.fold else {
-                let (next, json) = entry.fold_fields(previous, &values)?;
-                updates.push((i, key, next, json));
+                if !entry.ready(&values, now) {
+                    let missing = "aggregate: a field it reads is missing or not a number";
+                    skip(entry, anyhow::anyhow!(missing))?;
+                    continue;
+                }
+                let (next, json, late) = entry.fold_fields(previous, &values, now)?;
+                updates.push((i, key, next, json, late));
                 continue;
             };
             let before = previous.map_or(Variable::Null, Stored::to_variable);
-            let next = evaluate(expression, before.clone())?;
+            let next = match evaluate(expression, before.clone()) {
+                Ok(next) => next,
+                Err(e) => {
+                    skip(entry, e)?;
+                    continue;
+                }
+            };
             let shown = match (entry.emit, previous) {
                 (AggregateEmit::Updated, _) => next.clone(),
                 (AggregateEmit::Previous, Some(_)) => before,
                 (AggregateEmit::Previous, None) => Variable::Null,
             };
             let shown = match output {
-                Some(output) if !matches!(shown, Variable::Null) => evaluate(output, shown)?,
+                Some(output) if !matches!(shown, Variable::Null) => match evaluate(output, shown) {
+                    Ok(shown) => shown,
+                    Err(e) => {
+                        skip(entry, e)?;
+                        continue;
+                    }
+                },
                 _ => shown,
             };
             let mut json = Vec::with_capacity(96);
             write_json(&shown, &mut json)?;
-            updates.push((i, key, Stored::from_variable(&next), json));
+            updates.push((i, key, Stored::from_variable(&next), json, false));
         }
         Ok(updates)
     }
@@ -1494,7 +1868,7 @@ impl MessagePublisher for AggregatePublisher {
 }
 
 /// Folds each received batch before the handler sees it. A message that cannot be
-/// folded is logged, acked and dropped.
+/// folded is logged and dropped: acked, or nacked under `on_error: fail`.
 pub struct AggregateConsumer {
     inner: Box<dyn MessageConsumer>,
     aggregate: Aggregate,
@@ -1547,6 +1921,7 @@ impl MessageConsumer for AggregateConsumer {
                     return Err(ConsumerError::Connection(e));
                 }
             };
+            let fail = self.aggregate.on_error == AggregateOnError::Fail;
             let mut folded = Vec::with_capacity(len);
             let mut kept = Vec::with_capacity(len);
             for (i, result) in results.into_iter().enumerate() {
@@ -1557,21 +1932,27 @@ impl MessageConsumer for AggregateConsumer {
                     }
                     Err((m, e)) => tracing::error!(
                         message_id = format_args!("{:032x}", m.message_id),
-                        "aggregate: dropping input message: {e:#}"
+                        "aggregate: {} input message: {e:#}",
+                        if fail { "rejecting" } else { "dropping" }
                     ),
                 }
             }
+            let failed = move || match fail {
+                true => MessageDisposition::Nack,
+                false => MessageDisposition::Ack,
+            };
             if folded.is_empty() {
-                commit(vec![MessageDisposition::Ack; len])
+                commit(vec![failed(); len])
                     .await
                     .map_err(ConsumerError::Connection)?;
                 continue;
             }
-            // Dropped messages are acked; the kept ones take the route's dispositions.
+            // Failed messages are acked, or nacked under `on_error: fail`; the kept ones
+            // take the route's dispositions.
             let commit: BatchCommitFunc = match kept.len() == len {
                 true => commit,
                 false => Box::new(move |dispositions| {
-                    let mut all = vec![MessageDisposition::Ack; len];
+                    let mut all = vec![failed(); len];
                     for (i, d) in kept.into_iter().zip(dispositions) {
                         all[i] = d;
                     }

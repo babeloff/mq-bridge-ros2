@@ -29,7 +29,8 @@ fn fold(aggregate: &Aggregate, payloads: Vec<Value>) -> Vec<Option<Value>> {
 
 fn sum_by_card() -> Aggregate {
     aggregate(&format!(
-        "{{ key: '${{payload:card}}', into: stats, expression: '{SUM}' }}"
+        "{{ consistency: single_writer, key: '${{payload:card}}', into: stats, \
+         expression: '{SUM}' }}"
     ))
 }
 
@@ -308,7 +309,8 @@ async fn consumer_drops_and_acks_a_message_it_cannot_fold() {
         committed: committed.clone(),
     };
     let config = serde_yaml_ng::from_str(&format!(
-        "{{ key: '${{payload:card}}', into: stats, expression: '{SUM}' }}"
+        "{{ consistency: single_writer, key: '${{payload:card}}', into: stats, \
+         expression: '{SUM}' }}"
     ))
     .unwrap();
     let mut consumer = AggregateConsumer::new(Box::new(inner), &config, "test")
@@ -337,7 +339,8 @@ async fn consumer_drops_and_acks_a_message_it_cannot_fold() {
 async fn publisher_fails_only_the_message_it_cannot_fold() {
     let inner = Box::new(crate::endpoints::structural::null::NullPublisher);
     let config = serde_yaml_ng::from_str(&format!(
-        "{{ key: '${{payload:card}}', into: stats, expression: '{SUM}' }}"
+        "{{ consistency: single_writer, key: '${{payload:card}}', into: stats, \
+         expression: '{SUM}' }}"
     ))
     .unwrap();
     let publisher = AggregatePublisher::new(inner, &config, "test")
@@ -467,6 +470,28 @@ async fn two_instances_on_one_store_lose_no_update() {
         .collect();
     counts.sort_unstable();
     assert_eq!(counts, (1..=120).collect::<Vec<i64>>());
+}
+
+#[tokio::test]
+async fn a_shared_store_keeps_no_state_of_a_message_whose_output_has_no_place() {
+    let memory = std::sync::Arc::new(store::MemoryStateStore::default());
+    let mut agg = aggregate(&format!(
+        "{{ on_error: fail, consistency: single_writer, key: '${{payload:card}}', \
+         into: features.stats, expression: '{SUM}' }}"
+    ));
+    agg.store = Some(memory.clone());
+    // `features` is a number in the first message, so `features.stats` cannot be set.
+    let batch = vec![
+        msg(json!({"card": "a", "amount": 1, "features": 5})),
+        msg(json!({"card": "a", "amount": 1})),
+    ];
+    let (out, _) = agg.fold_batch(batch).await.unwrap();
+    assert!(out[0].is_err());
+    let second: Value = serde_json::from_slice(&out[1].as_ref().ok().unwrap().payload).unwrap();
+    assert_eq!(second["features"]["stats"]["n"], json!(1));
+    let rows = memory.rows.lock().unwrap();
+    let state: Value = serde_json::from_str(&rows["features.stats:a"].0).unwrap();
+    assert_eq!(state["n"], json!(1), "a redelivery would count it again");
 }
 
 #[tokio::test]
@@ -970,7 +995,10 @@ async fn aggregate_chain_bench() {
             )
         })
         .collect();
-    let aggregate = format!("- aggregate: {{ entries: [{}] }}", entries.join(", "));
+    let aggregate = format!(
+        "- aggregate: {{ consistency: single_writer, entries: [{}] }}",
+        entries.join(", ")
+    );
     let dedup = |key: &str| {
         format!("- deduplication: {{ store: 'memory://chain#', ttl_seconds: 3600{key} }}")
     };
@@ -1158,4 +1186,270 @@ async fn single_writer_reloads_a_state_it_dropped_from_memory() {
         assert_eq!(one("first".into()).await, json!(2));
         assert_eq!(one("cold3".into()).await, json!(2));
     }
+}
+
+const TWO_ENTRIES: &str = "entries:
+  - { key: '${payload:card}', into: card_stats, fields: { n: count, total: sum(amount) } }
+  - { key: '${payload:shop}', into: shop_stats, fields: { n: count, fee: sum(fee) } }";
+
+fn fold_messages(aggregate: &Aggregate, payloads: Vec<Value>) -> Vec<Folded> {
+    aggregate.fold(payloads.into_iter().map(msg).collect())
+}
+
+#[test]
+fn a_missing_field_names_itself_and_fails_the_message() {
+    let agg = aggregate(TWO_ENTRIES);
+    let out = fold_messages(&agg, vec![json!({"card": "a", "shop": "s", "amount": 1})]);
+    let Err((_, PublisherError::NonRetryable(e))) = &out[0] else {
+        panic!("the message must fail");
+    };
+    assert_eq!(
+        e.to_string(),
+        "aggregate: field 'fee' is missing or not a number"
+    );
+}
+
+#[test]
+fn skip_leaves_out_only_the_entry_that_cannot_be_computed() {
+    let agg = aggregate(&format!("on_error: skip\n{TWO_ENTRIES}"));
+    let out = fold_messages(
+        &agg,
+        vec![
+            json!({"card": "a", "shop": "s", "amount": 1, "fee": 2}),
+            json!({"card": "a", "shop": "s", "amount": 1}),
+            json!({"card": "a", "amount": 1, "fee": 2}),
+            json!({"card": "a", "shop": "s", "amount": 1, "fee": 2}),
+        ],
+    );
+    let doc = |i: usize| -> Value {
+        serde_json::from_slice(&out[i].as_ref().ok().unwrap().payload).unwrap()
+    };
+    let skipped = |i: usize| {
+        out[i]
+            .as_ref()
+            .ok()
+            .unwrap()
+            .metadata
+            .get(SKIPPED_KEY)
+            .cloned()
+    };
+    assert_eq!(skipped(0), None);
+    for i in [1, 2] {
+        assert_eq!(skipped(i).as_deref(), Some("shop_stats"));
+        assert_eq!(doc(i)["card_stats"]["n"], json!(i + 1));
+        assert_eq!(doc(i)["shop_stats"], Value::Null);
+    }
+    // The skipped entry's state did not move.
+    assert_eq!(doc(3)["shop_stats"], json!({"fee": 4.0, "n": 2}));
+    assert_eq!(doc(3)["card_stats"]["n"], json!(4));
+}
+
+#[test]
+fn skip_passes_on_a_message_no_entry_can_fold() {
+    let mixed = "on_error: skip
+entries:
+  - { key: '${payload:card}', into: a, expression: '(state ?? 0) + amount' }
+  - { key: '${payload:card}', into: b, fields: { total: sum(amount) } }";
+    for yaml in [format!("on_error: skip\n{TWO_ENTRIES}"), mixed.to_string()] {
+        let agg = aggregate(&yaml);
+        let out = agg.fold(vec![
+            CanonicalMessage::new(b"not json".to_vec(), None),
+            msg(json!({"other": 1})),
+        ]);
+        let first = out[0].as_ref().ok().unwrap();
+        assert_eq!(first.payload.as_ref(), b"not json");
+        assert!(first.metadata[SKIPPED_KEY].contains(','));
+        let second = out[1].as_ref().ok().unwrap();
+        assert_eq!(second.payload.as_ref(), br#"{"other":1}"#);
+        assert!(second.metadata.contains_key(SKIPPED_KEY));
+    }
+}
+
+#[tokio::test]
+async fn skip_works_against_a_shared_store() {
+    let store: std::sync::Arc<dyn StateStore> =
+        std::sync::Arc::new(store::MemoryStateStore::default());
+    let mut agg = aggregate(&format!("on_error: skip\n{TWO_ENTRIES}"));
+    agg.store = Some(store);
+    let batch = vec![
+        msg(json!({"card": "a", "amount": 1, "fee": 2})),
+        msg(json!({"card": "a", "shop": "s", "amount": 1, "fee": 2})),
+    ];
+    let (out, _) = agg.fold_batch(batch).await.unwrap();
+    let first = out[0].as_ref().ok().unwrap();
+    assert_eq!(first.metadata[SKIPPED_KEY], "shop_stats");
+    let second: Value = serde_json::from_slice(&out[1].as_ref().ok().unwrap().payload).unwrap();
+    assert_eq!(second["card_stats"]["n"], json!(2));
+    assert_eq!(second["shop_stats"]["n"], json!(1));
+}
+
+#[tokio::test]
+async fn consumer_nacks_a_message_it_cannot_fold_under_fail() {
+    let committed = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let inner = OneBatch {
+        batch: Some(vec![
+            msg(json!({"card": "a", "amount": 1})),
+            msg(json!({"amount": 1})),
+        ]),
+        committed: committed.clone(),
+    };
+    let config = serde_yaml_ng::from_str(&format!(
+        "{{ on_error: fail, consistency: single_writer, key: '${{payload:card}}', into: stats, \
+         expression: '{SUM}' }}"
+    ))
+    .unwrap();
+    let mut consumer = AggregateConsumer::new(Box::new(inner), &config, "test")
+        .await
+        .unwrap();
+    let ReceivedBatch { messages, commit } = consumer.receive_batch(10).await.unwrap();
+    assert_eq!(messages.len(), 1);
+    commit(vec![MessageDisposition::Ack]).await.unwrap();
+    assert!(matches!(
+        committed.lock().unwrap().as_slice(),
+        [MessageDisposition::Ack, MessageDisposition::Nack]
+    ));
+}
+
+#[test]
+fn ema_by_half_life_weights_by_elapsed_time() {
+    for into in ["stats", "features.card"] {
+        let agg = aggregate(&format!(
+            "{{ key: '${{payload:card}}', into: {into}, time: ts, fields: {{ avg: 'ema(amount, 10s)' }} }}"
+        ));
+        let out = fold_messages(
+            &agg,
+            vec![
+                json!({"card": "a", "amount": 0, "ts": 1000}),
+                json!({"card": "a", "amount": 30, "ts": 1010}),
+                json!({"card": "a", "amount": 30, "ts": "1970-01-01T00:16:50Z"}),
+                json!({"card": "a", "amount": 30, "ts": 1005}),
+            ],
+        );
+        let at = |i: usize| -> f64 {
+            let doc: Value =
+                serde_json::from_slice(&out[i].as_ref().ok().unwrap().payload).unwrap();
+            into.split('.').fold(doc, |d, k| d[k].clone())["avg"]
+                .as_f64()
+                .unwrap()
+        };
+        let late = |i: usize| {
+            out[i]
+                .as_ref()
+                .ok()
+                .unwrap()
+                .metadata
+                .get(LATE_KEY)
+                .cloned()
+        };
+        assert_eq!(at(0), 0.0);
+        // One half-life later the first value weighs half: 30 / 1.5.
+        assert!((at(1) - 20.0).abs() < 1e-9);
+        // The same instant as an RFC 3339 time: nothing decays, 60 / 2.5.
+        assert!((at(2) - 24.0).abs() < 1e-9);
+        assert_eq!(late(2), None);
+        // Five seconds back: flagged, folded without decay, 90 / 3.5.
+        assert_eq!(late(3).as_deref(), Some(into));
+        assert!((at(3) - 90.0 / 3.5).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn time_is_validated_and_a_message_without_one_fails() {
+    assert!(
+        error("{ key: '${payload:k}', into: s, time: ts, expression: '1' }").contains("`time`")
+    );
+    assert!(
+        error("{ key: '${payload:k}', into: s, fields: { a: 'ema(x, 5x)' } }")
+            .contains("invalid field")
+    );
+    let agg = aggregate("{ key: '${payload:k}', into: s, time: ts, fields: { n: count } }");
+    let out = fold_messages(&agg, vec![json!({"k": 1}), json!({"k": 1, "ts": "soon"})]);
+    assert!(out.iter().all(Result::is_err));
+}
+
+#[test]
+fn timestamps_parse_like_chrono() {
+    for text in [
+        "2026-10-03T12:34:56Z",
+        "2026-02-28T23:59:59.250+02:00",
+        "1999-12-31T00:00:00-05:30",
+        "2024-02-29T06:00:00.5Z",
+    ] {
+        let expected = chrono::DateTime::parse_from_rfc3339(text).unwrap();
+        let expected = expected.timestamp_millis() as f64 / 1000.0;
+        assert_eq!(timestamp(text), Some(expected), "{text}");
+    }
+    assert_eq!(
+        timestamp("2026-10-03 12:34:56"),
+        timestamp("2026-10-03T12:34:56Z")
+    );
+    assert_eq!(timestamp("1700000000000"), Some(1_700_000_000.0));
+    assert_eq!(timestamp("1700000000.5"), Some(1_700_000_000.5));
+    for bad in [
+        "",
+        "soon",
+        "2026-13-03T12:34:56Z",
+        "2026-10-03T12:34:56+0200",
+        "2026-10-03",
+    ] {
+        assert_eq!(timestamp(bad), None, "{bad}");
+    }
+    assert_eq!(seconds("500ms"), Some(0.5));
+    assert_eq!(seconds("2h"), Some(7200.0));
+    assert_eq!(seconds("0s"), None);
+}
+
+#[test]
+fn a_state_stored_before_time_was_set_gains_a_clock() {
+    let agg = aggregate("{ key: '${payload:k}', into: s, time: ts, fields: { n: count } }");
+    let Stored::Floats(slots) = agg.entries[0].parse_state("[3.0]").unwrap() else {
+        panic!("a fields state");
+    };
+    assert_eq!(slots.as_ref(), [3.0, 0.0]);
+    assert!(agg.entries[0].parse_state("[3.0,1.0,2.0]").is_err());
+}
+
+#[tokio::test]
+async fn read_only_reads_the_stored_states_and_changes_none() {
+    let memory = std::sync::Arc::new(store::MemoryStateStore::default());
+    let store: std::sync::Arc<dyn StateStore> = memory.clone();
+    let yaml = "key: '${payload:card}'\ninto: stats\nfields: { n: count }";
+    let mut writer = aggregate(yaml);
+    writer.store = Some(store.clone());
+    let batch = || vec![msg(json!({"card": "a"})), msg(json!({"card": "a"}))];
+    writer.fold_batch(batch()).await.unwrap();
+    let before = memory.rows.lock().unwrap().clone();
+
+    for (emit, expected) in [("updated", 3), ("previous", 2)] {
+        let mut reader = aggregate(&format!("read_only: true\nemit: {emit}\n{yaml}"));
+        reader.store = Some(store.clone());
+        let (out, _) = reader.fold_batch(batch()).await.unwrap();
+        for folded in out {
+            let doc: Value = serde_json::from_slice(&folded.ok().unwrap().payload).unwrap();
+            assert_eq!(doc["stats"]["n"], json!(expected));
+        }
+    }
+    assert_eq!(*memory.rows.lock().unwrap(), before);
+
+    let config = serde_yaml_ng::from_str(&format!("read_only: true\n{yaml}"));
+    let unstored = Aggregate::connect(&config.unwrap(), "test").await;
+    assert!(unstored
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("`read_only` needs a `store`"));
+}
+
+#[tokio::test]
+async fn states_in_memory_only_are_opt_in() {
+    let yaml = "key: '${payload:card}'\ninto: stats\nfields: { n: count }";
+    let config = serde_yaml_ng::from_str(yaml).unwrap();
+    let unstored = Aggregate::connect(&config, "test").await;
+    let error = unstored.err().unwrap();
+    assert!(error.is::<crate::errors::InvalidConfig>());
+    assert!(error.to_string().contains("`consistency: single_writer`"));
+
+    let config = serde_yaml_ng::from_str(&format!("consistency: single_writer\n{yaml}")).unwrap();
+    let opted_in = Aggregate::connect(&config, "test").await.unwrap();
+    assert!(opted_in.store.is_none() && opted_in.writer.is_none());
 }

@@ -327,6 +327,15 @@ async fn test_sqlx_multicolumn() {
 #[cfg(feature = "sqlx")]
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires docker compose"]
+async fn test_sqlx_auto_columns_changing_bind_types() {
+    if should_run("sqlx") || should_run("postgres") {
+        integration::postgres::test_postgres_auto_columns_changing_bind_types().await;
+    }
+}
+
+#[cfg(feature = "sqlx")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires docker compose"]
 async fn test_sqlx_cursor_timestamptz_to_json() {
     if should_run("sqlx") || should_run("postgres") {
         integration::postgres::test_postgres_cursor_timestamptz_to_json().await;

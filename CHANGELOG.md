@@ -2,6 +2,143 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 0.4.19
+
+CSV in more shapes: the reader takes other separators and quoting, and a CSV sink no longer
+mixes JSON into its cells. The second is a behaviour change, listed below.
+
+### Added
+
+- **CSV dialects.** `format: csv` took only comma-separated, `"`-quoted files with a header. A
+  `csv` block on the `file` endpoint and on an `object_store` source now sets `separator` (one
+  character, `tab`, `space`, hex, or `auto`), `quote` (a character or `none`), `header` and
+  `columns`. `separator: auto` is for sources and takes whichever of `,` `;` tab `|` occurs
+  most often outside quotes in the first record. That covers Excel's semicolon exports, TSV
+  from `mongoexport` and `psql`, and headerless dumps; the book's file page lists the setting
+  per tool. On the command line it is one parameter, `csv={"separator":"auto"}`.
+  `FileConfig` and `ObjectStoreConfig` gain the field `csv`, and `models` the types
+  `CsvConfig` and `CsvNested`; code that builds either struct without `..Default::default()`
+  needs the new field.
+- **CSV to object storage.** An `object_store` sink rejected `format: csv`. It now writes each
+  batch as a CSV file with its own header, taken from that batch's first row, in the dialect
+  the `csv` block sets. Set `csv.columns` when every object must have the same columns.
+- **A warning for short CSV rows.** A row with fewer fields than the header was read with the
+  missing ones empty and nothing said, which is what a wrong `separator` looks like. It is now
+  warned about once per process, as a row with too many fields already was.
+
+- **`aggregate`: `on_error`, time-based averages, late-message detection, `read_only`.**
+  - `on_error: drop | fail | skip` says what happens to a message that cannot be folded.
+    `drop` is the default and what happened before: an input logs, acks and drops it, so an
+    HTTP caller gets `202`. `fail` nacks it instead (HTTP `500`). `skip` leaves out only the
+    entries that cannot be computed, runs the others, passes the message on and names the
+    skipped entries in the metadata `mqb.aggregate.skipped`. Before, one missing field in one
+    entry discarded the message for all entries.
+  - `ema`, `ema_stddev` and `ema_variance` take a half-life in place of `alpha`
+    (`ema(reading, 5m)`): a value counts half after that time, however many messages came.
+    The new `time` names the payload field with the event time (epoch seconds or
+    milliseconds, or RFC 3339); without it the clock is used.
+  - With `time`, a message older than the newest one its state has seen is folded without
+    decay and marked with the metadata `mqb.aggregate.late`. It is detected, not reordered.
+  - `read_only: true` reads the states from the `store` and never changes them, for a dry run
+    or a second route that only reads.
+  - The error for a missing field now says `is missing or not a number`.
+  - `AggregateMiddleware` gains the fields `time`, `on_error` and `read_only`, and `models`
+    the enum `AggregateOnError`; code that builds the struct without `..Default::default()`
+    needs the new fields.
+- **Descriptive names for the file formats.** `format: raw` writes only the payload, which
+  for JSON payloads is plain JSON lines, while `format: json` writes the whole message
+  envelope; the names suggested the opposite. `payload`, `envelope_json`, `envelope_text`
+  and `envelope` are now accepted for `raw`, `json`, `text` and `normal`, on `file`,
+  `object_store` and `mongodb`. The old names keep working and are what is written back.
+- **`mqb copy`: pipes, `--limit`, progress, compression by file name.**
+  - `-` is stdin as the source and stdout as the target (`-?format=csv` takes parameters). A
+    `file` source on a pipe, FIFO or terminal is read once without seeking, and its end ends
+    the copy, with or without `--drain`. Before, `file:///dev/stdin` failed with `Illegal seek`.
+    With stdout as the target the `copied …` summary goes to stderr.
+  - `--limit N` stops after `N` rows reached the destination; with `--filter`, `N` matching rows.
+  - On a terminal, a running row count is shown on stderr every two seconds.
+  - A `file://` path ending in `.gz`, `.zst` or `.lz4` sets `compression`; `compression=none`
+    overrides. A sink named `out.jsonl.gz` used to be written uncompressed.
+  - A copy without `--drain` now exits when its route ends by itself, on a permanent error or
+    the end of a stream. It used to wait for Ctrl-C.
+- **SQL sink: `columns: auto` and `key`.** A SQL sink could write a record's fields into columns
+  only through a hand-written `insert_query`, percent-encoded on the command line, and an upsert
+  needed its own `ON CONFLICT` clause. With `columns: auto` each top-level JSON field goes into
+  the table column of the same name, and `key: id` turns the insert into an upsert, so
+  `mqb copy --from 'postgres://…?table=orders&cursor_column=id' --to 'postgres://…?table=orders&columns=auto&key=id'`
+  copies a table and can be rerun.
+  - The table must exist. A column a record does not name keeps its default (insert) or its
+    value (update). A field without a column is not written and is logged once; with
+    `extra_column: <name>` those fields go into that column as one JSON object.
+  - PostgreSQL casts each value to the column type, so `numeric`, `timestamptz`, `uuid`,
+    `jsonb`, enum and array columns take the text a SQL or CSV source delivers.
+  - `bulk_copy` works with `columns: auto`, not with `key`. `columns` cannot be combined with
+    `insert_query` or `auto_create_table`.
+  - `SqlxConfig` gains the fields `columns`, `key` and `extra_column`, and `models` the type `SqlColumns`.
+- **SQL source: `timestamps: rfc3339`.** A Postgres `timestamptz` column is read in Postgres's
+  text form, `2026-10-04 09:15:23.923277+00`, which few other systems parse. With
+  `timestamps: rfc3339` a `cursor_column` source renders it in UTC as
+  `2026-10-04T09:15:23.923277Z`; a `timestamp` without zone gets the `T` and no offset. The
+  default is unchanged. `SqlxConfig` gains the field `timestamps` and `models` the type
+  `SqlTimestamps`.
+
+### Behaviour changes
+
+- **`aggregate`: states in memory only are opt-in.** An `aggregate` without
+  a `store` kept its states in the process, lost on restart and wrong with two instances, and
+  that was the default. It now needs `consistency: single_writer` next to it; with neither a
+  `store` nor that, the route fails to start with an error naming both. Add
+  `consistency: single_writer` to a config from 0.4.17 or 0.4.18 that has no `store` to keep
+  what it did.
+- **A CSV sink flattens nested objects.** A nested object used to be written as JSON text in
+  one cell, so the output of `aggregate` (`{"stats":{"n":3,"avg":2.5}}`) came out as a mix of
+  CSV and JSON. It now becomes one column per leaf, named by its path: `stats.n`, `stats.avg`.
+  **A new file gets different columns than before; a file that already has a header keeps
+  it.** Set `csv.nested: json` for the previous output. Arrays are still written as JSON text.
+- **A drain does not wait for an endpoint.** With `exit_on_empty` (`mqb copy --drain`) a route
+  that failed reconnected up to ten times, 5 s apart, before it gave up: about 50 s against a
+  closed port, a WebSocket path that answers 404, a NATS subject outside every stream or a gRPC
+  topic nobody serves. It now ends on the first failure when nothing has been delivered yet,
+  with the endpoint's error. A drain that has delivered something keeps the ten reconnects, so
+  a short outage in the middle of a long copy does not end it. Routes without `exit_on_empty`
+  reconnect without limit, as before. Add a `retry` middleware to a drain that should wait for
+  its sink.
+- **A CSV file that ends inside a quoted field fails a drain.** The reader took everything
+  after the open quote as one field and reported success. A drain now writes the records before
+  it and fails, naming the byte offset of the open record; a tailing route waits for the writer
+  to finish the record.
+- **Blank lines in a line-based file are skipped.** `raw`, `json`, `text` and `normal` sources
+  emitted an empty line as a message with an empty payload, which a SQL or Parquet sink then
+  rejected. The CSV reader already skipped them. Row counts change for files with blank lines.
+- **A `file` route whose source and sink are the same path is refused.** It doubled the file
+  under a drain and would grow it without end otherwise.
+- **SQLite `has no column named` is not retried.** A sink writing to a table without the
+  expected columns retried for ever; it is now a non-retryable error like the same case on
+  Postgres and MySQL.
+- **An `object_store` source on a local path that does not exist fails a drain.** It reported
+  `copied 0 rows`. An empty directory or cloud prefix still does. A drain of a local path also
+  ends after one listing instead of waiting out the idle interval.
+- **NATS: a missing `subject` or `stream` stops the route.** It was retried as a connection
+  error until the start timeout.
+- **Clearer errors and quieter logs.** A queue read on a plain SQL table names
+  `cursor_column`; Postgres errors no longer end in `at line N` (a line of the server's source);
+  a closed database port reports `Connection refused` at once; a `filter` that does not compile
+  lists the operators, and one with a single `=` says so; a gRPC server names the topic it has
+  no consumer for; the drop summary counts messages per cause; an unknown `aggregate` field
+  lists the built-ins; `csv` settings without `format: csv` and an `insert_query` token that
+  binds NULL each warn once. The WebSocket "falling back to routed mode" line is now DEBUG and
+  the MQTT note on restart loss INFO.
+
+### Fixed
+
+- **`mqb copy --wait` reports a failed route at once.** A route that failed before it delivered
+  anything was retried until the wait ran out, and a later empty attempt could then report
+  success. `--wait` now retries only a drain that ended cleanly with nothing to copy.
+- **`aggregate` with a shared `store` no longer keeps the state of a message it rejects.** A
+  message whose result had no place in the payload (`into: a.b` where `a` is not an object) was
+  counted in the store and then failed, so under `on_error: fail` every redelivery counted it
+  again. It now fails before any state changes, as it already did without a shared store.
+
 ## 0.4.18
 
 A new generic output for search engines, plus documentation and packaging work. This release

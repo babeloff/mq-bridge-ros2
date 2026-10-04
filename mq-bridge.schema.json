@@ -7,15 +7,15 @@
   },
   "$defs": {
     "AggregateConsistency": {
-      "description": "How an `aggregate` middleware with a `store` keeps its states consistent.",
+      "description": "How an `aggregate` middleware keeps its states consistent.",
       "oneOf": [
         {
-          "description": "Loads and writes the states of every batch; correct with several instances.",
+          "description": "Loads and writes the states of every batch; correct with several instances. Needs a `store`.",
           "type": "string",
           "const": "shared"
         },
         {
-          "description": "Keeps the states in memory and writes them behind; correct with one instance only.",
+          "description": "Keeps the states in memory and writes them behind; correct with one instance only. Without a `store` they are lost on restart.",
           "type": "string",
           "const": "single_writer"
         }
@@ -89,7 +89,7 @@
       "type": "object",
       "properties": {
         "consistency": {
-          "description": "With a `store`: `shared` is correct with several instances, `single_writer` is faster with one.",
+          "description": "`shared` needs a `store`; `single_writer` is for one instance and works without one, in memory only.",
           "$ref": "#/$defs/AggregateConsistency",
           "default": "shared"
         },
@@ -145,6 +145,11 @@
           "format": "uint",
           "minimum": 0
         },
+        "on_error": {
+          "description": "A message that cannot be folded: `drop` it, `fail` it, or `skip` the affected entries and pass it on.",
+          "$ref": "#/$defs/AggregateOnError",
+          "default": "drop"
+        },
         "output": {
           "description": "Expression over `state` shaping what is written to the message. Defaults to the state.",
           "type": [
@@ -152,8 +157,19 @@
             "null"
           ]
         },
+        "read_only": {
+          "description": "Reads the states of the `store` and never changes them.",
+          "type": "boolean"
+        },
         "store": {
-          "description": "Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it they live in memory.",
+          "description": "Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it `consistency: single_writer` is required.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "time": {
+          "description": "Payload path of the event time (epoch seconds or milliseconds, or RFC 3339) for `fields`. Defaults to the clock.",
           "type": [
             "string",
             "null"
@@ -161,6 +177,26 @@
         }
       },
       "additionalProperties": false
+    },
+    "AggregateOnError": {
+      "description": "What an `aggregate` middleware does with a message it cannot fold.",
+      "oneOf": [
+        {
+          "description": "On an input the message is logged, acked and dropped; on an output it fails.",
+          "type": "string",
+          "const": "drop"
+        },
+        {
+          "description": "On an input the message is nacked, so its source sees the failure; on an output it fails.",
+          "type": "string",
+          "const": "fail"
+        },
+        {
+          "description": "Only the entries that cannot be computed are left out; the message goes on.",
+          "type": "string",
+          "const": "skip"
+        }
+      ]
     },
     "AmqpConfig": {
       "description": "General AMQP connection configuration.",
@@ -634,6 +670,61 @@
         }
       },
       "additionalProperties": false
+    },
+    "CsvConfig": {
+      "description": "CSV dialect for `format: csv`: field separator, quoting, header and nested values.",
+      "type": "object",
+      "properties": {
+        "columns": {
+          "description": "Column names. A source uses them instead of the header's; a sink writes exactly these, in this order.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "header": {
+          "description": "Whether the first record names the columns. Defaults to true; a source without one needs `columns`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "nested": {
+          "description": "(Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell.",
+          "$ref": "#/$defs/CsvNested",
+          "default": "flatten"
+        },
+        "quote": {
+          "description": "Quote character, or `none` for unquoted fields. Defaults to `\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "separator": {
+          "description": "Field separator: one character, `tab`, `space`, hex (`0x1f`) or `auto` (source: guessed from the first record). Defaults to `,`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "CsvNested": {
+      "description": "How a CSV sink writes a nested JSON object.",
+      "oneOf": [
+        {
+          "description": "One column per leaf, named by its dotted path (`stats.avg`).",
+          "type": "string",
+          "const": "flatten"
+        },
+        {
+          "description": "The object's JSON text in a single cell.",
+          "type": "string",
+          "const": "json"
+        }
+      ]
     },
     "DatePartitionStyle": {
       "description": "Layout of the object_store sink's date folders.",
@@ -1337,6 +1428,10 @@
           "$ref": "#/$defs/Compression",
           "default": "none"
         },
+        "csv": {
+          "description": "CSV dialect (separator, quote, header, columns); only read with `format: csv`.",
+          "$ref": "#/$defs/CsvConfig"
+        },
         "delimiter": {
           "description": "Optional delimiter for messages. Defaults to newline (\"\\n\").\nCan be a string or a hex sequence (e.g. \"0x00\").\nCurrently only single-byte delimiters are supported.",
           "type": [
@@ -1457,22 +1552,22 @@
       "description": "Format for messages written to or read from a file.",
       "oneOf": [
         {
-          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text.",
+          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text. Also `envelope`.",
           "type": "string",
           "const": "normal"
         },
         {
-          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible.",
+          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible. Also `envelope_json`; for plain JSON lines use `raw`.",
           "type": "string",
           "const": "json"
         },
         {
-          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible.",
+          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible. Also `envelope_text`.",
           "type": "string",
           "const": "text"
         },
         {
-          "description": "The raw payload of the message is written. For consumers, the line is read as raw bytes.",
+          "description": "Only the payload is written, one per line: plain JSON lines for JSON payloads. For consumers, the line is read as raw bytes. Also `payload`.",
           "type": "string",
           "const": "raw"
         },
@@ -3949,6 +4044,10 @@
           "$ref": "#/$defs/Compression",
           "default": "none"
         },
+        "csv": {
+          "description": "CSV dialect (separator, quote, header, columns); only read with `format: csv`.",
+          "$ref": "#/$defs/CsvConfig"
+        },
         "cursor_id": {
           "description": "(Source only) Cursor id namespacing the checkpoint key; enables durable resume.",
           "type": [
@@ -3996,7 +4095,7 @@
           ]
         },
         "format": {
-          "description": "Record encoding within an object, shared with the file endpoint. Defaults to\n`normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.",
+          "description": "Record encoding within an object, shared with the file endpoint. Defaults to\n`normal` (one JSON `CanonicalMessage` per line). Parquet needs the `parquet` feature.",
           "$ref": "#/$defs/FileFormat",
           "default": "normal"
         },
@@ -4035,6 +4134,7 @@
           "type": "string"
         }
       },
+      "additionalProperties": false,
       "required": [
         "url"
       ]
@@ -4452,7 +4552,7 @@
           "minimum": 0
         },
         "exit_on_empty": {
-          "description": "If true, the route exits gracefully once the source yields an empty batch\n(drain-then-exit). Off by default — routes normally poll indefinitely.\nA drain that keeps failing to reconnect gives up and fails rather than retrying forever.",
+          "description": "If true, the route exits gracefully once the source yields an empty batch\n(drain-then-exit). Off by default — routes normally poll indefinitely.\nA drain that fails before it delivered anything ends at once; later it gives up after ten reconnects.",
           "type": "boolean"
         },
         "input": {
@@ -4623,6 +4723,31 @@
         }
       ]
     },
+    "SqlColumns": {
+      "description": "How a SQL sink maps a record to the columns of its table.",
+      "oneOf": [
+        {
+          "description": "Each top-level JSON field goes into the table column of the same name.",
+          "type": "string",
+          "const": "auto"
+        }
+      ]
+    },
+    "SqlTimestamps": {
+      "description": "How a SQL source renders timestamp columns.",
+      "oneOf": [
+        {
+          "description": "The database's own text form (`2026-10-04 09:15:23.923277+00`).",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "RFC 3339 in UTC (`2026-10-04T09:15:23.923277Z`); `timestamp` without zone has no offset.",
+          "type": "string",
+          "const": "rfc3339"
+        }
+      ]
+    },
     "SqlxConfig": {
       "description": "General SQLx connection configuration.",
       "type": "object",
@@ -4654,6 +4779,17 @@
           ],
           "format": "password"
         },
+        "columns": {
+          "description": "(Publisher only) `auto`: write each JSON field into the table column of the same name. The table must exist.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SqlColumns"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "create_publication": {
           "description": "(Consumer only, CDC) When `publication` is set, create it if missing (default false).\nNeeds table-owner privilege: it is auto-published `FOR TABLE {table}`.",
           "type": "boolean",
@@ -4678,6 +4814,13 @@
           "type": "boolean",
           "default": false
         },
+        "extra_column": {
+          "description": "(Publisher only, with `columns`) Column that takes the fields without a column of their own, as one JSON object.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "idle_timeout_ms": {
           "description": "Maximum idle time for a connection in milliseconds. Defaults to 600000ms (10 minutes).",
           "type": [
@@ -4689,6 +4832,13 @@
         },
         "insert_query": {
           "description": "(Publisher only) Optional. A custom SQL INSERT query. Use `?` as a placeholder for the payload.\nIf not provided, a default `INSERT INTO {table} (payload) VALUES (?)` is used.\n\nFor multi-column inserts, embed explicit source tokens directly in the query:\n`${metadata:<key>}` binds `message.metadata[\"<key>\"]`, and `${payload:<field>}`\nbinds the top-level JSON field `<field>` of the payload (types preserved:\nnumbers/bools stay numeric/bool). There is no fallback between the two: an\nabsent metadata key, non-JSON payload, or missing/non-scalar field binds SQL NULL.\nExample: `INSERT INTO orders (customer_id, sku, qty) VALUES (${metadata:customer_id}, ${payload:sku}, ${payload:qty})`.\nA query with no `${...}` tokens behaves exactly as before (whole payload bound once).\n`auto_create_table` is not supported together with a token-based query.\n\nTokens bind as text/number/bool; Postgres won't implicitly cast text into a\n`numeric`/`timestamptz` column (these arrive as JSON strings from a sql source).\nAdd an explicit cast next to the token — it is preserved verbatim in the SQL:\n`VALUES (${payload:amount}::numeric, ${payload:created_at}::timestamptz)`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "(Publisher only, with `columns`) Key column(s), comma-separated: a row with the same key is updated, not inserted again.",
           "type": [
             "string",
             "null"
@@ -4799,6 +4949,10 @@
             "boolean",
             "null"
           ]
+        },
+        "timestamps": {
+          "description": "(Consumer only, `cursor_column` mode, PostgreSQL) How timestamp columns are rendered: `text` (default) or `rfc3339`.",
+          "$ref": "#/$defs/SqlTimestamps"
         },
         "tls": {
           "description": "TLS configuration for the database connection.",

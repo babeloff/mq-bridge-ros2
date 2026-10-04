@@ -471,7 +471,7 @@ impl MqttConsumer {
         });
 
         let listener = MqttListener::new(config, topic, &client_id, "consumer").await?;
-        warn!("Known issue: Messages might be lost in rare cases if the MQTT broker is restarted while the consumer is running.");
+        info!("Known issue: Messages might be lost in rare cases if the MQTT broker is restarted while the consumer is running.");
         Ok(Self(listener))
     }
 }

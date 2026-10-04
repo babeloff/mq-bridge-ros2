@@ -4,11 +4,12 @@
 
 Schemes: `file://`
 
-Query parameters recognised as config fields for this connector. The object-typed `encryption` is set with a JSON literal, e.g. `?encryption={...}`. Unrecognised parameters are not forwarded as driver options, so any other `?key=value` pair is rejected rather than silently ignored.
+Query parameters recognised as config fields for this connector. The object-typed `csv` is set with a JSON literal, e.g. `?csv={...}`. Unrecognised parameters are not forwarded as driver options, so any other `?key=value` pair is rejected rather than silently ignored.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `compression` | `none` \| `gzip` \| `lz4` \| `zstd` | no | `none` | Per-batch compression (`none`, `gzip`, `lz4`, `zstd`). Requires the `compression` feature. Publishers: always. Consumers: must match, and only the default `consume` mode reads it. |
+| `csv` | object | no | [see below](#csv) | CSV dialect (separator, quote, header, columns); only read with `format: csv`. |
 | `delete` | boolean | no | `false` | If true, processed lines are physically removed from the file once they are successfully acknowledged. |
 | `delimiter` | string | no | — | Optional delimiter for messages. Defaults to newline ("\n"). Can be a string or a hex sequence (e.g. "0x00"). Currently only single-byte delimiters are supported. |
 | `encryption` | object | no | `null` | At-rest AEAD encryption applied after compression. Requires the `encryption` feature. Publishers: always. Consumers: must match, and only the default `consume` mode reads it. |
@@ -20,3 +21,19 @@ Query parameters recognised as config fields for this connector. The object-type
 | `path` | string | yes | — | Path to the file, or to the directory holding the part files under `source_position` naming. |
 | `read_from_tail` | boolean | no | `false` | If true, starts reading from the end of the file if no offset is stored. If false, starts reading from the beginning. |
 | `source_metadata` | boolean | no | `false` | (Consumer only) Include authoritative `mqb.src.file_*` source positions; only `consume` mode reproduces them across restarts. Defaults to false. |
+
+## Struct-typed fields
+
+### `csv`
+
+CSV dialect for `format: csv`: field separator, quoting, header and nested values.
+
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `columns` | array of string | no | — | Column names. A source uses them instead of the header's; a sink writes exactly these, in this order. |
+| `header` | boolean | no | — | Whether the first record names the columns. Defaults to true; a source without one needs `columns`. |
+| `nested` | `flatten` \| `json` | no | `flatten` | (Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell. |
+| `quote` | string | no | — | Quote character, or `none` for unquoted fields. Defaults to `"`. |
+| `separator` | string | no | — | Field separator: one character, `tab`, `space`, hex (`0x1f`) or `auto` (source: guessed from the first record). Defaults to `,`. |
+

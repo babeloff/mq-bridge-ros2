@@ -273,6 +273,7 @@ impl FileConfig {
             mode: Some(FileConsumerMode::default()),
             delimiter: None,
             format: FileFormat::default(),
+            csv: CsvConfig::default(),
             compression: Compression::default(),
             encryption: None,
             source_metadata: false,

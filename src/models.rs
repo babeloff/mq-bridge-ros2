@@ -189,7 +189,7 @@ pub struct RouteOptions {
     pub allow_fault_injection: bool,
     /// If true, the route exits gracefully once the source yields an empty batch
     /// (drain-then-exit). Off by default — routes normally poll indefinitely.
-    /// A drain that keeps failing to reconnect gives up and fails rather than retrying forever.
+    /// A drain that fails before it delivered anything ends at once; later it gives up after ten reconnects.
     #[serde(default = "default_false", skip_serializing_if = "is_false")]
     #[cfg_attr(feature = "schema", schemars(default = "default_false"))]
     pub exit_on_empty: bool,
@@ -570,10 +570,10 @@ fn default_lookup_concurrency() -> usize {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AggregateMiddleware {
-    /// Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it they live in memory.
+    /// Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it `consistency: single_writer` is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
-    /// With a `store`: `shared` is correct with several instances, `single_writer` is faster with one.
+    /// `shared` needs a `store`; `single_writer` is for one instance and works without one, in memory only.
     #[serde(default)]
     pub consistency: AggregateConsistency,
     /// States kept in memory per entry; beyond it the least recently used are dropped. Defaults to 1000000, 0 is unlimited.
@@ -600,6 +600,15 @@ pub struct AggregateMiddleware {
     /// Further aggregates over other keys, updated by the same message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<AggregateEntry>,
+    /// Payload path of the event time (epoch seconds or milliseconds, or RFC 3339) for `fields`. Defaults to the clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    /// A message that cannot be folded: `drop` it, `fail` it, or `skip` the affected entries and pass it on.
+    #[serde(default)]
+    pub on_error: AggregateOnError,
+    /// Reads the states of the `store` and never changes them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 /// One aggregate of an `aggregate` middleware.
@@ -637,15 +646,29 @@ pub enum AggregateEmit {
     Previous,
 }
 
-/// How an `aggregate` middleware with a `store` keeps its states consistent.
+/// What an `aggregate` middleware does with a message it cannot fold.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateOnError {
+    /// On an input the message is logged, acked and dropped; on an output it fails.
+    #[default]
+    Drop,
+    /// On an input the message is nacked, so its source sees the failure; on an output it fails.
+    Fail,
+    /// Only the entries that cannot be computed are left out; the message goes on.
+    Skip,
+}
+
+/// How an `aggregate` middleware keeps its states consistent.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AggregateConsistency {
-    /// Loads and writes the states of every batch; correct with several instances.
+    /// Loads and writes the states of every batch; correct with several instances. Needs a `store`.
     #[default]
     Shared,
-    /// Keeps the states in memory and writes them behind; correct with one instance only.
+    /// Keeps the states in memory and writes them behind; correct with one instance only. Without a `store` they are lost on restart.
     SingleWriter,
 }
 
@@ -1077,19 +1100,90 @@ pub struct SledConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum FileFormat {
-    /// The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text.
+    /// The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text. Also `envelope`.
     #[default]
+    #[serde(alias = "envelope")]
     Normal,
-    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible.
+    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible. Also `envelope_json`; for plain JSON lines use `raw`.
+    #[serde(alias = "envelope_json")]
     Json,
-    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible.
+    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible. Also `envelope_text`.
+    #[serde(alias = "envelope_text")]
     Text,
-    /// The raw payload of the message is written. For consumers, the line is read as raw bytes.
+    /// Only the payload is written, one per line: plain JSON lines for JSON payloads. For consumers, the line is read as raw bytes. Also `payload`.
+    #[serde(alias = "payload")]
     Raw,
     /// CSV rows mapped to/from JSON objects (string values only). The first row is the header/schema.
     Csv,
     /// Parquet, one object per batch, JSON-object rows (object_store only; `parquet` feature).
     Parquet,
+}
+
+/// CSV dialect for `format: csv`: field separator, quoting, header and nested values.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct CsvConfig {
+    /// Field separator: one character, `tab`, `space`, hex (`0x1f`) or `auto` (source: guessed from the first record). Defaults to `,`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub separator: Option<String>,
+    /// Quote character, or `none` for unquoted fields. Defaults to `"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    /// Whether the first record names the columns. Defaults to true; a source without one needs `columns`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<bool>,
+    /// Column names. A source uses them instead of the header's; a sink writes exactly these, in this order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+    /// (Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell.
+    #[serde(default)]
+    pub nested: CsvNested,
+}
+
+impl CsvConfig {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// How a SQL source renders timestamp columns.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SqlTimestamps {
+    /// The database's own text form (`2026-10-04 09:15:23.923277+00`).
+    #[default]
+    Text,
+    /// RFC 3339 in UTC (`2026-10-04T09:15:23.923277Z`); `timestamp` without zone has no offset.
+    Rfc3339,
+}
+
+impl SqlTimestamps {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// How a SQL sink maps a record to the columns of its table.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SqlColumns {
+    /// Each top-level JSON field goes into the table column of the same name.
+    Auto,
+}
+
+/// How a CSV sink writes a nested JSON object.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum CsvNested {
+    /// One column per leaf, named by its dotted path (`stats.avg`).
+    #[default]
+    Flatten,
+    /// The object's JSON text in a single cell.
+    Json,
 }
 
 /// Compression algorithm. Used for at-rest batches (file, object_store) and for HTTP
@@ -1281,6 +1375,9 @@ pub struct FileConfig {
     /// The format for writing messages to the file (Publisher) or interpreting them (Consumer). Defaults to `normal`.
     #[serde(default)]
     pub format: FileFormat,
+    /// CSV dialect (separator, quote, header, columns); only read with `format: csv`.
+    #[serde(default, skip_serializing_if = "CsvConfig::is_default")]
+    pub csv: CsvConfig,
     /// Per-batch compression (`none`, `gzip`, `lz4`, `zstd`). Requires the `compression` feature. Publishers: always. Consumers: must match, and only the default `consume` mode reads it.
     #[serde(default)]
     pub compression: Compression,
@@ -1559,9 +1656,12 @@ pub struct ObjectStoreConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency: Option<bool>,
     /// Record encoding within an object, shared with the file endpoint. Defaults to
-    /// `normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.
+    /// `normal` (one JSON `CanonicalMessage` per line). Parquet needs the `parquet` feature.
     #[serde(default)]
     pub format: FileFormat,
+    /// CSV dialect (separator, quote, header, columns); only read with `format: csv`.
+    #[serde(default, skip_serializing_if = "CsvConfig::is_default")]
+    pub csv: CsvConfig,
     /// Record delimiter within an object. Defaults to newline ("\n"). Can be a string or a
     /// hex sequence (e.g. "0x00").
     pub delimiter: Option<String>,
@@ -1782,9 +1882,13 @@ pub struct AmqpConfig {
 #[serde(rename_all = "lowercase")]
 pub enum MongoDbFormat {
     #[default]
+    #[serde(alias = "envelope")]
     Normal,
+    #[serde(alias = "envelope_json")]
     Json,
+    #[serde(alias = "envelope_text")]
     Text,
+    #[serde(alias = "payload")]
     Raw,
 }
 
@@ -2710,6 +2814,15 @@ pub struct SqlxConfig {
     /// May embed connection credentials, so it is treated as a secret.
     #[cfg_attr(feature = "schema", schemars(extend("format"="password")))]
     pub checkpoint_store: Option<String>,
+    /// (Publisher only) `auto`: write each JSON field into the table column of the same name. The table must exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub columns: Option<SqlColumns>,
+    /// (Publisher only, with `columns`) Key column(s), comma-separated: a row with the same key is updated, not inserted again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// (Publisher only, with `columns`) Column that takes the fields without a column of their own, as one JSON object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_column: Option<String>,
     /// (Publisher only) If true, automatically create the table and indexes if they don't exist. Defaults to false.
     #[serde(default)]
     pub auto_create_table: bool,
@@ -2734,6 +2847,9 @@ pub struct SqlxConfig {
     /// (Consumer only) Include authoritative `mqb.src.sqlx_*` source positions; `cursor_column` must then be a unique integer. Defaults to false.
     #[serde(default)]
     pub source_metadata: bool,
+    /// (Consumer only, `cursor_column` mode, PostgreSQL) How timestamp columns are rendered: `text` (default) or `rfc3339`.
+    #[serde(default, skip_serializing_if = "SqlTimestamps::is_default")]
+    pub timestamps: SqlTimestamps,
     /// TLS configuration for the database connection.
     #[serde(default)]
     pub tls: TlsConfig,

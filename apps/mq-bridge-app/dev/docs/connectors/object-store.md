@@ -39,7 +39,14 @@ UUIDv7: a file added later with a name before the saved checkpoint is not read.
 `format` applies to every file under the configured directory or prefix; formats are not detected
 from file extensions. Use separate directories and routes for mixed formats.
 
-- `csv` treats the first row as headers and emits each following row as a JSON object.
+- `csv` treats the first row as headers and emits each following row as a JSON object. The
+  `csv` block (`separator`, `quote`, `header`, `columns`) reads other dialects, exactly as for
+  the [file connector](file.md#dialects); `separator: auto` is settled on the first object read.
+- `parquet` reads every row of a Parquet file as one JSON object, with the file's column types
+  kept (numbers stay numbers). It reads what the `object_store` sink writes and files from
+  other tools, on S3, GCS, Azure and local directories alike, and needs the `parquet` build
+  feature, which `mqb` includes. A Parquet file is decoded whole in memory, so
+  `max_object_bytes` matters more here than for the line formats.
 - `normal` and `json` read mq-bridge message wrappers, one per line, and preserve metadata.
 - For ordinary third-party JSONL, use `raw`: each line becomes one message payload without
   validating or transforming its JSON.
@@ -48,8 +55,9 @@ from file extensions. Use separate directories and routes for mixed formats.
 
 One input file can produce many messages, and route batching still applies. The source currently
 fetches each file into memory before splitting it, so set `max_object_bytes` for untrusted or large
-drop zones. Object-store sinks write one immutable file per flushed batch; CSV is source-only for
-this connector.
+drop zones. Object-store sinks write one immutable file per flushed batch. A `csv` sink gives
+every file its own header, taken from that batch's first row, so set `csv.columns` when all
+files must share the same columns.
 
 ## Choosing a local connector
 

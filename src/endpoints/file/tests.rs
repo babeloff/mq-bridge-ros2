@@ -1,6 +1,8 @@
 use crate::endpoints::file::{FileConsumer, FilePublisher};
 #[allow(unused_imports)]
-use crate::models::{Compression, FileConfig, FileConsumerMode, FileFormat, NameBy};
+use crate::models::{
+    Compression, CsvConfig, CsvNested, FileConfig, FileConsumerMode, FileFormat, NameBy,
+};
 use crate::msg;
 use crate::traits::MessageConsumer;
 use crate::traits::MessagePublisher;
@@ -2035,7 +2037,7 @@ fn csv_append_field_quotes_exactly_when_needed() {
     ];
     for (input, delimiter, expected) in cases {
         let mut buf = b"prefix".to_vec();
-        csv_append_field(&mut buf, input, delimiter);
+        csv_append_field(&mut buf, input, delimiter, Default::default()).unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
             format!("prefix{expected}"),
@@ -2099,14 +2101,23 @@ fn json_append_escaped_output_is_valid_json_for_every_byte_class() {
 #[test]
 fn csv_lone_empty_cell_is_quoted() {
     use super::{csv_encode_message, csv_encode_row};
-    assert_eq!(csv_encode_row(&[String::new()], b"\n"), b"\"\"");
-    assert_eq!(csv_encode_row(&[String::new(), String::new()], b"\n"), b",");
+    let row = |fields: &[String]| csv_encode_row(fields, b"\n", Default::default()).unwrap();
+    assert_eq!(row(&[String::new()]), b"\"\"");
+    assert_eq!(row(&[String::new(), String::new()]), b",");
 
     let mut header = None;
     let mut row = Vec::new();
-    csv_encode_message(&raw_msg(r#"{"":""}"#), &mut header, &mut row, b"\n").unwrap();
+    let csv = super::CsvDialect::default();
+    csv_encode_message(&raw_msg(r#"{"":""}"#), &mut header, &mut row, b"\n", &csv).unwrap();
     assert_eq!(row, b"\"\"");
-    csv_encode_message(&raw_msg(r#"{"other":1}"#), &mut header, &mut row, b"\n").unwrap();
+    csv_encode_message(
+        &raw_msg(r#"{"other":1}"#),
+        &mut header,
+        &mut row,
+        b"\n",
+        &csv,
+    )
+    .unwrap();
     assert_eq!(row, b"\"\"", "a missing value in a one-column file");
 }
 
@@ -2115,23 +2126,32 @@ fn csv_lone_empty_cell_is_quoted() {
 fn csv_write_then_frame(
     payload: &std::collections::BTreeMap<String, String>,
     delimiter: &[u8],
+    csv: &super::CsvDialect,
 ) -> (Vec<u8>, Vec<Vec<u8>>) {
-    use super::{csv_encode_message, csv_encode_row, read_record_sync};
+    use super::{csv_encode_message, csv_encode_row};
 
     let msg = crate::CanonicalMessage::new(serde_json::to_vec(payload).unwrap(), None);
     let mut header = None;
     let mut row = Vec::new();
-    assert!(csv_encode_message(&msg, &mut header, &mut row, delimiter).unwrap());
-    let mut file = csv_encode_row(&header.unwrap(), delimiter);
+    assert!(csv_encode_message(&msg, &mut header, &mut row, delimiter, csv).unwrap());
+    let mut file = csv_encode_row(&header.unwrap(), delimiter, csv.syntax()).unwrap();
     file.extend_from_slice(delimiter);
     file.extend_from_slice(&row);
     file.extend_from_slice(delimiter);
+    let records = csv_frame(&file, delimiter, csv);
+    (file, records)
+}
 
-    let mut reader = std::io::Cursor::new(&file);
+/// Frames `file` into records exactly as the file consumer does.
+fn csv_frame(file: &[u8], delimiter: &[u8], csv: &super::CsvDialect) -> Vec<Vec<u8>> {
+    use super::read_record_sync;
+    let mut reader = std::io::Cursor::new(file);
     let mut records = Vec::new();
     loop {
         let mut record = Vec::new();
-        if read_record_sync(&mut reader, delimiter, &FileFormat::Csv, &mut record).unwrap() == 0 {
+        if read_record_sync(&mut reader, delimiter, &FileFormat::Csv, csv, &mut record).unwrap()
+            == 0
+        {
             break;
         }
         if record.ends_with(delimiter) {
@@ -2142,11 +2162,44 @@ fn csv_write_then_frame(
         }
         records.push(record);
     }
-    (file, records)
+    records
+}
+
+/// Decodes framed records into one object per data row, as the file consumer does.
+fn csv_rows(
+    records: &[Vec<u8>],
+    csv: &super::CsvDialect,
+) -> Vec<std::collections::BTreeMap<String, String>> {
+    use crate::endpoints::file::parse_message;
+    let mut state = Some(super::CsvHeader::unread(csv.clone()));
+    records
+        .iter()
+        .filter_map(|record| parse_message(record, &FileFormat::Csv, &mut state))
+        .map(|row| serde_json::from_slice(&row.payload).unwrap())
+        .collect()
 }
 
 fn csv_cell() -> impl proptest::strategy::Strategy<Value = String> {
-    r#"[a-c,"\\\n\r\t |;\x00\x01\x1f\x7fé世🎉\x{feff}\x{2028}]{0,10}"#
+    r#"[a-c,"'\\\n\r\t |;\x00\x01\x1f\x7fé世🎉\x{feff}\x{2028}]{0,10}"#
+}
+
+/// Separator and quote pairs, as their config spellings.
+fn csv_syntax() -> impl proptest::strategy::Strategy<Value = (&'static str, &'static str)> {
+    use proptest::sample::select;
+    (
+        select(vec![",", ";", "tab", "|", "space", "0x1f"]),
+        select(vec!["\"", "'"]),
+    )
+}
+
+/// `None` when the record delimiter collides with the dialect, which the config rejects.
+fn csv_dialect_of((separator, quote): (&str, &str), delimiter: &str) -> Option<super::CsvDialect> {
+    let config = CsvConfig {
+        separator: Some(separator.to_string()),
+        quote: Some(quote.to_string()),
+        ..Default::default()
+    };
+    super::CsvDialect::from_config(&config, delimiter.as_bytes()).ok()
 }
 
 fn csv_payload(
@@ -2161,18 +2214,81 @@ proptest::proptest! {
     fn csv_writer_output_reads_back_unchanged(
         payload in csv_payload(),
         delimiter in proptest::sample::select(vec!["\n", "\r\n", "|", ";;"]),
+        syntax in csv_syntax(),
     ) {
-        use crate::endpoints::file::parse_message;
-        let (file, records) = csv_write_then_frame(&payload, delimiter.as_bytes());
+        let Some(csv) = csv_dialect_of(syntax, delimiter) else { return Ok(()) };
+        let (file, records) = csv_write_then_frame(&payload, delimiter.as_bytes(), &csv);
         proptest::prop_assert_eq!(
             records.len(), 2, "file {:?} framed wrongly", String::from_utf8_lossy(&file)
         );
-        let mut state = None;
-        proptest::prop_assert!(parse_message(&records[0], &FileFormat::Csv, &mut state).is_none());
-        let row = parse_message(&records[1], &FileFormat::Csv, &mut state).unwrap();
-        let read: std::collections::BTreeMap<String, String> =
-            serde_json::from_slice(&row.payload).unwrap();
-        proptest::prop_assert_eq!(read, payload);
+        proptest::prop_assert_eq!(
+            csv_rows(&records, &csv), vec![payload], "file {:?}", String::from_utf8_lossy(&file)
+        );
+    }
+
+    /// The other direction: a file an independent writer produced, in any dialect,
+    /// reads back as the cells that went in.
+    #[test]
+    fn csv_crate_output_reads_back_unchanged(
+        header in proptest::collection::btree_set(csv_cell(), 1..6),
+        cells in proptest::collection::vec(csv_cell(), 12),
+        syntax in csv_syntax(),
+    ) {
+        // An unquoted leading U+FEFF is a byte-order mark to the reader.
+        proptest::prop_assume!(!header.first().unwrap().starts_with('\u{feff}'));
+        let csv = csv_dialect_of(syntax, "\n").unwrap();
+        let header: Vec<String> = header.into_iter().collect();
+        let rows: Vec<&[String]> = cells.chunks_exact(header.len()).collect();
+        let mut writer = csv::WriterBuilder::new()
+            .delimiter(csv.syntax().separator)
+            .quote(csv.syntax().quote.unwrap())
+            .terminator(csv::Terminator::Any(b'\n'))
+            .from_writer(Vec::new());
+        writer.write_record(&header).unwrap();
+        for row in &rows {
+            writer.write_record(*row).unwrap();
+        }
+        let file = writer.into_inner().unwrap();
+        let expected: Vec<std::collections::BTreeMap<String, String>> = rows
+            .iter()
+            .map(|row| header.iter().cloned().zip(row.iter().cloned()).collect())
+            .collect();
+        proptest::prop_assert_eq!(
+            csv_rows(&csv_frame(&file, b"\n", &csv), &csv),
+            expected,
+            "file {:?}", String::from_utf8_lossy(&file)
+        );
+    }
+
+    /// `separator: auto` settles on what the writer used, whatever the data cells hold.
+    /// Header names are plain: the guess reads only the first record.
+    #[test]
+    fn csv_auto_reads_back_every_candidate_separator(
+        payload in proptest::collection::btree_map("[a-c]{1,4}", csv_cell(), 2..6),
+        separator in proptest::sample::select(vec![",", ";", "tab", "|"]),
+    ) {
+        let written = csv_dialect_of((separator, "\""), "\n").unwrap();
+        let auto = csv_dialect_of(("auto", "\""), "\n").unwrap();
+        let (file, _) = csv_write_then_frame(&payload, b"\n", &written);
+        proptest::prop_assert_eq!(
+            csv_rows(&csv_frame(&file, b"\n", &auto), &auto),
+            vec![payload],
+            "file {:?}", String::from_utf8_lossy(&file)
+        );
+    }
+
+    /// `quote: none` reads and writes quote characters as data.
+    #[test]
+    fn csv_without_quoting_reads_back_unchanged(
+        payload in proptest::collection::btree_map(
+            r#"[a-c"' é世🎉]{0,8}"#, r#"[a-c"' ,;é世🎉]{0,8}"#, 2..6
+        ),
+    ) {
+        let csv = csv_dialect_of(("tab", "none"), "\n").unwrap();
+        let (file, records) = csv_write_then_frame(&payload, b"\n", &csv);
+        proptest::prop_assert_eq!(
+            csv_rows(&records, &csv), vec![payload], "file {:?}", String::from_utf8_lossy(&file)
+        );
     }
 
     /// An independent RFC 4180 parser reads the writer's output the same way, so files
@@ -2181,18 +2297,22 @@ proptest::proptest! {
     fn csv_writer_output_matches_the_csv_crate(
         payload in csv_payload(),
         delimiter in proptest::sample::select(vec!["\n", "\r\n", "|"]),
+        syntax in csv_syntax(),
     ) {
+        let Some(csv) = csv_dialect_of(syntax, delimiter) else { return Ok(()) };
         // A lone empty cell is a blank line, which the csv crate skips by design.
         proptest::prop_assume!(
             !(payload.len() == 1 && payload.iter().any(|(k, v)| k.is_empty() || v.is_empty()))
         );
-        let (file, _) = csv_write_then_frame(&payload, delimiter.as_bytes());
+        let (file, _) = csv_write_then_frame(&payload, delimiter.as_bytes(), &csv);
         let terminator = match delimiter {
             "|" => csv::Terminator::Any(b'|'),
             _ => csv::Terminator::CRLF,
         };
         let parsed: Vec<Vec<String>> = csv::ReaderBuilder::new()
             .has_headers(false)
+            .delimiter(csv.syntax().separator)
+            .quote(csv.syntax().quote.unwrap())
             .terminator(terminator)
             .from_reader(file.as_slice())
             .records()
@@ -2321,6 +2441,10 @@ async fn test_file_csv_value_types_and_escaping() {
     let config = FileConfig {
         path: file_path.to_str().unwrap().to_string(),
         format: FileFormat::Csv,
+        csv: CsvConfig {
+            nested: CsvNested::Json,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -2483,7 +2607,13 @@ async fn test_file_csv_undecodable_string_fails_the_message() {
 async fn test_file_csv_cells_keep_source_spelling_on_every_path() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("data.csv");
-    let config = csv_config(&path);
+    let config = FileConfig {
+        csv: CsvConfig {
+            nested: CsvNested::Json,
+            ..Default::default()
+        },
+        ..csv_config(&path)
+    };
 
     let sink = FilePublisher::new(&config).await.unwrap();
     sink.send_batch(vec![
@@ -2505,7 +2635,13 @@ async fn test_file_csv_cells_keep_source_spelling_on_every_path() {
 async fn test_file_csv_multiline_nested_value_stays_in_one_row() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("data.csv");
-    let config = csv_config(&path);
+    let config = FileConfig {
+        csv: CsvConfig {
+            nested: CsvNested::Json,
+            ..Default::default()
+        },
+        ..csv_config(&path)
+    };
 
     let sink = FilePublisher::new(&config).await.unwrap();
     sink.send_batch(vec![raw_msg("{\"id\":1,\"o\":{\r\n  \"k\": [1,\n 2]\n}}")])
@@ -2644,21 +2780,31 @@ async fn test_file_csv_reads_crlf_files() {
     );
 }
 
-/// An unterminated quote at EOF yields what there is instead of hanging the reader.
+/// A truncated export must not load as if it were whole.
 #[tokio::test]
-async fn test_file_csv_unterminated_quote_at_eof_is_emitted() {
+async fn csv_drain_fails_on_a_quote_left_open_at_end_of_file() {
     let dir = tempdir().unwrap();
-    let path = dir.path().join("data.csv");
-    tokio::fs::write(&path, "a,b\n1,\"open\nstill open\n")
+    let file_path = dir.path().join("truncated.csv");
+    tokio::fs::write(&file_path, "id,name\n1,a\n2,\"cut off\n")
         .await
         .unwrap();
-    let rows = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        read_csv_rows(&csv_config(&path), 1),
-    )
-    .await
-    .expect("reader hung on an unterminated quote");
-    assert_eq!(rows, vec![json!({"a": "1", "b": "open\nstill open"})]);
+
+    let mut source = FileConsumer::new(&csv_config(&file_path)).await.unwrap();
+    source.set_exit_on_empty(true);
+
+    let mut rows = 0;
+    let error = loop {
+        match source.receive_batch(10).await {
+            Ok(batch) => rows += batch.messages.len(),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(rows, 1);
+    assert!(
+        matches!(error, crate::traits::ConsumerError::Permanent(_)),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("ends inside a quoted field"));
 }
 
 /// Pinned, not endorsed: CSV has no null, so `null` is written as the text `null` and
@@ -3635,5 +3781,276 @@ async fn test_file_json_custom_delimiter_inside_values_round_trips() {
             serde_json::from_slice::<serde_json::Value>(&got.message.payload).unwrap(),
             want
         );
+    }
+}
+
+fn csv_dialect_config(path: &std::path::Path, csv: CsvConfig) -> FileConfig {
+    FileConfig {
+        path: path.to_str().unwrap().to_string(),
+        format: FileFormat::Csv,
+        mode: Some(FileConsumerMode::Consume { delete: false }),
+        csv,
+        ..Default::default()
+    }
+}
+
+/// The dialects other tools export: Excel, `mongoexport --type=tsv`, `psql --csv` with a
+/// custom delimiter, and headerless dumps.
+#[tokio::test]
+async fn test_file_csv_reads_other_dialects() {
+    let separator = |value: &str| CsvConfig {
+        separator: Some(value.to_string()),
+        ..Default::default()
+    };
+    let cases: Vec<(&str, CsvConfig, &str, serde_json::Value)> = vec![
+        (
+            "excel: semicolon, byte-order mark, CRLF",
+            separator(";"),
+            "\u{feff}id;name;note\r\n1;\"Müller; Hans\";a,b\r\n",
+            json!([{"id": "1", "name": "Müller; Hans", "note": "a,b"}]),
+        ),
+        (
+            "tab",
+            separator("tab"),
+            "id\tname\n1\tAda Lovelace\n2\t\"multi\nline\"\n",
+            json!([{"id": "1", "name": "Ada Lovelace"}, {"id": "2", "name": "multi\nline"}]),
+        ),
+        (
+            "space",
+            separator("space"),
+            "id name\n1 \"Ada Lovelace\"\n",
+            json!([{"id": "1", "name": "Ada Lovelace"}]),
+        ),
+        (
+            "no quote character: a quote is data",
+            CsvConfig {
+                quote: Some("none".to_string()),
+                ..separator("|")
+            },
+            "id|note\n1|\"open\n2|say \"hi\"\n",
+            json!([{"id": "1", "note": "\"open"}, {"id": "2", "note": "say \"hi\""}]),
+        ),
+        (
+            "single quotes",
+            CsvConfig {
+                quote: Some("'".to_string()),
+                ..Default::default()
+            },
+            "id,note\n1,'it''s, fine'\n",
+            json!([{"id": "1", "note": "it's, fine"}]),
+        ),
+        (
+            "no header: the first record is data",
+            CsvConfig {
+                header: Some(false),
+                columns: vec!["id".to_string(), "name".to_string()],
+                ..Default::default()
+            },
+            "\u{feff}1,Ada\n2,Grace\n",
+            json!([{"id": "1", "name": "Ada"}, {"id": "2", "name": "Grace"}]),
+        ),
+        (
+            "columns rename the header",
+            CsvConfig {
+                columns: vec!["key".to_string(), "value".to_string()],
+                ..Default::default()
+            },
+            "Spalte 1,Spalte 2\n1,Ada\n",
+            json!([{"key": "1", "value": "Ada"}]),
+        ),
+        (
+            "auto: semicolon",
+            separator("auto"),
+            "\u{feff}id;name\r\n1;\"a;b\"\r\n",
+            json!([{"id": "1", "name": "a;b"}]),
+        ),
+        (
+            "auto: tab",
+            separator("auto"),
+            "id\tname\n1\ta,b\n",
+            json!([{"id": "1", "name": "a,b"}]),
+        ),
+        (
+            "auto: comma stays comma",
+            separator("auto"),
+            "id,name\n1,a;b\n",
+            json!([{"id": "1", "name": "a;b"}]),
+        ),
+    ];
+    for (what, csv, content, expected) in cases {
+        let expected = expected.as_array().unwrap().clone();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("data.csv");
+        tokio::fs::write(&path, content).await.unwrap();
+        for mode in [
+            FileConsumerMode::Consume { delete: false },
+            FileConsumerMode::Consume { delete: true },
+        ] {
+            let config = FileConfig {
+                mode: Some(mode.clone()),
+                ..csv_dialect_config(&path, csv.clone())
+            };
+            let rows = read_csv_rows(&config, expected.len()).await;
+            assert_eq!(rows, expected, "{what} ({mode:?})");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_file_csv_dialect_round_trip() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("data.csv");
+    let config = csv_dialect_config(
+        &path,
+        CsvConfig {
+            separator: Some(";".to_string()),
+            ..Default::default()
+        },
+    );
+    let sink = FilePublisher::new(&config).await.unwrap();
+    sink.send_batch(vec![
+        msg!(json!({"id": 1, "note": "a;b", "plain": "x,y"})),
+        msg!(json!({"id": 2, "note": "say \"hi\"", "plain": ""})),
+    ])
+    .await
+    .unwrap();
+    sink.flush().await.unwrap();
+    drop(sink);
+
+    assert_eq!(
+        tokio::fs::read_to_string(&path).await.unwrap(),
+        "id;note;plain\n1;\"a;b\";x,y\n2;\"say \"\"hi\"\"\";\n"
+    );
+    assert_eq!(
+        read_csv_rows(&config, 2).await,
+        vec![
+            json!({"id": "1", "note": "a;b", "plain": "x,y"}),
+            json!({"id": "2", "note": "say \"hi\"", "plain": ""}),
+        ]
+    );
+}
+
+/// `columns` on a sink is a projection in a fixed order; `header: false` writes rows only.
+#[tokio::test]
+async fn test_file_csv_sink_columns_and_no_header() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("data.tsv");
+    let config = csv_dialect_config(
+        &path,
+        CsvConfig {
+            separator: Some("tab".to_string()),
+            quote: Some("none".to_string()),
+            header: Some(false),
+            columns: vec!["name".to_string(), "id".to_string()],
+            ..Default::default()
+        },
+    );
+    let sink = FilePublisher::new(&config).await.unwrap();
+    let sent = sink
+        .send_batch(vec![
+            msg!(json!({"id": 1, "name": "Ada", "dropped": true})),
+            msg!(json!({"id": 2, "name": "has\ttab"})),
+            msg!(json!({"id": 3})),
+        ])
+        .await
+        .unwrap();
+    sink.flush().await.unwrap();
+    assert!(
+        matches!(&sent, crate::traits::SentBatch::Partial { failed, .. } if failed.len() == 1),
+        "a value holding the separator has no spelling without a quote character"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(&path).await.unwrap(),
+        "Ada\t1\n\t3\n"
+    );
+}
+
+/// What the `aggregate` middleware emits: its fields nest under `into`. A CSV sink
+/// spreads them over `parent.child` columns unless told to keep the JSON text.
+#[tokio::test]
+async fn test_file_csv_flattens_nested_objects() {
+    let rows = || {
+        vec![
+            raw_msg(r#"{"sensor":"a","stats":{"n":1,"avg":2.50,"ema":{"fast":2.5}},"tags":[1,2]}"#),
+            raw_msg(r#"{"stats":{"ema":{"fast":3.0},"avg":3.25,"n":2},"sensor":"b","tags":[]}"#),
+            raw_msg(r#"{"sensor":"c","stats":null,"tags":[3]}"#),
+        ]
+    };
+    let dir = tempdir().unwrap();
+
+    let path = dir.path().join("flat.csv");
+    let sink = FilePublisher::new(&csv_dialect_config(&path, CsvConfig::default()))
+        .await
+        .unwrap();
+    sink.send_batch(rows()).await.unwrap();
+    sink.flush().await.unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(&path).await.unwrap(),
+        "sensor,stats.n,stats.avg,stats.ema.fast,tags\n\
+         a,1,2.50,2.5,\"[1,2]\"\n\
+         b,2,3.25,3.0,[]\n\
+         c,,,,[3]\n"
+    );
+
+    let path = dir.path().join("json.csv");
+    let json = CsvConfig {
+        nested: CsvNested::Json,
+        ..Default::default()
+    };
+    let sink = FilePublisher::new(&csv_dialect_config(&path, json))
+        .await
+        .unwrap();
+    sink.send_batch(rows().into_iter().take(1).collect())
+        .await
+        .unwrap();
+    sink.flush().await.unwrap();
+    assert_eq!(
+        tokio::fs::read_to_string(&path).await.unwrap(),
+        "sensor,stats,tags\n\
+         a,\"{\"\"n\"\":1,\"\"avg\"\":2.50,\"\"ema\"\":{\"\"fast\"\":2.5}}\",\"[1,2]\"\n"
+    );
+}
+
+#[tokio::test]
+async fn test_file_csv_rejects_ambiguous_dialects() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("data.csv");
+    let auto = CsvConfig {
+        separator: Some("auto".to_string()),
+        ..Default::default()
+    };
+    assert!(FilePublisher::new(&csv_dialect_config(&path, auto))
+        .await
+        .is_err());
+    let headless = CsvConfig {
+        header: Some(false),
+        ..Default::default()
+    };
+    assert!(FileConsumer::new(&csv_dialect_config(&path, headless))
+        .await
+        .is_err());
+    let config = FileConfig {
+        delimiter: Some(",".to_string()),
+        ..csv_dialect_config(&path, CsvConfig::default())
+    };
+    assert!(FileConsumer::new(&config).await.is_err());
+}
+
+#[tokio::test]
+async fn blank_lines_are_not_records() {
+    for format in [FileFormat::Raw, FileFormat::Json] {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("blank.jsonl");
+        tokio::fs::write(&file_path, "{\"a\":1}\n\n\r\n{\"a\":2}\n")
+            .await
+            .unwrap();
+        let config = FileConfig {
+            path: file_path.to_str().unwrap().to_string(),
+            format,
+            ..Default::default()
+        };
+        let mut source = FileConsumer::new(&config).await.unwrap();
+        source.set_exit_on_empty(true);
+        assert_eq!(drain_count(&mut source).await, 2);
     }
 }

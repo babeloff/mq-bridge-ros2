@@ -144,6 +144,7 @@ fn number(value: &Value) -> f64 {
 
 fn count_per_card() -> Value {
     json!({ "aggregate": {
+        "consistency": "single_writer",
         "key": "${payload:card}", "into": "stats", "fields": { "n": "count" },
     }})
 }
@@ -157,6 +158,7 @@ fn aggregate_fields_keep_one_state_per_key() {
         "{\"card\":\"a\",\"amount\":10}\n{\"card\":\"b\",\"amount\":5}\n{\"card\":\"a\",\"amount\":\"30\"}\n",
     )
     .input(json!([{ "aggregate": {
+        "consistency": "single_writer",
         "key": "${payload:card}",
         "into": "stats",
         "fields": {
@@ -187,20 +189,22 @@ fn aggregate_expressions_run_per_entry_with_output_and_previous() {
         "expressions",
         "{\"card\":1,\"shop\":\"x\",\"amount\":20}\n{\"card\":1,\"shop\":\"x\",\"amount\":50}\n",
     )
-    .input(json!([{ "aggregate": { "entries": [
-        {
-            "key": "${payload:card}",
-            "into": "features.card",
-            "expression": "{ s: (state.s ?? 0) + amount, n: (state.n ?? 0) + 1 }",
-            "output": "state.s / state.n",
-        },
-        {
-            "key": "${payload:shop}",
-            "into": "features.shop",
-            "emit": "previous",
-            "expression": "{ max: max([state.max ?? amount, amount]) }",
-        },
-    ]}}]))
+    .input(
+        json!([{ "aggregate": { "consistency": "single_writer", "entries": [
+            {
+                "key": "${payload:card}",
+                "into": "features.card",
+                "expression": "{ s: (state.s ?? 0) + amount, n: (state.n ?? 0) + 1 }",
+                "output": "state.s / state.n",
+            },
+            {
+                "key": "${payload:shop}",
+                "into": "features.shop",
+                "emit": "previous",
+                "expression": "{ max: max([state.max ?? amount, amount]) }",
+            },
+        ]}}]),
+    )
     .rows();
 
     assert_eq!(rows.len(), 2);
@@ -219,6 +223,7 @@ fn aggregate_drops_a_message_it_cannot_fold_and_keeps_the_state() {
         "{\"card\":\"a\",\"amount\":1}\n{\"card\":\"a\"}\nnot json\n{\"card\":\"a\",\"amount\":2}\n",
     )
     .input(json!([{ "aggregate": {
+        "consistency": "single_writer",
         "key": "${payload:card}", "into": "stats",
         "fields": { "n": "count", "total": "sum(amount)" },
     }}]))
@@ -274,6 +279,7 @@ fn transform_shapes_csv_rows_before_aggregate_reads_them() {
         .format("csv")
         .input(json!([
             { "aggregate": {
+                "consistency": "single_writer",
                 "key": "${payload:card_id}", "into": "card",
                 "fields": { "n": "count", "total": "sum(amount)" },
             }},
@@ -304,6 +310,7 @@ fn aggregate_keys_on_a_field_a_lookup_added() {
     )
     .input(json!([
         { "aggregate": {
+            "consistency": "single_writer",
             "key": "${payload:user.name}", "into": "stats",
             "fields": { "total": "sum(amount)" },
         }},
@@ -331,6 +338,7 @@ fn deduplication_transform_lookup_and_aggregate_combine_on_one_input() {
     .format("csv")
     .input(json!([
         { "aggregate": {
+            "consistency": "single_writer",
             "key": "${payload:user.name}", "into": "stats",
             "fields": { "n": "count", "total": "sum(amount)" },
         }},

@@ -199,6 +199,7 @@ const FILE_CONFIG_KEYS: &[&str] = &[
     "format",
     "compression",
     "encryption",
+    "csv",
     "source_metadata",
 ];
 

@@ -157,6 +157,37 @@ export interface LookupEntry {
   into: string;
 }
 
+export interface AggregateMiddleware {
+  store?: string | null;
+  consistency?: AggregateConsistency;
+  max_keys?: number | null;
+  key?: string | null;
+  expression?: string | null;
+  fields?: Record<string, string> | null;
+  output?: string | null;
+  into?: string | null;
+  emit?: AggregateEmit;
+  entries?: AggregateEntry[];
+  time?: string | null;
+  on_error?: AggregateOnError;
+  read_only?: boolean;
+}
+
+export type AggregateConsistency = "shared" | "single_writer";
+
+export type AggregateEmit = "updated" | "previous";
+
+export interface AggregateEntry {
+  key: string;
+  expression?: string | null;
+  fields?: Record<string, string> | null;
+  output?: string | null;
+  into: string;
+  emit?: AggregateEmit;
+}
+
+export type AggregateOnError = "drop" | "fail" | "skip";
+
 export interface DeadLetterQueueMiddleware {
   endpoint: Endpoint;
 }
@@ -337,6 +368,7 @@ export interface FileConfig {
   idempotency?: boolean | null;
   delimiter?: string | null;
   format?: FileFormat;
+  csv?: CsvConfig;
   compression?: Compression;
   encryption?: EncryptionConfig | null;
   source_metadata?: boolean;
@@ -345,6 +377,16 @@ export interface FileConfig {
 export type NameBy = "auto" | "source_position" | "write_time";
 
 export type FileFormat = "normal" | "json" | "text" | "raw" | "csv" | "parquet";
+
+export interface CsvConfig {
+  separator?: string | null;
+  quote?: string | null;
+  header?: boolean | null;
+  columns?: string[];
+  nested?: CsvNested;
+}
+
+export type CsvNested = "flatten" | "json";
 
 export interface DirSpoolConfig {
   path: string;
@@ -377,6 +419,7 @@ export interface ObjectStoreConfig {
   name_by?: NameBy;
   idempotency?: boolean | null;
   format?: FileFormat;
+  csv?: CsvConfig;
   delimiter?: string | null;
   checkpoint_store?: string | null;
   cursor_id?: string | null;
@@ -619,6 +662,9 @@ export interface SqlxConfig {
   cursor_column?: string | null;
   cursor_id?: string | null;
   checkpoint_store?: string | null;
+  columns?: SqlColumns | null;
+  key?: string | null;
+  extra_column?: string | null;
   auto_create_table?: boolean;
   bulk_copy?: boolean;
   polling_interval_ms?: number | null;
@@ -627,6 +673,7 @@ export interface SqlxConfig {
   slot_name?: string | null;
   create_publication?: boolean;
   source_metadata?: boolean;
+  timestamps?: SqlTimestamps;
   tls?: TlsConfig;
   max_connections?: number | null;
   min_connections?: number | null;
@@ -636,6 +683,10 @@ export interface SqlxConfig {
   test_before_acquire?: boolean | null;
   shared?: boolean | null;
 }
+
+export type SqlColumns = "auto";
+
+export type SqlTimestamps = "text" | "rfc3339";
 
 export interface ClickHouseConfig {
   url: string;
@@ -659,6 +710,123 @@ export interface ClickHouseConfig {
   compression?: Compression;
 }
 
+export interface HttpBulkConfig {
+  url: string;
+  headers?: Record<string, string>;
+  auth?: HttpBulkAuth | null;
+  upsert?: HttpBulkUpsert | null;
+  query?: HttpBulkQuery | null;
+  read?: HttpBulkRead | null;
+  delete?: HttpBulkDelete | null;
+  operation?: string | null;
+  delete_values?: string[];
+  max_request_bytes?: number;
+  compression?: Compression;
+  request_timeout_ms?: number | null;
+  connect_timeout_ms?: number | null;
+  tls?: TlsConfig;
+}
+
+export interface HttpBulkAuth {
+  oauth2?: HttpBulkOAuth2 | null;
+  aws_sigv4?: HttpBulkAwsSigV4 | null;
+}
+
+export interface HttpBulkOAuth2 {
+  token_url: string;
+  client_id: string;
+  client_secret: string;
+  scope?: string | null;
+}
+
+export interface HttpBulkAwsSigV4 {
+  region: string;
+  service: string;
+  access_key?: string | null;
+  secret_key?: string | null;
+  session_token?: string | null;
+}
+
+export interface HttpBulkUpsert {
+  path: string;
+  method?: string | null;
+  format?: HttpBulkFormat;
+  content_type?: string | null;
+  action?: string | null;
+  envelope?: string | null;
+  document?: string | null;
+  result?: HttpBulkResult;
+}
+
+export type HttpBulkFormat = "ndjson" | "json_array";
+
+export interface HttpBulkResult {
+  lines?: HttpBulkLines | null;
+  items?: HttpBulkItems | null;
+  job?: HttpBulkJob | null;
+}
+
+export interface HttpBulkLines {
+  success: string;
+  error?: string | null;
+}
+
+export interface HttpBulkItems {
+  path?: string;
+  error: string;
+}
+
+export interface HttpBulkJob {
+  id: string;
+  poll: string;
+  status: string;
+  succeeded: string[];
+  failed: string[];
+  error?: string | null;
+  timeout_ms?: number;
+}
+
+export interface HttpBulkQuery {
+  path: string;
+  method?: string | null;
+  format?: HttpBulkFormat;
+  content_type?: string | null;
+  request: string;
+  envelope?: string | null;
+  responses?: string;
+  value?: string | null;
+  found?: string | null;
+  error?: string | null;
+}
+
+export interface HttpBulkRead {
+  path: string;
+  method?: string | null;
+  body?: string | null;
+  items?: string;
+  cursor?: HttpBulkCursor;
+  cursor_id?: string | null;
+  checkpoint_store?: string | null;
+  polling_interval_ms?: number | null;
+  max_polling_interval_ms?: number | null;
+}
+
+export interface HttpBulkCursor {
+  response?: string | null;
+  item?: string | null;
+  start?: unknown;
+}
+
+export interface HttpBulkDelete {
+  path: string;
+  method?: string | null;
+  id_field?: string;
+  max_ids?: number;
+  envelope?: string | null;
+  line?: string | null;
+  result?: HttpBulkResult;
+}
+
 export interface PostgresCdcConfig {
   url: string;
   publication: string;
@@ -673,9 +841,12 @@ export interface PostgresCdcConfig {
   checkpoint_store?: string | null;
   status_interval_ms?: number;
   tls?: TlsConfig;
+  id_hash?: IdHash;
 }
 
 export type PostgresConsume = "capture_new" | "capture_all" | "snapshot";
+
+export type IdHash = "fnv1a" | "sha256";
 
 export interface SequenceConfig {
   endpoints: Endpoint[];

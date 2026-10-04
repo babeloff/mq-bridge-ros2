@@ -27,8 +27,11 @@ class AggregateMiddleware(TypedDict, total=False):
     into: Optional[str]
     key: Optional[str]
     max_keys: Optional[int]
+    on_error: AggregateOnError
     output: Optional[str]
+    read_only: bool
     store: Optional[str]
+    time: Optional[str]
 
 
 class AmqpConfig(TypedDict, total=False):
@@ -104,6 +107,15 @@ class CookieJarMiddleware(TypedDict, total=False):
     max_cookies: int
     set_cookie_metadata_key: str
     shared_scope: Optional[str]
+
+
+class CsvConfig(TypedDict, total=False):
+    """CSV dialect for `format: csv`: field separator, quoting, header and nested values."""
+    columns: List[str]
+    header: Optional[bool]
+    nested: CsvNested
+    quote: Optional[str]
+    separator: Optional[str]
 
 
 class DeadLetterQueueMiddleware(TypedDict, total=False):
@@ -201,6 +213,7 @@ class Endpoint(TypedDict, total=False):
 
 class FileConfig(TypedDict, total=False):
     compression: Compression
+    csv: CsvConfig
     delimiter: Optional[str]
     encryption: Optional[EncryptionConfig]
     format: FileFormat
@@ -590,6 +603,7 @@ class ObjectStoreConfig(TypedDict, total=False):
     """Configuration for a local or cloud object-store endpoint."""
     checkpoint_store: Optional[str]
     compression: Compression
+    csv: CsvConfig
     cursor_id: Optional[str]
     date_partition: Optional[bool]
     date_partition_style: DatePartitionStyle
@@ -715,12 +729,15 @@ class SqlxConfig(TypedDict, total=False):
     auto_create_table: bool
     bulk_copy: bool
     checkpoint_store: Optional[str]
+    columns: Optional[SqlColumns]
     create_publication: bool
     cursor_column: Optional[str]
     cursor_id: Optional[str]
     delete_after_read: bool
+    extra_column: Optional[str]
     idle_timeout_ms: Optional[int]
     insert_query: Optional[str]
+    key: Optional[str]
     lookup_query: Optional[str]
     max_connections: Optional[int]
     max_lifetime_ms: Optional[int]
@@ -735,6 +752,7 @@ class SqlxConfig(TypedDict, total=False):
     source_metadata: bool
     table: Required[str]
     test_before_acquire: Optional[bool]
+    timestamps: SqlTimestamps
     tls: TlsConfig
     url: Required[str]
     username: Optional[str]
@@ -833,8 +851,10 @@ class ZeroMqConfig(TypedDict, total=False):
 
 AggregateConsistency = Literal["shared", "single_writer"]
 AggregateEmit = Literal["updated", "previous"]
+AggregateOnError = Literal["drop", "fail", "skip"]
 CipherKind = Literal["xchacha20poly1305", "aes256gcm"]
 Compression = Literal["none", "gzip", "lz4", "zstd"]
+CsvNested = Literal["flatten", "json"]
 DatePartitionStyle = Literal["nested", "hive"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
@@ -853,6 +873,8 @@ PostgresConsume = Literal["capture_new", "capture_all", "snapshot"]
 SpoolClaim = Literal["exclusive", "warn", "off"]
 SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]
+SqlColumns = Literal["auto"]
+SqlTimestamps = Literal["text", "rfc3339"]
 StaticConfig = Union[str, Dict[str, Any]]
 TransformErrorPolicy = Literal["reject", "pass_through"]
 WeakJoinAck = Literal["on_join", "on_receive"]

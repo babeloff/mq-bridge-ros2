@@ -4,21 +4,38 @@
 
 Schemes: `local-store://`, `s3://`, `s3a://`, `gs://`, `gcs://`, `az://`, `azure://`, `abfs://`, `abfss://`
 
-Query parameters recognised as config fields for this connector. The object-typed `encryption` is set with a JSON literal, e.g. `?encryption={...}`. Unrecognised parameters are not forwarded as driver options, so any other `?key=value` pair is rejected rather than silently ignored.
+Query parameters recognised as config fields for this connector. The object-typed `csv` is set with a JSON literal, e.g. `?csv={...}`. Unrecognised parameters are not forwarded as driver options, so any other `?key=value` pair is rejected rather than silently ignored.
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `checkpoint_store` | string | no | — | (Source only) Durable resume store URL recording the last processed object key, e.g. `file:///var/lib/mqb/obj.json`, `s3://bucket/cursors`, or `postgres://…`. Without it every restart re-lists and re-emits all objects. |
 | `compression` | `none` \| `gzip` \| `lz4` \| `zstd` | no | `none` | Whole-object compression (`none`, `gzip`, `lz4`, `zstd`). Requires the `compression` feature. |
+| `csv` | object | no | [see below](#csv) | CSV dialect (separator, quote, header, columns); only read with `format: csv`. |
 | `cursor_id` | string | no | — | (Source only) Cursor id namespacing the checkpoint key; enables durable resume. |
 | `date_partition` | boolean | no | `null` | (Sink only) Prepend a `YYYY/MM/DD/` path (write time, UTC) to each object key. Applies to `write_time` naming only; defaults to on. Purely for readability / lifecycle rules. |
 | `date_partition_style` | `nested` \| `hive` | no | `nested` | (Sink only) Date folder layout: `nested` (`YYYY/MM/DD/`) or `hive` (`year=YYYY/month=MM/day=DD/`). |
 | `delimiter` | string | no | — | Record delimiter within an object. Defaults to newline ("\n"). Can be a string or a hex sequence (e.g. "0x00"). |
 | `encryption` | object | no | `null` | At-rest AEAD encryption applied after compression. Requires the `encryption` feature. |
 | `extension` | string | no | — | (Sink only) Extension for written objects, without the dot. Defaults to a value derived from `format`, `compression` and `encryption` (e.g. `jsonl`, `csv`, `bin`, `jsonl.gz`, `jsonl.lz4`, `jsonl.gz.enc`); encrypted objects get a trailing `.enc` since they are ciphertext, not a directly decompressible `.gz`. |
-| `format` | `normal` \| `json` \| `text` \| `raw` \| `csv` \| `parquet` | no | `normal` | Record encoding within an object, shared with the file endpoint. Defaults to `normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature. |
+| `format` | `normal` \| `json` \| `text` \| `raw` \| `csv` \| `parquet` | no | `normal` | Record encoding within an object, shared with the file endpoint. Defaults to `normal` (one JSON `CanonicalMessage` per line). Parquet needs the `parquet` feature. |
 | `idempotency` | boolean | no | — | Deprecated: use `name_by`. true = `source_position`, false = `write_time`; ignored when `name_by` is set. |
 | `max_object_bytes` | integer | no | — | (Source only) Maximum size in bytes of a single object to fetch into memory. An object larger than this fails the read (surfaced as a consumer error) instead of being buffered whole. Unset means no limit (the whole object is materialized). |
 | `name_by` | `auto` \| `source_position` \| `write_time` | no | `auto` | (Sink only) `auto`, `write_time` (uuidv7 name) or `source_position` (name carries the source range). |
 | `polling_interval_ms` | integer | no | — | (Source only) Idle poll interval in milliseconds when no new objects are found. Defaults to 1000. |
 | `url` | string | yes | — | Object-store URL, e.g. `file:///var/lib/mqb/incoming`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://account/container/prefix`. Credentials are resolved from the environment by the `object_store` crate (same mechanism as the checkpoint backend); R2 uses `s3://` plus a custom `AWS_ENDPOINT_URL`. |
+
+## Struct-typed fields
+
+### `csv`
+
+CSV dialect for `format: csv`: field separator, quoting, header and nested values.
+
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `columns` | array of string | no | — | Column names. A source uses them instead of the header's; a sink writes exactly these, in this order. |
+| `header` | boolean | no | — | Whether the first record names the columns. Defaults to true; a source without one needs `columns`. |
+| `nested` | `flatten` \| `json` | no | `flatten` | (Sink only) Nested objects: `flatten` into `parent.child` columns (default) or `json` text in one cell. |
+| `quote` | string | no | — | Quote character, or `none` for unquoted fields. Defaults to `"`. |
+| `separator` | string | no | — | Field separator: one character, `tab`, `space`, hex (`0x1f`) or `auto` (source: guessed from the first record). Defaults to `,`. |
+

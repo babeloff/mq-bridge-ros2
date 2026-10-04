@@ -93,7 +93,7 @@ Every row works from the Rust crate, the Python and Node.js packages, and the ze
 | **MongoDB** as source or sink | `mongodb` endpoint · `mongodb` | [MongoDB](https://marcomq.github.io/mq-bridge/connectors/mongodb.html) |
 | **ClickHouse** bulk insert and resumable reads | `clickhouse` endpoint · `clickhouse` | [ClickHouse](https://marcomq.github.io/mq-bridge/connectors/clickhouse.html) |
 | **Search engines** and other bulk document APIs (Meilisearch, Typesense, Elasticsearch, Qdrant, PostgREST / Supabase) | `http_bulk` endpoint · `http-bulk` | [HTTP bulk](https://marcomq.github.io/mq-bridge/connectors/http-bulk.html) |
-| **Object storage**: S3 (and S3-compatible, e.g. R2), GCS, Azure Blob, or a local directory, as **Parquet** or **JSONL**; **CSV** as input | `object_store` endpoint with `format: parquet \| raw \| json \| csv` · `object-store`, `parquet` | [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html) |
+| **Object storage**: S3 (and S3-compatible, e.g. R2), GCS, Azure Blob, or a local directory, as **Parquet**, **JSONL** or **CSV** | `object_store` endpoint with `format: parquet \| raw \| json \| csv` · `object-store`, `parquet` | [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html) |
 | **Files**: CSV and JSONL, read and write | `file` endpoint · built in | [File](https://marcomq.github.io/mq-bridge/connectors/file.html) |
 | **Analytics / warehouses**: Snowflake, BigQuery, Databricks / Spark, Athena / Trino, DuckDB **via Parquet on S3/GCS/Azure**. These are not native connectors: mq-bridge writes the Parquet files, the warehouse loads or queries them | `object_store` with `format: parquet` · `parquet` | [Snowflake](https://marcomq.github.io/mq-bridge/cookbook/snowflake.html) · [BigQuery](https://marcomq.github.io/mq-bridge/cookbook/bigquery.html) · [Databricks / Spark](https://marcomq.github.io/mq-bridge/cookbook/databricks.html) · [Athena / Trino](https://marcomq.github.io/mq-bridge/cookbook/athena.html) · [DuckDB](https://marcomq.github.io/mq-bridge/cookbook/duckdb.html) |
 | **HTTP, gRPC, WebSocket** as server or client, including request/reply | `http`, `grpc`, `websocket` endpoints · `http`, `grpc`, `websocket` | [HTTP](https://marcomq.github.io/mq-bridge/connectors/http.html) · [gRPC](https://marcomq.github.io/mq-bridge/connectors/grpc.html) · [Request / reply](https://marcomq.github.io/mq-bridge/tutorials/request-reply.html) |
@@ -115,6 +115,8 @@ Throughput is tracked continuously on the public [benchmark dashboard](https://m
 | :--- | :--- | :--- |
 | CSV → JSONL, 1M mixed-type rows (~116 MiB) | **2,824,858 rows/s**, ~28 MiB RAM | Meltano (`tap-csv` → `target-jsonl`): ~19,500 rows/s, ~444 MiB RAM — **~145x slower**<br>DuckDB, all cores: 2,036,659 rows/s — mq-bridge **~1.4x faster**, ~17x less memory |
 | Kafka → file, 1M rows, no transform | **~65% faster** than Sea Streamer | Sea Streamer, both on mimalloc (~80% faster vs. its default-allocator build) |
+
+The CSV row reuses an existing, independently published 1M-row CSV → JSONL workload, on a byte-identical fixture: 7 mixed-type columns, seed 42, 121,981,421 bytes, SHA-256 `a84894e0…0c45b221` ([full definition](apps/mq-bridge-app/benches/etl/README.md#6--csv--jsonl-vs-meltano)). Whole-process wall-clock, no transformation, Meltano run on the same machine and file.
 
 CSV figures: mq-bridge 0.4.12. DuckDB is a throughput ceiling for the conversion itself, not an ETL tool. Methodology and reporting rules are in [`benches/ETL_BENCHMARKS.md`](benches/ETL_BENCHMARKS.md); the raw numbers, baselines and reproducible helpers are in the [ETL benchmark harness](apps/mq-bridge-app/benches/etl/README.md).
 
@@ -170,17 +172,12 @@ tuning use the same settings in both.
 
 ## Status
 
-`mq-bridge` is young (created in 2025), but its reliability behavior is exercised by an automated integration and performance suite across **every** supported endpoint, in each of the queue and subscriber modes that endpoint supports:
+`mq-bridge` was created in 2025. Its reliability behavior is exercised by an automated integration and performance suite across supported endpoints, in each of the queue and subscriber modes that endpoint supports:
 
 *   All endpoints showed **no data loss during in-flight broker restarts**; MQTT publish confirmation was hardened until a chaos test drove in-flight loss to **zero**.
 *   Postgres CDC has a **restart-safety test**: an un-acked, in-flight batch is redelivered after a database restart with no loss and no gap.
 
-Known rough edges:
-
-- old or very new broker-server versions, or unusual broker settings
-- subscribe/event and response patterns where the backend has no native equivalent (emulated); MongoDB request/reply is only covered by automated tests so far
-- NATS without JetStream (integration tests run with JetStream only)
-- **TLS**: one `TlsConfig` shape is shared by all transports and covered by automated tests, but per-backend certificate matrices are still being expanded, so verify non-trivial TLS setups yourself
+It is used as rust library in [armature](https://github.com/quinnjr/armature) and as python lib in [omniload](https://github.com/panodata/omniload). 
 
 ## Running Tests
 The project includes integration and performance tests. Most backend tests require Docker.
