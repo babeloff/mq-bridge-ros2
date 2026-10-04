@@ -2160,6 +2160,64 @@ async fn auto_columns_collects_unmapped_fields_in_the_extra_column() {
 }
 
 #[tokio::test]
+async fn auto_columns_prefers_the_exact_name_and_merges_into_a_filled_extra_column() {
+    let (_dir, url) = setup_db_file().await;
+    let pool = AnyPool::connect(&url).await.unwrap();
+    sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, qty INTEGER, extra TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let config = SqlxConfig {
+        url,
+        table: "t".to_string(),
+        columns: Some(crate::models::SqlColumns::Auto),
+        extra_column: Some("extra".to_string()),
+        ..Default::default()
+    };
+    let publisher = SqlxPublisher::new(&config).await.unwrap();
+    let sent = publisher
+        .send_batch(vec![
+            json_message(r#"{"id":1,"NAME":"loose","name":"exact"}"#),
+            json_message(r#"{"id":2,"name":"exact","Name":"loose"}"#),
+            json_message(r#"{"id":3,"extra":{"a":1,"color":"own"},"color":"red","size":2}"#),
+            json_message(r#"{"id":4,"name":"nul","note":"a\u0000b"}"#),
+            json_message(r#"{"id":5,"extra":"{\"a\":1}","size":2}"#),
+            json_message(r#"{"id":6,"extra":null,"size":2}"#),
+        ])
+        .await
+        .unwrap();
+    let SentBatch::Partial { failed, .. } = sent else {
+        panic!("the record with a NUL in a collected field is rejected");
+    };
+    assert_eq!(failed.len(), 1);
+    assert_eq!(
+        auto_rows(&pool).await,
+        vec![
+            (
+                1,
+                Some("exact".to_string()),
+                None,
+                Some(r#"{"NAME":"loose"}"#.to_string())
+            ),
+            (
+                2,
+                Some("exact".to_string()),
+                None,
+                Some(r#"{"Name":"loose"}"#.to_string())
+            ),
+            (
+                3,
+                None,
+                None,
+                Some(r#"{"a":1,"color":"own","size":2}"#.to_string())
+            ),
+            (5, None, None, Some(r#"{"a":1,"size":2}"#.to_string())),
+            (6, None, None, Some(r#"{"size":2}"#.to_string())),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn auto_columns_fails_only_the_record_it_cannot_map() {
     let (_dir, pool, publisher) = auto_columns_publisher(None).await;
     let sent = publisher

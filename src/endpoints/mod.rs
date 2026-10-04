@@ -981,6 +981,20 @@ fn source_position_unavailable(route_name: &str) -> anyhow::Error {
 /// guards [`create_consumer_from_route_with_source_metadata`]; running it first keeps a route
 /// that is about to be rejected from opening the sink, which for `file` would create the part
 /// directory at `path`.
+/// Whether two paths name one file, through a symlink or a hard link too.
+fn is_same_file(a: &str, b: &str) -> bool {
+    let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+    if canonical(a) == canonical(b) {
+        return true;
+    }
+    #[cfg(unix)]
+    if let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+        use std::os::unix::fs::MetadataExt;
+        return a.dev() == b.dev() && a.ino() == b.ino();
+    }
+    false
+}
+
 /// A `file` route that reads the path it writes would feed itself.
 pub(crate) fn check_distinct_files(
     route_name: &str,
@@ -988,19 +1002,18 @@ pub(crate) fn check_distinct_files(
     output: &Endpoint,
 ) -> Result<()> {
     // An endpoint that does not resolve is reported where it is built.
-    let (Ok(input), Ok(output)) = (
-        resolve_endpoint(input, route_name),
-        resolve_endpoint(output, route_name),
-    ) else {
+    let Ok(input) = resolve_endpoint(input, route_name) else {
         return Ok(());
     };
-    let (EndpointType::File(source), EndpointType::File(sink)) =
-        (&input.endpoint_type, &output.endpoint_type)
-    else {
+    let EndpointType::File(source) = &input.endpoint_type else {
         return Ok(());
     };
-    let canonical = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
-    if canonical(&source.path) == canonical(&sink.path) {
+    let writes_source = output_has_sink(
+        route_name,
+        output,
+        &|sink| matches!(sink, EndpointType::File(sink) if is_same_file(&source.path, &sink.path)),
+    );
+    if matches!(writes_source, Ok(true)) {
         return Err(crate::errors::InvalidConfig(anyhow!(
             "route '{route_name}': the file source and sink are the same path '{}'; the route would read its own output",
             source.path
@@ -3132,6 +3145,29 @@ mod tests {
             endpoint.middlewares[1],
             Middleware::Deduplication(_)
         ));
+    }
+
+    #[test]
+    fn a_file_route_may_not_write_the_file_it_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("in.jsonl");
+        std::fs::write(&source, "{}\n").unwrap();
+        let file = |path: &std::path::Path| serde_json::json!({ "file": { "path": path } });
+        let check = |output: serde_json::Value| {
+            let input: Endpoint = serde_json::from_value(file(&source)).unwrap();
+            let output: Endpoint = serde_json::from_value(output).unwrap();
+            check_distinct_files("r", &input, &output)
+        };
+        let other = dir.path().join("out.jsonl");
+        assert!(check(file(&other)).is_ok());
+        assert!(check(file(&source)).is_err());
+        assert!(check(serde_json::json!({ "fanout": [file(&other), file(&source)] })).is_err());
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.jsonl");
+            std::fs::hard_link(&source, &link).unwrap();
+            assert!(check(file(&link)).is_err());
+        }
     }
 
     #[test]

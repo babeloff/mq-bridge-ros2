@@ -170,17 +170,12 @@ tuning use the same settings in both.
 
 ## Status
 
-`mq-bridge` is young (created in 2025), but its reliability behavior is exercised by an automated integration and performance suite across **every** supported endpoint, in each of the queue and subscriber modes that endpoint supports:
+`mq-bridge` was created in 2025. Its reliability behavior is exercised by an automated integration and performance suite across **every** supported endpoint, in each of the queue and subscriber modes that endpoint supports:
 
 *   All endpoints showed **no data loss during in-flight broker restarts**; MQTT publish confirmation was hardened until a chaos test drove in-flight loss to **zero**.
 *   Postgres CDC has a **restart-safety test**: an un-acked, in-flight batch is redelivered after a database restart with no loss and no gap.
 
-Known rough edges:
-
-- old or very new broker-server versions, or unusual broker settings
-- subscribe/event and response patterns where the backend has no native equivalent (emulated); MongoDB request/reply is only covered by automated tests so far
-- NATS without JetStream (integration tests run with JetStream only)
-- **TLS**: one `TlsConfig` shape is shared by all transports and covered by automated tests, but per-backend certificate matrices are still being expanded, so verify non-trivial TLS setups yourself
+It is used as rust library in [armature](https://github.com/quinnjr/armature) and as python lib in [omniload](https://github.com/panodata/omniload). 
 
 ## Running Tests
 The project includes integration and performance tests. Most backend tests require Docker.

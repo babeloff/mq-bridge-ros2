@@ -1272,6 +1272,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
         // again. The tally is registered globally, so a later attempt keeps adding
         // to the same counter rather than starting over.
         if copied.load(std::sync::atomic::Ordering::Relaxed) == 0
+            && matches!(outcome, Some(RouteOutcome::Completed))
+            && handle.status().error.is_none()
             && wait_until.is_some_and(|deadline| std::time::Instant::now() < deadline)
         {
             drop(copy_status);

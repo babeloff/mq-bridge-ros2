@@ -129,6 +129,12 @@ mixes JSON into its cells. The second is a behaviour change, listed below.
   binds NULL each warn once. The WebSocket "falling back to routed mode" line is now DEBUG and
   the MQTT note on restart loss INFO.
 
+### Fixed
+
+- **`mqb copy --wait` reports a failed route at once.** A route that failed before it delivered
+  anything was retried until the wait ran out, and a later empty attempt could then report
+  success. `--wait` now retries only a drain that ended cleanly with nothing to copy.
+
 ## 0.4.18
 
 A new generic output for search engines, plus documentation and packaging work. This release

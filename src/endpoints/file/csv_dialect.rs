@@ -140,6 +140,10 @@ impl CsvDialect {
     }
 
     /// Whether a sink appending to a file takes its columns from the header already there.
+    #[cfg_attr(
+        not(any(feature = "compression", feature = "encryption")),
+        allow(dead_code)
+    )]
     pub(crate) fn reads_header_back(&self) -> bool {
         self.header && self.columns.is_none()
     }
@@ -173,13 +177,20 @@ impl CsvDialect {
 fn guess_separator(record: &[u8], quote: Option<u8>) -> u8 {
     let mut counts = [0usize; AUTO_CANDIDATES.len()];
     let mut in_quotes = false;
+    // A quote opens a section at the start of a field, or right after one closed (`""`).
+    let mut may_open = true;
     for &byte in record {
         if Some(byte) == quote {
-            in_quotes = !in_quotes;
+            in_quotes = if in_quotes { false } else { may_open };
+            may_open = !in_quotes;
         } else if !in_quotes {
-            if let Some(i) = AUTO_CANDIDATES.iter().position(|&c| c == byte) {
-                counts[i] += 1;
-            }
+            may_open = AUTO_CANDIDATES
+                .iter()
+                .position(|&c| c == byte)
+                .is_some_and(|i| {
+                    counts[i] += 1;
+                    true
+                });
         }
     }
     let mut best = 0;
@@ -288,6 +299,8 @@ mod tests {
             ("id\tname\tcity\n", b'\t'),
             ("id|name\n", b'|'),
             ("\"a;b;c\",d,e\n", b','),
+            ("a\"b;c;d\n", b';'),
+            ("\"a \"\" , ,\";b;c\n", b';'),
             ("single\n", b','),
         ] {
             let auto = dialect("auto", None).unwrap();

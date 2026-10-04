@@ -154,22 +154,25 @@ With `columns: auto` the sink reads the table's columns at start and builds the 
 record. It works on PostgreSQL, MySQL/MariaDB and SQLite.
 
 - **Matching.** A field goes into the column with the same name; if there is none, a name that
-  differs only in case matches (`ID` → `id`). Fields without a column are not written, and the
+  differs only in case matches (`ID` → `id`). When a record has both spellings, the exact
+  one is written and the other counts as a field without a column. Fields without a column are not written, and the
   first one is logged as a warning.
 - **`extra_column`.** Names a column that takes those fields instead, as one JSON object:
   with `extra_column=extra`, `{"id":1,"color":"red"}` writes `id = 1` and
-  `extra = {"color":"red"}`. A record with no such field leaves the column out. An upsert
-  replaces the stored object; it does not merge into it.
+  `extra = {"color":"red"}`. A record with no such field leaves the column out. When a
+  record fills the column itself with an object (or with JSON text holding one, as a SQL
+  source delivers it), the collected fields are added to it and its own keys win. An upsert replaces the stored object; it does not merge into it.
 - **Missing fields.** A column a record does not name is left out of the statement: on insert it
   gets its default, on update it keeps its value. An explicit `null` writes `NULL`.
 - **Types.** On PostgreSQL every value is cast to the column's type, so a `numeric`,
   `timestamptz`, `uuid`, `jsonb` or enum column accepts the text a SQL source or a CSV file
-  delivers, and a JSON array goes into an array column. A nested object or array is written as
+  delivers, a JSON array goes into an array column, and `0`/`1` go into a `boolean`. A nested object or array is written as
   JSON text. A value the column cannot take fails the batch with the database's message.
 - **`key`.** Generates `ON CONFLICT (key) DO UPDATE` (PostgreSQL, SQLite) or
   `ON DUPLICATE KEY UPDATE` (MySQL/MariaDB). When one batch has several records with the same
   key, the last one wins.
-- **`bulk_copy`** (PostgreSQL) works with `columns: auto`, but not together with `key`.
+- **`bulk_copy`** (PostgreSQL) works with `columns: auto`, but not together with `key`. A batch
+  whose records name different columns is written in one transaction.
 - **A record that cannot be mapped** — not a JSON object, or no field is a column — is rejected
   alone; the rest of the batch is written.
 

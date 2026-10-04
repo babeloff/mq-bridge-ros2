@@ -568,7 +568,8 @@ impl Entry {
         let Fold::Fields { width, clock, .. } = &self.fold else {
             return Stored::parse(json);
         };
-        let mut slots: Vec<f64> = serde_json::from_str(json).unwrap_or_default();
+        let mut slots: Vec<f64> = serde_json::from_str(json)
+            .context("aggregate: a stored `fields` state is not a list of numbers")?;
         // A state stored before `time` was set has no clock yet.
         if clock.is_some() && slots.len() + 1 == *width {
             slots.push(0.0);

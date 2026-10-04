@@ -11,7 +11,7 @@ use crate::outcomes::SentBatch;
 use crate::traits::PublisherError;
 use crate::CanonicalMessage;
 use anyhow::anyhow;
-use sqlx::postgres::PgPool;
+use sqlx::postgres::{PgPool, PgPoolCopyExt};
 use sqlx::{AnyPool, Row};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,8 @@ struct TableColumn {
     cast: Option<String>,
     /// PostgreSQL array column: a JSON array is written as an array literal.
     array: bool,
+    /// PostgreSQL `boolean`: has no cast from a number, so 0 and 1 are written as false and true.
+    boolean: bool,
 }
 
 /// One record as the columns it names, in table order, and their values.
@@ -78,10 +80,11 @@ fn json_bind(value: serde_json::Value) -> BindValue {
         serde_json::Value::Null => BindValue::Null,
         serde_json::Value::Bool(b) => BindValue::Bool(b),
         serde_json::Value::String(s) => BindValue::Text(s),
+        // An integer beyond i64 goes as text: a float would round it.
         serde_json::Value::Number(n) => match (n.as_i64(), n.as_f64()) {
             (Some(i), _) => BindValue::Int(i),
-            (None, Some(f)) => BindValue::Float(f),
-            (None, None) => BindValue::Text(n.to_string()),
+            (None, Some(f)) if !n.is_u64() => BindValue::Float(f),
+            _ => BindValue::Text(n.to_string()),
         },
         nested => BindValue::Text(nested.to_string()),
     }
@@ -184,6 +187,7 @@ impl AutoColumns {
                 ident: quote_ident_for(driver_name, &name),
                 name,
                 array: cast.as_ref().is_some_and(|c| c.ends_with("[]")),
+                boolean: cast.as_deref() == Some("boolean"),
                 cast,
             });
         }
@@ -225,14 +229,16 @@ impl AutoColumns {
             match index {
                 Some(index) if option == "key" => key.push(*index),
                 Some(index) => extra = Some(*index),
-                None => return Err(invalid(format!(
+                None => {
+                    return Err(invalid(format!(
                     "`{option}` column '{name}' is not a column of table '{table}' (columns: {})",
                     columns
                         .iter()
                         .map(|c| c.name.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
-                ))),
+                )))
+                }
             }
         }
 
@@ -270,7 +276,23 @@ impl AutoColumns {
         names.join(", ")
     }
 
-    /// The record's fields as column values; fields that are no column are left out.
+    fn column_value(&self, index: usize, value: serde_json::Value) -> BindValue {
+        let column = &self.columns[index];
+        match value {
+            serde_json::Value::Array(items) if column.array => {
+                let mut literal = String::new();
+                pg_array_literal(&items, &mut literal);
+                BindValue::Text(literal)
+            }
+            other => match json_bind(other) {
+                BindValue::Int(n @ (0 | 1)) if column.boolean => BindValue::Bool(n == 1),
+                bound => bound,
+            },
+        }
+    }
+
+    /// The record's fields as column values. A field without a column goes into
+    /// `extra_column`, or is left out.
     fn row(&self, message: &CanonicalMessage) -> Result<AutoRow, PublisherError> {
         let fields = match serde_json::from_slice(&message.payload) {
             Ok(serde_json::Value::Object(fields)) => fields,
@@ -280,63 +302,95 @@ impl AutoColumns {
                 )))
             }
         };
-        let mut cells: Vec<(usize, BindValue)> = Vec::with_capacity(fields.len());
-        let mut unknown = Vec::new();
-        let mut extra = serde_json::Map::new();
+        // Per column: the value, and the field name when it matched only by case.
+        let mut cells: Vec<(usize, serde_json::Value, Option<String>)> =
+            Vec::with_capacity(fields.len());
+        let mut unmapped = serde_json::Map::new();
         for (field, value) in fields {
-            let index = self
-                .by_name
-                .get(&field)
-                .or_else(|| self.by_lower_name.get(&field.to_lowercase()));
-            let Some(&index) = index else {
-                match self.extra {
-                    Some(_) => drop(extra.insert(field, value)),
-                    None => unknown.push(field),
-                }
+            let exact = self.by_name.get(&field);
+            let Some(&index) = exact.or_else(|| self.by_lower_name.get(&field.to_lowercase()))
+            else {
+                unmapped.insert(field, value);
                 continue;
             };
-            let value = match value {
-                serde_json::Value::Array(items) if self.columns[index].array => {
-                    let mut literal = String::new();
-                    pg_array_literal(&items, &mut literal);
-                    BindValue::Text(literal)
-                }
-                other => json_bind(other),
-            };
-            if matches!(&value, BindValue::Text(s) if s.contains('\0')) {
-                return Err(PublisherError::NonRetryable(anyhow!(
-                    "field '{field}' contains an embedded NUL byte, which a SQL text column cannot store"
-                )));
-            }
-            match cells.iter_mut().find(|(i, _)| *i == index) {
-                Some(cell) => cell.1 = value,
-                None => cells.push((index, value)),
+            let loose = exact.is_none().then_some(field);
+            match cells.iter_mut().find(|(i, ..)| *i == index) {
+                None => cells.push((index, value, loose)),
+                // The field with the column's exact name wins; the other one has no column.
+                Some(cell) => match (loose, cell.2.take()) {
+                    (None, Some(displaced)) => {
+                        unmapped.insert(displaced, std::mem::replace(&mut cell.1, value));
+                    }
+                    (Some(field), earlier) => {
+                        cell.2 = earlier;
+                        unmapped.insert(field, value);
+                    }
+                    (None, None) => cell.1 = value,
+                },
             }
         }
-        if let (Some(index), false) = (self.extra, extra.is_empty()) {
-            let value = BindValue::Text(serde_json::Value::Object(extra).to_string());
-            match cells.iter_mut().find(|(i, _)| *i == index) {
-                Some(cell) => cell.1 = value,
-                None => cells.push((index, value)),
+
+        if let (Some(index), false) = (self.extra, unmapped.is_empty()) {
+            match cells.iter_mut().find(|(i, ..)| *i == index) {
+                None => {
+                    let collected = serde_json::Value::Object(std::mem::take(&mut unmapped));
+                    cells.push((index, collected, None));
+                }
+                // The record fills the column itself: its own keys win over collected ones.
+                Some((_, own, _)) => {
+                    // A SQL source delivers a JSON column as text.
+                    if let Some(parsed) = own.as_str().and_then(|s| serde_json::from_str(s).ok()) {
+                        *own = parsed;
+                    }
+                    match own {
+                        serde_json::Value::Object(own) => {
+                            for (field, value) in std::mem::take(&mut unmapped) {
+                                own.entry(field).or_insert(value);
+                            }
+                        }
+                        serde_json::Value::Null => {
+                            *own = serde_json::Value::Object(std::mem::take(&mut unmapped))
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
         if cells.is_empty() {
+            let fields: Vec<&str> = unmapped.keys().map(String::as_str).collect();
             return Err(PublisherError::NonRetryable(anyhow!(
                 "no field of the record ({}) is a column of table '{}' (columns: {})",
-                unknown.join(", "),
+                fields.join(", "),
                 self.table,
                 self.column_names()
             )));
         }
-        if !unknown.is_empty() && !self.warned_unknown.swap(true, Ordering::Relaxed) {
+        if !unmapped.is_empty() && !self.warned_unknown.swap(true, Ordering::Relaxed) {
+            let fields: Vec<&str> = unmapped.keys().map(String::as_str).collect();
             warn!(
                 table = %self.table,
                 "Fields without a column of the same name are not written: {}. Further occurrences are not logged.",
-                unknown.join(", ")
+                fields.join(", ")
             );
         }
-        cells.sort_by_key(|(index, _)| *index);
-        let (columns, values) = cells.into_iter().unzip();
+
+        cells.sort_by_key(|(index, ..)| *index);
+        let mut columns = Vec::with_capacity(cells.len());
+        let mut values = Vec::with_capacity(cells.len());
+        for (index, value, _) in cells {
+            let nested = value.is_object() || value.is_array();
+            let value = self.column_value(index, value);
+            // A nested value is JSON text, where the NUL is the escape `\u0000`.
+            if matches!(&value, BindValue::Text(s) if s.contains('\0') || (nested && s.contains("\\u0000")))
+            {
+                return Err(PublisherError::NonRetryable(anyhow!(
+                    "field '{}' contains a NUL character, which a SQL text or JSON column cannot store",
+                    self.columns[index].name
+                )));
+            }
+            columns.push(index);
+            values.push(value);
+        }
         Ok(AutoRow { columns, values })
     }
 
@@ -461,8 +515,10 @@ impl AutoColumns {
             }
         }
         let statements = self.statements(rows);
+        let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
 
         if let Some(copy_pool) = &self.copy_pool {
+            let mut copies = Vec::with_capacity(statements.len());
             for (columns, run) in statements {
                 let stmt = format!(
                     "COPY {} ({}) FROM STDIN WITH (FORMAT text)",
@@ -479,12 +535,27 @@ impl AutoColumns {
                     }
                     buf.push('\n');
                 }
-                copy_in(copy_pool, &stmt, buf.as_bytes()).await?;
+                copies.push((stmt, buf));
+            }
+            match copies.as_slice() {
+                [] => {}
+                [(stmt, buf)] => {
+                    let copier = copy_pool.copy_in_raw(stmt).await;
+                    copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
+                }
+                // Records of several shapes: one transaction, so a retry cannot write some twice.
+                _ => {
+                    let mut tx = copy_pool.begin().await.map_err(retryable)?;
+                    for (stmt, buf) in &copies {
+                        let copier = tx.copy_in_raw(stmt).await;
+                        copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
+                    }
+                    tx.commit().await.map_err(retryable)?;
+                }
             }
             return Ok(SentBatch::from_failures(failed));
         }
 
-        let retryable = |e: sqlx::Error| PublisherError::Retryable(anyhow!(e));
         // One statement is atomic by itself; several need a transaction.
         let mut tx = match statements.len() {
             0 | 1 => None,
@@ -493,7 +564,9 @@ impl AutoColumns {
         for (columns, run) in statements {
             let run = self.last_per_key(run);
             let sql = self.insert_sql(&columns, run.len());
-            let mut query = sqlx::query(audited_sql(&sql));
+            // Not cached on Postgres: a statement keeps the bind types of its first record.
+            let mut query =
+                sqlx::query(audited_sql(&sql)).persistent(self.driver_name != "PostgreSQL");
             for value in run.into_iter().flat_map(|row| row.values) {
                 query = bind_value(query, value);
             }

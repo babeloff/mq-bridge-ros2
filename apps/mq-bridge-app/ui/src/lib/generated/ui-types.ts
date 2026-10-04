@@ -662,6 +662,9 @@ export interface SqlxConfig {
   cursor_column?: string | null;
   cursor_id?: string | null;
   checkpoint_store?: string | null;
+  columns?: SqlColumns | null;
+  key?: string | null;
+  extra_column?: string | null;
   auto_create_table?: boolean;
   bulk_copy?: boolean;
   polling_interval_ms?: number | null;
@@ -670,6 +673,7 @@ export interface SqlxConfig {
   slot_name?: string | null;
   create_publication?: boolean;
   source_metadata?: boolean;
+  timestamps?: SqlTimestamps;
   tls?: TlsConfig;
   max_connections?: number | null;
   min_connections?: number | null;
@@ -679,6 +683,10 @@ export interface SqlxConfig {
   test_before_acquire?: boolean | null;
   shared?: boolean | null;
 }
+
+export type SqlColumns = "auto";
+
+export type SqlTimestamps = "text" | "rfc3339";
 
 export interface ClickHouseConfig {
   url: string;

@@ -21,8 +21,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{info, trace, warn};
 
-#[cfg(feature = "dedup")]
 mod columns;
+#[cfg(feature = "dedup")]
 mod dedup;
 #[cfg(feature = "dedup")]
 pub(crate) use dedup::build_sql_dedup_store;
@@ -471,7 +471,10 @@ async fn create_sqlx_pool(config: &SqlxConfig) -> anyhow::Result<AnyPool> {
     // attempt first reports why the server cannot be reached.
     if !url.starts_with("sqlite") {
         use sqlx::Connection;
-        let probe = sqlx::AnyConnection::connect(&url).await?;
+        let limit = Duration::from_millis(config.acquire_timeout_ms.unwrap_or(30_000));
+        let probe = tokio::time::timeout(limit, sqlx::AnyConnection::connect(&url))
+            .await
+            .map_err(|_| anyhow!("connecting to the database timed out after {limit:?}"))??;
         probe.close().await.ok();
     }
 
@@ -769,9 +772,14 @@ fn push_copy_value(buf: &mut String, value: BindValue) {
     }
 }
 
-/// Runs one `COPY … FROM STDIN` with `buf` as its data.
-async fn copy_in(pool: &PgPool, stmt: &str, buf: &[u8]) -> Result<(), PublisherError> {
-    let mut copier = pool.copy_in_raw(stmt).await.map_err(classify_sql_error)?;
+/// Sends `buf` as the data of a started `COPY … FROM STDIN` and ends it.
+async fn copy_in<C>(
+    mut copier: sqlx::postgres::PgCopyIn<C>,
+    buf: &[u8],
+) -> Result<(), PublisherError>
+where
+    C: std::ops::DerefMut<Target = sqlx::PgConnection>,
+{
     if let Err(e) = copier.send(buf).await {
         // Tear the COPY down explicitly. `Drop` only buffers a CopyFail without
         // awaiting the reply, so the connection could go back to the pool still in
@@ -1823,7 +1831,8 @@ impl SqlxPublisher {
             buf.push('\n');
         }
 
-        copy_in(&sink.pool, &stmt, buf.as_bytes()).await?;
+        let copier = sink.pool.copy_in_raw(&stmt).await;
+        copy_in(copier.map_err(classify_sql_error)?, buf.as_bytes()).await?;
 
         trace!(count = messages.len(), table = %sink.table, "Bulk-copied batch to PostgreSQL");
         Ok(SentBatch::Ack)

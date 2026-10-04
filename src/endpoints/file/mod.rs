@@ -386,6 +386,7 @@ fn csv_encode_message(
 
 /// Appends `msg` as one CSV record to `out`, after the header record when this row
 /// establishes the columns. For sinks whose every output starts a CSV file of its own.
+#[cfg_attr(not(feature = "object-store"), allow(dead_code))]
 pub(crate) fn csv_append_record(
     out: &mut Vec<u8>,
     msg: &CanonicalMessage,
