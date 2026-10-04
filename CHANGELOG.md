@@ -134,6 +134,10 @@ mixes JSON into its cells. The second is a behaviour change, listed below.
 - **`mqb copy --wait` reports a failed route at once.** A route that failed before it delivered
   anything was retried until the wait ran out, and a later empty attempt could then report
   success. `--wait` now retries only a drain that ended cleanly with nothing to copy.
+- **`aggregate` with a shared `store` no longer keeps the state of a message it rejects.** A
+  message whose result had no place in the payload (`into: a.b` where `a` is not an object) was
+  counted in the store and then failed, so under `on_error: fail` every redelivery counted it
+  again. It now fails before any state changes, as it already did without a shared store.
 
 ## 0.4.18
 

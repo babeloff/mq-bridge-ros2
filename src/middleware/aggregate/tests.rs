@@ -473,6 +473,28 @@ async fn two_instances_on_one_store_lose_no_update() {
 }
 
 #[tokio::test]
+async fn a_shared_store_keeps_no_state_of_a_message_whose_output_has_no_place() {
+    let memory = std::sync::Arc::new(store::MemoryStateStore::default());
+    let mut agg = aggregate(&format!(
+        "{{ on_error: fail, consistency: single_writer, key: '${{payload:card}}', \
+         into: features.stats, expression: '{SUM}' }}"
+    ));
+    agg.store = Some(memory.clone());
+    // `features` is a number in the first message, so `features.stats` cannot be set.
+    let batch = vec![
+        msg(json!({"card": "a", "amount": 1, "features": 5})),
+        msg(json!({"card": "a", "amount": 1})),
+    ];
+    let (out, _) = agg.fold_batch(batch).await.unwrap();
+    assert!(out[0].is_err());
+    let second: Value = serde_json::from_slice(&out[1].as_ref().ok().unwrap().payload).unwrap();
+    assert_eq!(second["features"]["stats"]["n"], json!(1));
+    let rows = memory.rows.lock().unwrap();
+    let state: Value = serde_json::from_str(&rows["features.stats:a"].0).unwrap();
+    assert_eq!(state["n"], json!(1), "a redelivery would count it again");
+}
+
+#[tokio::test]
 async fn a_store_failure_folds_nothing_and_nacks_the_batch() {
     let memory = std::sync::Arc::new(store::MemoryStateStore::default());
     memory

@@ -181,8 +181,12 @@ fn guess_separator(record: &[u8], quote: Option<u8>) -> u8 {
     let mut may_open = true;
     for &byte in record {
         if Some(byte) == quote {
-            in_quotes = if in_quotes { false } else { may_open };
-            may_open = !in_quotes;
+            // A quote inside an unquoted field is literal and opens nothing after it.
+            (in_quotes, may_open) = if in_quotes {
+                (false, true)
+            } else {
+                (may_open, false)
+            };
         } else if !in_quotes {
             may_open = AUTO_CANDIDATES
                 .iter()
@@ -300,6 +304,7 @@ mod tests {
             ("id|name\n", b'|'),
             ("\"a;b;c\",d,e\n", b','),
             ("a\"b;c;d\n", b';'),
+            ("a\"\"b;c;d\n", b';'),
             ("\"a \"\" , ,\";b;c\n", b';'),
             ("single\n", b','),
         ] {

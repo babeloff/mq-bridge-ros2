@@ -1100,12 +1100,22 @@ impl Aggregate {
             }
             match self.compute(msg, states, &mut vm, only) {
                 Ok(updates) => {
+                    let mut changed = Vec::with_capacity(updates.len());
                     for (i, key, next, json, late) in updates {
-                        if !self.read_only {
+                        emitted[i] = Some((json, late));
+                        changed.push((i, key, next));
+                    }
+                    // The states are stored before the payload is written, so an output
+                    // that has no place in the payload fails here and changes no state.
+                    if let Err(e) = self.payload(msg, emitted.clone()) {
+                        *slot = Err(e);
+                        continue;
+                    }
+                    if !self.read_only {
+                        for (i, key, next) in changed {
                             touched[i].insert(key.clone());
                             states[i].insert(key, next);
                         }
-                        emitted[i] = Some((json, late));
                     }
                 }
                 Err(e) => *slot = Err(e),

@@ -116,6 +116,8 @@ Throughput is tracked continuously on the public [benchmark dashboard](https://m
 | CSV → JSONL, 1M mixed-type rows (~116 MiB) | **2,824,858 rows/s**, ~28 MiB RAM | Meltano (`tap-csv` → `target-jsonl`): ~19,500 rows/s, ~444 MiB RAM — **~145x slower**<br>DuckDB, all cores: 2,036,659 rows/s — mq-bridge **~1.4x faster**, ~17x less memory |
 | Kafka → file, 1M rows, no transform | **~65% faster** than Sea Streamer | Sea Streamer, both on mimalloc (~80% faster vs. its default-allocator build) |
 
+The CSV row reuses an existing, independently published 1M-row CSV → JSONL workload, on a byte-identical fixture: 7 mixed-type columns, seed 42, 121,981,421 bytes, SHA-256 `a84894e0…0c45b221` ([full definition](apps/mq-bridge-app/benches/etl/README.md#6--csv--jsonl-vs-meltano)). Whole-process wall-clock, no transformation, Meltano run on the same machine and file.
+
 CSV figures: mq-bridge 0.4.12. DuckDB is a throughput ceiling for the conversion itself, not an ETL tool. Methodology and reporting rules are in [`benches/ETL_BENCHMARKS.md`](benches/ETL_BENCHMARKS.md); the raw numbers, baselines and reproducible helpers are in the [ETL benchmark harness](apps/mq-bridge-app/benches/etl/README.md).
 
 
@@ -170,7 +172,7 @@ tuning use the same settings in both.
 
 ## Status
 
-`mq-bridge` was created in 2025. Its reliability behavior is exercised by an automated integration and performance suite across **every** supported endpoint, in each of the queue and subscriber modes that endpoint supports:
+`mq-bridge` was created in 2025. Its reliability behavior is exercised by an automated integration and performance suite across supported endpoints, in each of the queue and subscriber modes that endpoint supports:
 
 *   All endpoints showed **no data loss during in-flight broker restarts**; MQTT publish confirmation was hardened until a chaos test drove in-flight loss to **zero**.
 *   Postgres CDC has a **restart-safety test**: an un-acked, in-flight batch is redelivered after a database restart with no loss and no gap.
