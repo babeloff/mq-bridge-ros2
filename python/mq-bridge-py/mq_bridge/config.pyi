@@ -27,8 +27,11 @@ class AggregateMiddleware(TypedDict, total=False):
     into: Optional[str]
     key: Optional[str]
     max_keys: Optional[int]
+    on_error: AggregateOnError
     output: Optional[str]
+    read_only: bool
     store: Optional[str]
+    time: Optional[str]
 
 
 class AmqpConfig(TypedDict, total=False):
@@ -104,6 +107,15 @@ class CookieJarMiddleware(TypedDict, total=False):
     max_cookies: int
     set_cookie_metadata_key: str
     shared_scope: Optional[str]
+
+
+class CsvConfig(TypedDict, total=False):
+    """CSV dialect for `format: csv`: field separator, quoting, header and nested values."""
+    columns: List[str]
+    header: Optional[bool]
+    nested: CsvNested
+    quote: Optional[str]
+    separator: Optional[str]
 
 
 class DeadLetterQueueMiddleware(TypedDict, total=False):
@@ -201,6 +213,7 @@ class Endpoint(TypedDict, total=False):
 
 class FileConfig(TypedDict, total=False):
     compression: Compression
+    csv: CsvConfig
     delimiter: Optional[str]
     encryption: Optional[EncryptionConfig]
     format: FileFormat
@@ -590,6 +603,7 @@ class ObjectStoreConfig(TypedDict, total=False):
     """Configuration for a local or cloud object-store endpoint."""
     checkpoint_store: Optional[str]
     compression: Compression
+    csv: CsvConfig
     cursor_id: Optional[str]
     date_partition: Optional[bool]
     date_partition_style: DatePartitionStyle
@@ -833,8 +847,10 @@ class ZeroMqConfig(TypedDict, total=False):
 
 AggregateConsistency = Literal["shared", "single_writer"]
 AggregateEmit = Literal["updated", "previous"]
+AggregateOnError = Literal["drop", "fail", "skip"]
 CipherKind = Literal["xchacha20poly1305", "aes256gcm"]
 Compression = Literal["none", "gzip", "lz4", "zstd"]
+CsvNested = Literal["flatten", "json"]
 DatePartitionStyle = Literal["nested", "hive"]
 DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]

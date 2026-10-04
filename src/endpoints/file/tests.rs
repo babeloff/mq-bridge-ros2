@@ -2260,6 +2260,37 @@ proptest::proptest! {
         );
     }
 
+    /// `separator: auto` settles on what the writer used, whatever the data cells hold.
+    /// Header names are plain: the guess reads only the first record.
+    #[test]
+    fn csv_auto_reads_back_every_candidate_separator(
+        payload in proptest::collection::btree_map("[a-c]{1,4}", csv_cell(), 2..6),
+        separator in proptest::sample::select(vec![",", ";", "tab", "|"]),
+    ) {
+        let written = csv_dialect_of((separator, "\""), "\n").unwrap();
+        let auto = csv_dialect_of(("auto", "\""), "\n").unwrap();
+        let (file, _) = csv_write_then_frame(&payload, b"\n", &written);
+        proptest::prop_assert_eq!(
+            csv_rows(&csv_frame(&file, b"\n", &auto), &auto),
+            vec![payload],
+            "file {:?}", String::from_utf8_lossy(&file)
+        );
+    }
+
+    /// `quote: none` reads and writes quote characters as data.
+    #[test]
+    fn csv_without_quoting_reads_back_unchanged(
+        payload in proptest::collection::btree_map(
+            r#"[a-c"' é世🎉]{0,8}"#, r#"[a-c"' ,;é世🎉]{0,8}"#, 2..6
+        ),
+    ) {
+        let csv = csv_dialect_of(("tab", "none"), "\n").unwrap();
+        let (file, records) = csv_write_then_frame(&payload, b"\n", &csv);
+        proptest::prop_assert_eq!(
+            csv_rows(&records, &csv), vec![payload], "file {:?}", String::from_utf8_lossy(&file)
+        );
+    }
+
     /// An independent RFC 4180 parser reads the writer's output the same way, so files
     /// written by the sink open correctly in standard tools.
     #[test]

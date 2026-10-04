@@ -28,7 +28,8 @@
 
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
 use crate::endpoints::file::{
-    encode_record, parse_delimiter, parse_message, CsvDialect, CsvHeader, CsvQuoteState,
+    csv_append_record, encode_record, parse_delimiter, parse_message, CsvDialect, CsvHeader,
+    CsvQuoteState,
 };
 use crate::models::{Compression, DatePartitionStyle, FileFormat, NameBy, ObjectStoreConfig};
 #[cfg(feature = "encryption")]
@@ -265,6 +266,9 @@ fn split_and_parse(
 struct ObjectBody {
     bytes: Vec<u8>,
     rows: Vec<serde_json::Value>,
+    /// The CSV columns, settled by this object's first row; every object has its own header.
+    csv_columns: Option<Vec<String>>,
+    csv_row: Vec<u8>,
 }
 
 impl ObjectBody {
@@ -273,11 +277,23 @@ impl ObjectBody {
         msg: &CanonicalMessage,
         format: &FileFormat,
         delimiter: &[u8],
+        csv: &CsvDialect,
     ) -> anyhow::Result<()> {
         #[cfg(feature = "parquet")]
         if *format == FileFormat::Parquet {
             self.rows
                 .push(crate::support::parquet::parse_row(&msg.payload)?);
+            return Ok(());
+        }
+        if *format == FileFormat::Csv {
+            csv_append_record(
+                &mut self.bytes,
+                msg,
+                &mut self.csv_columns,
+                &mut self.csv_row,
+                delimiter,
+                csv,
+            )?;
             return Ok(());
         }
         self.bytes
@@ -307,6 +323,7 @@ pub struct ObjectStorePublisher {
     base: ObjPath,
     delimiter: Vec<u8>,
     format: FileFormat,
+    csv: CsvDialect,
     #[cfg(feature = "compression")]
     compression: Compression,
     #[cfg(feature = "encryption")]
@@ -335,17 +352,12 @@ impl ObjectStorePublisher {
         config: &ObjectStoreConfig,
         name_by: NameBy,
     ) -> anyhow::Result<Self> {
-        if matches!(config.format, FileFormat::Csv) {
-            // Each object is independent, so CSV would need its own header row per object.
-            // Not implemented for the sink; sources can still read CSV objects.
-            return Err(anyhow!(
-                "object_store sink does not support the 'csv' format (per-object CSV headers are unimplemented); use jsonl/json/text/raw"
-            ));
-        }
         validate_object_settings(config)?;
         let (store, base) = build_store(&config.url)?;
         let store: Arc<dyn ObjectStore> = Arc::from(store);
         let delimiter = parse_delimiter(config.delimiter.as_deref())?;
+        let csv = CsvDialect::for_format(&config.format, &config.csv, &delimiter)?;
+        csv.check_sink()?;
         let extension = config.extension.clone().unwrap_or_else(|| {
             extension_for(
                 &config.format,
@@ -362,6 +374,7 @@ impl ObjectStorePublisher {
             base,
             delimiter,
             format: config.format.clone(),
+            csv,
             #[cfg(feature = "compression")]
             compression: config.compression,
             #[cfg(feature = "encryption")]
@@ -528,14 +541,14 @@ impl ObjectStorePublisher {
             // the offsets around it are still written, under names covering exactly what went
             // in, and the bad record goes to the DLQ like it would on the write-time path.
             // Encode failures are a property of the record, so a replay splits identically.
-            // Only `parquet` can fail here today, on a payload that is not a JSON object.
+            // Only `parquet` and `csv` can fail here, on a payload that is not a JSON object.
             let mut segment_start = run.start;
             let mut segment_end = None;
             let mut body = ObjectBody::default();
             for (index, mut message) in run.messages.into_iter().enumerate() {
                 let offset = run.start.saturating_add(index as u64);
                 message.strip_source_metadata();
-                match body.push(&message, &self.format, &self.delimiter) {
+                match body.push(&message, &self.format, &self.delimiter, &self.csv) {
                     Ok(()) => {
                         segment_end = Some(offset);
                     }
@@ -640,7 +653,7 @@ impl MessagePublisher for ObjectStorePublisher {
         let mut failed = Vec::new();
         for mut msg in messages {
             msg.strip_source_metadata();
-            if let Err(e) = body.push(&msg, &self.format, &self.delimiter) {
+            if let Err(e) = body.push(&msg, &self.format, &self.delimiter, &self.csv) {
                 failed.push((msg, PublisherError::NonRetryable(e)));
             }
         }
@@ -1290,6 +1303,7 @@ mod tests {
             base: ObjPath::from("data"),
             delimiter: vec![b'\n'],
             format: FileFormat::Normal,
+            csv: CsvDialect::default(),
             #[cfg(feature = "compression")]
             compression: Compression::None,
             #[cfg(feature = "encryption")]
@@ -2271,6 +2285,84 @@ mod tests {
 
         let drained = consumer.receive_batch(10).await.unwrap();
         assert!(drained.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn csv_sink_writes_a_header_into_every_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ObjectStoreConfig {
+            url: format!("file://{}", dir.path().display()),
+            format: FileFormat::Csv,
+            csv: crate::models::CsvConfig {
+                separator: Some(";".to_string()),
+                ..Default::default()
+            },
+            date_partition: Some(false),
+            polling_interval_ms: Some(1),
+            ..Default::default()
+        };
+
+        let publisher = ObjectStorePublisher::new(&config).await.unwrap();
+        let sent = publisher
+            .send_batch(vec![
+                CanonicalMessage::new(br#"{"id":1,"stats":{"n":2,"avg":1.5}}"#.to_vec(), None),
+                CanonicalMessage::new(b"not json".to_vec(), None),
+                CanonicalMessage::new(br#"{"id":2,"stats":{"n":3,"avg":"a;b"}}"#.to_vec(), None),
+            ])
+            .await
+            .unwrap();
+        assert!(matches!(sent, SentBatch::Partial { ref failed, .. } if failed.len() == 1));
+        publisher
+            .send_batch(vec![CanonicalMessage::new(
+                br#"{"other":"x"}"#.to_vec(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        let mut objects: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "csv"))
+            .map(|path| std::fs::read_to_string(path).unwrap())
+            .collect();
+        objects.sort();
+        assert_eq!(
+            objects,
+            ["id;stats.n;stats.avg\n1;2;1.5\n2;3;\"a;b\"\n", "other\nx\n"]
+        );
+
+        let mut consumer = ObjectStoreConsumer::new(&config).await.unwrap();
+        let mut rows = Vec::new();
+        for _ in 0..2 {
+            let batch = consumer.receive_batch(10).await.unwrap();
+            rows.extend(batch.messages.iter().map(|m| m.payload.to_vec()));
+            let acks = vec![MessageDisposition::Ack; batch.messages.len()];
+            (batch.commit)(acks).await.unwrap();
+        }
+        rows.sort();
+        assert_eq!(
+            rows,
+            [
+                br#"{"id":"1","stats.n":"2","stats.avg":"1.5"}"#.to_vec(),
+                br#"{"id":"2","stats.n":"3","stats.avg":"a;b"}"#.to_vec(),
+                br#"{"other":"x"}"#.to_vec(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn csv_sink_cannot_guess_its_separator() {
+        let config = ObjectStoreConfig {
+            url: "memory:///data".to_string(),
+            format: FileFormat::Csv,
+            csv: crate::models::CsvConfig {
+                separator: Some("auto".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(ObjectStorePublisher::new(&config).await.is_err());
     }
 
     #[tokio::test]

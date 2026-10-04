@@ -600,6 +600,15 @@ pub struct AggregateMiddleware {
     /// Further aggregates over other keys, updated by the same message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<AggregateEntry>,
+    /// Payload path of the event time (epoch seconds or milliseconds, or RFC 3339) for `fields`. Defaults to the clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time: Option<String>,
+    /// A message that cannot be folded: `drop` it, `fail` it, or `skip` the affected entries and pass it on.
+    #[serde(default)]
+    pub on_error: AggregateOnError,
+    /// Reads the states of the `store` and never changes them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 /// One aggregate of an `aggregate` middleware.
@@ -635,6 +644,20 @@ pub enum AggregateEmit {
     Updated,
     /// The state before this message; `null` for a key seen for the first time.
     Previous,
+}
+
+/// What an `aggregate` middleware does with a message it cannot fold.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateOnError {
+    /// On an input the message is logged, acked and dropped; on an output it fails.
+    #[default]
+    Drop,
+    /// On an input the message is nacked, so its source sees the failure; on an output it fails.
+    Fail,
+    /// Only the entries that cannot be computed are left out; the message goes on.
+    Skip,
 }
 
 /// How an `aggregate` middleware with a `store` keeps its states consistent.
@@ -1077,14 +1100,18 @@ pub struct SledConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum FileFormat {
-    /// The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text.
+    /// The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text. Also `envelope`.
     #[default]
+    #[serde(alias = "envelope")]
     Normal,
-    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible.
+    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible. Also `envelope_json`; for plain JSON lines use `raw`.
+    #[serde(alias = "envelope_json")]
     Json,
-    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible.
+    /// The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible. Also `envelope_text`.
+    #[serde(alias = "envelope_text")]
     Text,
-    /// The raw payload of the message is written. For consumers, the line is read as raw bytes.
+    /// Only the payload is written, one per line: plain JSON lines for JSON payloads. For consumers, the line is read as raw bytes. Also `payload`.
+    #[serde(alias = "payload")]
     Raw,
     /// CSV rows mapped to/from JSON objects (string values only). The first row is the header/schema.
     Csv,
@@ -1602,7 +1629,7 @@ pub struct ObjectStoreConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idempotency: Option<bool>,
     /// Record encoding within an object, shared with the file endpoint. Defaults to
-    /// `normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.
+    /// `normal` (one JSON `CanonicalMessage` per line). Parquet needs the `parquet` feature.
     #[serde(default)]
     pub format: FileFormat,
     /// CSV dialect (separator, quote, header, columns); only read with `format: csv`.
@@ -1828,9 +1855,13 @@ pub struct AmqpConfig {
 #[serde(rename_all = "lowercase")]
 pub enum MongoDbFormat {
     #[default]
+    #[serde(alias = "envelope")]
     Normal,
+    #[serde(alias = "envelope_json")]
     Json,
+    #[serde(alias = "envelope_text")]
     Text,
+    #[serde(alias = "payload")]
     Raw,
 }
 

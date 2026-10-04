@@ -384,6 +384,34 @@ fn csv_encode_message(
     Ok(established)
 }
 
+/// Appends `msg` as one CSV record to `out`, after the header record when this row
+/// establishes the columns. For sinks whose every output starts a CSV file of its own.
+pub(crate) fn csv_append_record(
+    out: &mut Vec<u8>,
+    msg: &CanonicalMessage,
+    hdr: &mut Option<Vec<String>>,
+    row_buf: &mut Vec<u8>,
+    delimiter: &[u8],
+    csv: &CsvDialect,
+) -> Result<(), serde_json::Error> {
+    if csv_encode_message(msg, hdr, row_buf, delimiter, csv)? && csv.header {
+        let columns = hdr.as_deref().unwrap_or_default();
+        match csv_encode_row(columns, delimiter, csv.syntax()) {
+            Ok(line) => {
+                out.extend_from_slice(&line);
+                out.extend_from_slice(delimiter);
+            }
+            Err(e) => {
+                *hdr = None;
+                return Err(invalid_data(format!("CSV header: {e}")));
+            }
+        }
+    }
+    out.extend_from_slice(row_buf);
+    out.extend_from_slice(delimiter);
+    Ok(())
+}
+
 /// Appends one still-unparsed JSON value as a CSV field. Scalars are copied straight
 /// from the source bytes, so numbers keep their spelling; nested arrays/objects are
 /// written as their own JSON text, keeping the producer's key order.
@@ -592,10 +620,13 @@ impl CsvHeader {
         out.push(b'{');
         let mut pos = 0;
         let mut has_more = true;
+        let mut missing = 0usize;
         for prefix in &self.prefixes {
             out.extend_from_slice(prefix);
             if has_more {
                 has_more = emit_csv_field(&mut out, bytes, &mut pos, self.syntax);
+            } else {
+                missing += 1;
             }
             out.push(b'"');
         }
@@ -603,8 +634,26 @@ impl CsvHeader {
 
         if has_more {
             self.warn_extra_fields(bytes, pos);
+        } else if missing > 0 {
+            self.warn_missing_fields(missing);
         }
         out
+    }
+
+    /// A short row usually means the separator or the header is not what the file uses.
+    #[cold]
+    fn warn_missing_fields(&self, missing: usize) {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        const MSG: &str = "CSV row has fewer fields than the header has \
+                           columns; the missing ones are read as empty. Check \
+                           `csv.separator`. Further occurrences are logged at debug level.";
+        let columns = self.prefixes.len();
+        let separator = (self.syntax.separator as char).escape_default().to_string();
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            warn!(columns, missing, separator, "{MSG}");
+        } else {
+            tracing::debug!(columns, missing, separator, "{MSG}");
+        }
     }
 
     /// Extra fields have no column to land in, so they are dropped. Say so once: the row

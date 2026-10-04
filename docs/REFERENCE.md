@@ -700,10 +700,12 @@ stream. File compression/encryption supports only the default `consume` mode. `c
 too: the header row is written into the first member, so the decoded stream is a normal CSV
 file.
 
-A `csv` sink takes its columns from the first row it writes, in that row's field order.
+A `csv` sink takes its columns from the first row it writes, in that row's field order. An
+`object_store` sink writes each batch as a CSV file of its own, with its own header taken from
+that batch's first row; set `columns` when every object must have the same ones.
 
 `csv` on its own means comma-separated, `"`-quoted, with a header record. The `csv` block
-describes any other dialect, for the `file` endpoint and for an `object_store` source:
+describes any other dialect, for the `file` and `object_store` endpoints:
 
 ```yaml endpoint
 input:
@@ -731,6 +733,10 @@ semicolon locale is `separator: ";"` (the byte-order mark and CRLF are handled a
 `mongoexport --type=tsv` and `psql -A -F $'\t'` are `separator: tab`, and `psql --csv` and
 `COPY … WITH (FORMAT csv)` are the default. PostgreSQL's `COPY` *text* format (backslash
 escapes, `\N`) and UTF-16 files are not CSV dialects and are not read.
+
+A row with more fields than the header drops the extras, and one with fewer reads the missing
+ones as empty. Each is warned about once per process; a short row is the usual sign of a wrong
+`separator`.
 
 A file **source** must declare the same `compression`/`encryption` the data was written with.
 A mismatch (wrong key, wrong codec, or a missing field) is a permanent decode failure: the
@@ -1184,6 +1190,9 @@ to keep a counter: the arithmetic runs here, so no request is made per message.
 | `store` | URL | – (states live in memory); `postgres://…/db[/table]`, `sqlite://…`, `mongodb://host/db[/collection]` |
 | `consistency` | `shared` \| `single_writer` | `shared`; only used with `store` |
 | `max_keys` | integer | `1000000`; states kept in memory per entry, `0` is unlimited |
+| `time` | dotted payload path | – (the clock); the message's event time, for `fields` entries |
+| `on_error` | `drop` \| `fail` \| `skip` | `drop`; what happens to a message that cannot be folded |
+| `read_only` | bool | `false`; reads the states of the `store` and never changes them |
 
 ```yaml middleware
 - aggregate:
@@ -1258,13 +1267,81 @@ times faster, because no expression runs and the payload is not parsed into a tr
 | `mean(path)` | arithmetic mean |
 | `stddev(path)`, `variance(path)` | sample standard deviation and variance (divided by n − 1) of all values; `null` for the first message |
 | `ema(path, alpha)` | moving average weighting each new value with `alpha` (0 < alpha ≤ 1), without a start bias: the first message reads its own value |
-| `ema_stddev(path, alpha)`, `ema_variance(path, alpha)` | the same over values weighted like `ema`, so old values fade; `null` for the first message |
+| `ema(path, half_life)` | the same, weighted by time: a value counts half after `half_life`, e.g. `ema(reading, 5m)`. Units: `ms`, `s`, `m`, `h`, `d` |
+| `ema_stddev(path, alpha)`, `ema_variance(path, alpha)` | the same over values weighted like `ema`, so old values fade; `null` for the first message. Both take a half-life in place of `alpha` too |
 
 `path` is a dotted payload path such as `reading` or `device.reading`. Its value must be a
-number or a numeric string (what a CSV source delivers); a message without one fails like a
-message with a failing expression. The result is an object with the field names in
+number or a numeric string (what a CSV source delivers); a message without one cannot be
+folded, see [`on_error`](#aggregate-on-error). The result is an object with the field names in
 alphabetical order, e.g. `{"avg": 20.0, "high": 20.0, "n": 1, "total": 20.0}`. An entry takes
 either `expression` or `fields`; entries of both kinds can be mixed. `fields` takes no `output`.
+
+**Time.** `ema(path, alpha)` counts messages: ten messages in one second fade a value as
+much as ten messages in one day. With a half-life the weight follows the time between two
+messages of a key instead. `time` names the payload field holding the message's time: epoch
+seconds, epoch milliseconds (any number above 1e11), or an RFC 3339 text such as
+`2026-10-03T12:00:00Z`; a text without a zone is read as UTC. Without `time` the clock of
+this process is used, which makes a replay compute different values.
+
+```yaml middleware
+- aggregate:
+    key: "${payload:sensor_id}"
+    into: sensor
+    time: measured_at
+    fields:
+      n: count
+      avg: ema(reading, 5m)
+      spread: ema_stddev(reading, 1h)
+```
+
+**Late messages are detected, not corrected.** With `time` set, every `fields` state
+remembers the newest time it has seen. A message with an older time is folded as if it had
+arrived at that newest time (nothing decays for it), and it carries the metadata
+`mqb.aggregate.late` naming the entries concerned by their `into`, comma-separated. A
+[`filter`](#filter) or a `switch` can act on it as `meta["mqb.aggregate.late"]`. The first
+occurrence is logged as a warning. `time` adds one slot to each `fields` state; states stored
+before it was set are read and extended. Expression entries do not use `time`.
+
+<a id="aggregate-on-error"></a>
+**A message that cannot be folded.** Its payload is not a JSON object, a `key` has no value,
+a field read by `fields` or `time` is missing or not a number, or an expression fails. One
+entry that cannot be computed is enough. `on_error` decides what follows; no state changes
+for an entry that was not computed.
+
+| `on_error` | On an input | On an output |
+|---|---|---|
+| `drop` (default) | logged, acked and dropped. **The source sees a success**: an HTTP caller gets `202` | only that message fails, as non-retryable |
+| `fail` | logged and nacked, so the source sees the failure: an HTTP caller gets `500`. A source that redelivers nacked messages (a broker) delivers it again | as `drop` |
+| `skip` | the entries that cannot be computed are left out, the others run, and the message goes on. A message no entry can fold goes on unchanged | the same |
+
+A message that left entries out under `skip` carries the metadata `mqb.aggregate.skipped`
+with their `into` paths, comma-separated, and the first occurrence is logged as a warning;
+the reason for each is logged at debug level.
+
+```yaml middleware
+- aggregate:
+    on_error: skip
+    entries:
+      - { key: "${payload:sensor_id}", into: sensor, fields: { avg: "ema(reading, 0.01)" } }
+      - { key: "${payload:site_id}", into: site, fields: { high: max(reading) } }
+```
+
+**Reading without writing.** `read_only: true` computes and writes into the message as
+usual but stores nothing, so a dry run or a second route can use the states another route
+maintains. `emit: updated` shows what the state would become with this message,
+`emit: previous` the stored state as it is. It needs a `store`; states are loaded per batch
+whatever `consistency` says, and each message of a batch sees the stored state, not the
+messages before it.
+
+```yaml middleware
+- aggregate:
+    store: "postgres://localhost/telemetry/sensor_states"
+    read_only: true
+    emit: previous
+    key: "${payload:sensor_id}"
+    into: sensor
+    fields: { n: count, avg: "ema(reading, 0.01)" }
+```
 
 **Keeping the states in a store.** With `store` the states survive a restart. The table or
 collection defaults to `mqb_aggregate_<route>` and is created on start; PostgreSQL, SQLite
@@ -1325,13 +1402,13 @@ and MongoDB are supported.
   first: on an input, list it *after* `aggregate` (see [Ordering](#ordering--read-this-before-combining-middleware)).
 - **Order matters for order-dependent states** such as a moving average. Within a batch
   messages are folded in order; with a route `concurrency` above 1 the order across batches
-  is not guaranteed.
-- **A message that cannot be folded fails alone** and changes no state: its payload is not a
-  JSON object, its `key` has no value, or an expression fails. On an input it is logged,
-  acked and dropped; on an output only that message fails, as non-retryable.
+  is not guaranteed. With `time`, a message older than its state is marked, not reordered.
+- **A message that cannot be folded fails alone** and changes no state. By default an input
+  drops it and still acks it, so an HTTP caller gets `202`; see
+  [`on_error`](#aggregate-on-error) for `fail` and `skip`.
 - **No windows and no expiry by time.** There is no "last hour" and no time to live: a state
   covers every message of its key, and a row in the store is never removed. `ema` and
-  `ema_stddev` stand in for a sliding window. For fixed windows put the window into the key,
+  `ema_stddev` stand in for a sliding window, by message count or with a half-life by time. For fixed windows put the window into the key,
   e.g. `key: "${payload:sensor_id}:${payload:hour}"`, and use a `store` with `shared`, which
   keeps no state in memory; the rows of past windows stay until you delete them.
 - **No exactly-once and no key ownership.** A stream processor commits state and input

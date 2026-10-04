@@ -12,6 +12,19 @@ file:///absolute/path/to/file?format=<normal|json|text|raw|csv>
 The path comes from the URI path itself (`file:///...`), not a query param.
 `format` defaults to `normal` (the full message serialized as JSON).
 
+The names are historical, so read them by what ends up in the file. Each has a second,
+descriptive name that means exactly the same:
+
+| `format` | Also | One line of the file |
+|---|---|---|
+| `raw` | `payload` | the payload and nothing else. For JSON payloads this is plain JSON lines |
+| `json` | `envelope_json` | the whole message (id, metadata, payload) as JSON, the payload as a JSON value |
+| `text` | `envelope_text` | the whole message as JSON, the payload as a string |
+| `normal` | `envelope` | the whole message as JSON, the payload as text or base64 |
+
+For a file other tools read, `raw` is almost always the one you want; `json` is for a file
+mq-bridge reads back with ids and metadata intact.
+
 ## Config (YAML / library)
 
 The same settings as a route endpoint in a config file, or in `Route.from_config` /

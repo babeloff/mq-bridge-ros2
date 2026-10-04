@@ -19,6 +19,37 @@ mixes JSON into its cells. The second is a behaviour change, listed below.
   `FileConfig` and `ObjectStoreConfig` gain the field `csv`, and `models` the types
   `CsvConfig` and `CsvNested`; code that builds either struct without `..Default::default()`
   needs the new field.
+- **CSV to object storage.** An `object_store` sink rejected `format: csv`. It now writes each
+  batch as a CSV file with its own header, taken from that batch's first row, in the dialect
+  the `csv` block sets. Set `csv.columns` when every object must have the same columns.
+- **A warning for short CSV rows.** A row with fewer fields than the header was read with the
+  missing ones empty and nothing said, which is what a wrong `separator` looks like. It is now
+  warned about once per process, as a row with too many fields already was.
+
+- **`aggregate`: `on_error`, time-based averages, late-message detection, `read_only`.**
+  - `on_error: drop | fail | skip` says what happens to a message that cannot be folded.
+    `drop` is the default and what happened before: an input logs, acks and drops it, so an
+    HTTP caller gets `202`. `fail` nacks it instead (HTTP `500`). `skip` leaves out only the
+    entries that cannot be computed, runs the others, passes the message on and names the
+    skipped entries in the metadata `mqb.aggregate.skipped`. Before, one missing field in one
+    entry discarded the message for all entries.
+  - `ema`, `ema_stddev` and `ema_variance` take a half-life in place of `alpha`
+    (`ema(reading, 5m)`): a value counts half after that time, however many messages came.
+    The new `time` names the payload field with the event time (epoch seconds or
+    milliseconds, or RFC 3339); without it the clock is used.
+  - With `time`, a message older than the newest one its state has seen is folded without
+    decay and marked with the metadata `mqb.aggregate.late`. It is detected, not reordered.
+  - `read_only: true` reads the states from the `store` and never changes them, for a dry run
+    or a second route that only reads.
+  - The error for a missing field now says `is missing or not a number`.
+  - `AggregateMiddleware` gains the fields `time`, `on_error` and `read_only`, and `models`
+    the enum `AggregateOnError`; code that builds the struct without `..Default::default()`
+    needs the new fields.
+- **Descriptive names for the file formats.** `format: raw` writes only the payload, which
+  for JSON payloads is plain JSON lines, while `format: json` writes the whole message
+  envelope; the names suggested the opposite. `payload`, `envelope_json`, `envelope_text`
+  and `envelope` are now accepted for `raw`, `json`, `text` and `normal`, on `file`,
+  `object_store` and `mongodb`. The old names keep working and are what is written back.
 
 ### Behaviour changes
 

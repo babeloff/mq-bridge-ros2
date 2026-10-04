@@ -145,6 +145,11 @@
           "format": "uint",
           "minimum": 0
         },
+        "on_error": {
+          "description": "A message that cannot be folded: `drop` it, `fail` it, or `skip` the affected entries and pass it on.",
+          "$ref": "#/$defs/AggregateOnError",
+          "default": "drop"
+        },
         "output": {
           "description": "Expression over `state` shaping what is written to the message. Defaults to the state.",
           "type": [
@@ -152,8 +157,19 @@
             "null"
           ]
         },
+        "read_only": {
+          "description": "Reads the states of the `store` and never changes them.",
+          "type": "boolean"
+        },
         "store": {
           "description": "Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it they live in memory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "time": {
+          "description": "Payload path of the event time (epoch seconds or milliseconds, or RFC 3339) for `fields`. Defaults to the clock.",
           "type": [
             "string",
             "null"
@@ -161,6 +177,26 @@
         }
       },
       "additionalProperties": false
+    },
+    "AggregateOnError": {
+      "description": "What an `aggregate` middleware does with a message it cannot fold.",
+      "oneOf": [
+        {
+          "description": "On an input the message is logged, acked and dropped; on an output it fails.",
+          "type": "string",
+          "const": "drop"
+        },
+        {
+          "description": "On an input the message is nacked, so its source sees the failure; on an output it fails.",
+          "type": "string",
+          "const": "fail"
+        },
+        {
+          "description": "Only the entries that cannot be computed are left out; the message goes on.",
+          "type": "string",
+          "const": "skip"
+        }
+      ]
     },
     "AmqpConfig": {
       "description": "General AMQP connection configuration.",
@@ -1516,22 +1552,22 @@
       "description": "Format for messages written to or read from a file.",
       "oneOf": [
         {
-          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text.",
+          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is either base64 or utf8 text. Also `envelope`.",
           "type": "string",
           "const": "normal"
         },
         {
-          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible.",
+          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a JSON value if possible. Also `envelope_json`; for plain JSON lines use `raw`.",
           "type": "string",
           "const": "json"
         },
         {
-          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible.",
+          "description": "The full `CanonicalMessage` is serialized to JSON. Payload is rendered as a string if possible. Also `envelope_text`.",
           "type": "string",
           "const": "text"
         },
         {
-          "description": "The raw payload of the message is written. For consumers, the line is read as raw bytes.",
+          "description": "Only the payload is written, one per line: plain JSON lines for JSON payloads. For consumers, the line is read as raw bytes. Also `payload`.",
           "type": "string",
           "const": "raw"
         },
@@ -4059,7 +4095,7 @@
           ]
         },
         "format": {
-          "description": "Record encoding within an object, shared with the file endpoint. Defaults to\n`normal` (one JSON `CanonicalMessage` per line). CSV is source-only; Parquet needs the `parquet` feature.",
+          "description": "Record encoding within an object, shared with the file endpoint. Defaults to\n`normal` (one JSON `CanonicalMessage` per line). Parquet needs the `parquet` feature.",
           "$ref": "#/$defs/FileFormat",
           "default": "normal"
         },

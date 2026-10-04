@@ -1020,3 +1020,25 @@ mod filter_expression_deserialization_tests {
         assert!(error.contains("fromat"), "{error}");
     }
 }
+
+mod format_name_tests {
+    use super::*;
+
+    #[test]
+    fn descriptive_format_names_mean_the_old_ones() {
+        for (alias, name) in [
+            ("payload", "raw"),
+            ("envelope", "normal"),
+            ("envelope_json", "json"),
+            ("envelope_text", "text"),
+        ] {
+            let aliased: FileFormat = serde_json::from_value(alias.into()).unwrap();
+            let named: FileFormat = serde_json::from_value(name.into()).unwrap();
+            assert_eq!(aliased, named);
+            // Written back under the old name, so older versions read the config.
+            assert_eq!(serde_json::to_value(&aliased).unwrap(), name);
+            let mongo: MongoDbFormat = serde_json::from_value(alias.into()).unwrap();
+            assert_eq!(serde_json::to_value(mongo).unwrap(), name);
+        }
+    }
+}

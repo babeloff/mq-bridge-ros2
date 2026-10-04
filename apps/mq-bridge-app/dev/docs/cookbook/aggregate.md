@@ -151,6 +151,73 @@ moving average from above: it has no start bias, so the first message reads its 
 is several times faster than an expression; use an expression where you need logic that the
 built-ins do not cover.
 
+### A moving average by time
+
+`ema(reading, 0.01)` counts messages: a sensor that reports every second forgets a value a
+thousand times faster than one that reports every quarter of an hour. Give a half-life
+instead of `alpha` and the weight follows the time between two messages of a key:
+
+```yaml
+- aggregate:
+    key: "${payload:sensor_id}"
+    into: sensor
+    time: measured_at
+    fields:
+      avg: ema(reading, 5m)
+      spread: ema_stddev(reading, 1h)
+```
+
+A reading counts half after five minutes, a quarter after ten. `time` names the payload
+field with the message's time: epoch seconds or milliseconds, or an RFC 3339 text. Without
+`time` the clock of the process is used, and a replay then computes different values.
+
+A message that is older than the newest one its state has seen is **detected, not
+corrected**: it is folded as if it had arrived at that newest time and carries the metadata
+`mqb.aggregate.late`, which names the entries concerned. Filter or route on it where late
+data must not count:
+
+```yaml
+- filter: 'meta["mqb.aggregate.late"] == null'
+```
+
+## Messages with missing fields
+
+A message that lacks a field an entry reads, or a key, cannot be folded. `on_error` says
+what happens then:
+
+| `on_error` | Effect |
+|---|---|
+| `drop` (default) | On an input the message is logged, acked and dropped; an HTTP caller still gets `202`. On an output it fails. |
+| `fail` | On an input the message is nacked: an HTTP caller gets `500`, a broker delivers it again. |
+| `skip` | Only the entries that cannot be computed are left out. The message goes on and carries `mqb.aggregate.skipped` with their `into` paths. |
+
+```yaml
+- aggregate:
+    on_error: skip
+    entries:
+      - { key: "${payload:sensor_id}", into: sensor, fields: { avg: "ema(reading, 0.01)" } }
+      - { key: "${payload:site_id}", into: site, fields: { high: max(reading) } }
+```
+
+A message without `site_id` leaves with `sensor` filled, without `site`, and with the
+metadata `mqb.aggregate.skipped: site`.
+
+## Try a configuration without changing the states
+
+`read_only: true` reads the states from the `store`, computes and writes the result into the
+message, and stores nothing. Use it for a dry run against production states, or for a second
+route that only reads what another one maintains. With `emit: previous` the message carries
+the stored state as it is; with `emit: updated` what it would become.
+
+```yaml
+- aggregate:
+    store: "postgres://localhost/telemetry/sensor_states"
+    read_only: true
+    key: "${payload:sensor_id}"
+    into: sensor
+    fields: { n: count, avg: "ema(reading, 0.01)" }
+```
+
 ## Keep the states across restarts
 
 Without `store` the states are gone after a restart. Give the middleware a database and they
@@ -270,7 +337,8 @@ not done here, and they decide whether the middleware fits:
   pays a database round trip per batch, `single_writer` is fast and leaves it to you to run
   one instance.
 - **No windows and no expiry by time.** There is no "sum of the last hour" and no state
-  that ends with a window or a time to live. A moving average stands in for a window. States
+  that ends with a window or a time to live. A moving average stands in for a window, by
+  message count or by time. States
   leave memory only when `max_keys` is reached, and rows in a store are kept for good. For fixed windows you can put the window into the key
   (`key: "${payload:sensor_id}:${payload:hour}"`) and use a `store` with `shared`, which
   keeps nothing in memory; the rows of past windows stay until you delete them.
@@ -293,10 +361,13 @@ If you need one of these, compute the aggregate in the database with a
   starts with empty states. Name the table in the URL (`postgres://host/db/sensor_states`)
   to keep them.
 - **Order matters for a moving average.** Messages of a batch are folded in order. With a
-  route `concurrency` above 1 the order across batches is not guaranteed.
+  route `concurrency` above 1 the order across batches is not guaranteed. With `time`, a
+  message older than its state is marked `mqb.aggregate.late`, not reordered.
 - **A message that cannot be folded fails alone** and changes no state: its payload is not a
-  JSON object, its key has no value, or an expression fails. On an input it is logged and
-  dropped; on an output only that message fails, so a following [`dlq`](dlq.md) can keep it.
+  JSON object, its key has no value, a field is missing, or an expression fails. On an input
+  it is logged and dropped, and the source is told it succeeded; on an output only that
+  message fails, so a following [`dlq`](dlq.md) can keep it. `on_error: fail` or `skip`
+  changes that, see [Messages with missing fields](#messages-with-missing-fields).
 - **Field order.** The fields of a written state object are not in the order the expression
   lists them.
 

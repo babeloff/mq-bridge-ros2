@@ -55,8 +55,9 @@ from file extensions. Use separate directories and routes for mixed formats.
 
 One input file can produce many messages, and route batching still applies. The source currently
 fetches each file into memory before splitting it, so set `max_object_bytes` for untrusted or large
-drop zones. Object-store sinks write one immutable file per flushed batch; CSV is source-only for
-this connector.
+drop zones. Object-store sinks write one immutable file per flushed batch. A `csv` sink gives
+every file its own header, taken from that batch's first row, so set `csv.columns` when all
+files must share the same columns.
 
 ## Choosing a local connector
 

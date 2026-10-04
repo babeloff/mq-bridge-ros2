@@ -2198,3 +2198,47 @@ async fn test_sensitive_header_metadata_is_not_written_to_a_sink() {
     handle.stop().await;
     let _ = handle.join().await;
 }
+
+/// What an HTTP caller is told when `aggregate` on the input cannot fold its message.
+#[cfg(feature = "aggregate")]
+#[tokio::test]
+async fn test_http_status_for_a_message_aggregate_cannot_fold() {
+    use crate::middleware::aggregate::AggregateConsumer;
+    init_crypto();
+
+    for (on_error, expected) in [("drop", 202), ("fail", 500)] {
+        let addr = format!("127.0.0.1:{}", get_free_port());
+        let config = HttpConfig {
+            url: addr.clone(),
+            ..Default::default()
+        };
+        let consumer = HttpConsumer::new(&config).await.unwrap();
+        let aggregate = serde_json::from_value(serde_json::json!({
+            "on_error": on_error,
+            "key": "${payload:card}",
+            "into": "stats",
+            "fields": { "avg": "ema(amount, 0.5)" },
+        }))
+        .unwrap();
+        let mut consumer = AggregateConsumer::new(Box::new(consumer), &aggregate, "test")
+            .await
+            .unwrap();
+        let serve = tokio::spawn(async move {
+            loop {
+                let Ok(batch) = consumer.receive_batch(1).await else {
+                    break;
+                };
+                let acks = vec![crate::traits::MessageDisposition::Ack; batch.messages.len()];
+                let _ = (batch.commit)(acks).await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let post = |body: &'static str| client.post(format!("http://{addr}")).body(body).send();
+        let folded = post(r#"{"card":"a","amount":1}"#).await.unwrap();
+        assert_eq!(folded.status().as_u16(), 202, "on_error: {on_error}");
+        let unfolded = post(r#"{"card":"a"}"#).await.unwrap();
+        assert_eq!(unfolded.status().as_u16(), expected, "on_error: {on_error}");
+        serve.abort();
+    }
+}
