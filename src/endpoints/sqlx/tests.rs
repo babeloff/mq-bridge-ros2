@@ -2012,3 +2012,14 @@ fn sqlite_sink_url_gets_create_mode_only_for_a_missing_file() {
         None
     );
 }
+
+#[test]
+fn rfc3339_projection_applies_to_postgres_timestamps_only() {
+    use crate::models::SqlTimestamps::{Rfc3339, Text};
+    let at = pg_rfc3339("PostgreSQL", "timestamptz", "\"at\"", Rfc3339).unwrap();
+    assert!(at.starts_with("to_char(\"at\" AT TIME ZONE 'UTC'") && at.ends_with("AS \"at\""));
+    assert!(pg_rfc3339("PostgreSQL", "timestamp", "\"at\"", Rfc3339).is_some());
+    assert!(pg_rfc3339("PostgreSQL", "timestamptz", "\"at\"", Text).is_none());
+    assert!(pg_rfc3339("PostgreSQL", "numeric", "\"n\"", Rfc3339).is_none());
+    assert!(pg_rfc3339("MySQL", "timestamp", "`at`", Rfc3339).is_none());
+}

@@ -94,6 +94,7 @@ PostgresConsume = str
 SpoolClaim = str
 SpoolDone = str
 SpoolFsync = str
+SqlTimestamps = str
 StaticConfig = str
 TransformErrorPolicy = str
 WeakJoinAck = str
@@ -192,6 +193,7 @@ __all__ = [
     "SpoolClaim",
     "SpoolDone",
     "SpoolFsync",
+    "SqlTimestamps",
     "SqlxConfig",
     "StaticConfig",
     "StreamBufferConfig",

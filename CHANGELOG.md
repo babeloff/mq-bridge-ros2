@@ -50,6 +50,23 @@ mixes JSON into its cells. The second is a behaviour change, listed below.
   envelope; the names suggested the opposite. `payload`, `envelope_json`, `envelope_text`
   and `envelope` are now accepted for `raw`, `json`, `text` and `normal`, on `file`,
   `object_store` and `mongodb`. The old names keep working and are what is written back.
+- **`mqb copy`: pipes, `--limit`, progress, compression by file name.**
+  - `-` is stdin as the source and stdout as the target (`-?format=csv` takes parameters). A
+    `file` source on a pipe, FIFO or terminal is read once without seeking, and its end ends
+    the copy, with or without `--drain`. Before, `file:///dev/stdin` failed with `Illegal seek`.
+    With stdout as the target the `copied …` summary goes to stderr.
+  - `--limit N` stops after `N` rows reached the destination; with `--filter`, `N` matching rows.
+  - On a terminal, a running row count is shown on stderr every two seconds.
+  - A `file://` path ending in `.gz`, `.zst` or `.lz4` sets `compression`; `compression=none`
+    overrides. A sink named `out.jsonl.gz` used to be written uncompressed.
+  - A copy without `--drain` now exits when its route ends by itself, on a permanent error or
+    the end of a stream. It used to wait for Ctrl-C.
+- **SQL source: `timestamps: rfc3339`.** A Postgres `timestamptz` column is read in Postgres's
+  text form, `2026-10-04 09:15:23.923277+00`, which few other systems parse. With
+  `timestamps: rfc3339` a `cursor_column` source renders it in UTC as
+  `2026-10-04T09:15:23.923277Z`; a `timestamp` without zone gets the `T` and no offset. The
+  default is unchanged. `SqlxConfig` gains the field `timestamps` and `models` the type
+  `SqlTimestamps`.
 
 ### Behaviour changes
 

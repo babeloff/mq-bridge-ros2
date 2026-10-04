@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 fn cli() -> Command {
@@ -3568,4 +3568,90 @@ fn a_payload_far_larger_than_the_read_buffer_survives_the_round_trip() {
 
     assert_success(&output, "large payload copy");
     assert_rows_eq(&sorted(&read_rows(&copied)), &sorted(&rows), "large rows");
+}
+
+/// `-` is stdin and stdout; the end of the input ends the copy without `--drain`,
+/// and the summary moves to stderr so it does not land among the rows.
+#[cfg(unix)]
+#[test]
+fn copy_reads_stdin_and_writes_stdout_through_a_dash() {
+    use std::process::Stdio;
+
+    let mut child = cli()
+        .args(["copy", "-?format=raw", "-?format=raw"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run CLI copy");
+    // No trailing newline: the last record still counts when the pipe closes.
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"{\"id\":1}\n{\"id\":2}\n{\"id\":3}")
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("wait for CLI copy");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("copied 3 rows"),
+        "{output:?}"
+    );
+}
+
+/// `--limit` counts rows that passed the filter and ends the copy without `--drain`.
+#[test]
+fn copy_limit_stops_after_n_matching_rows() {
+    let dir = TestDir::new();
+    let source = dir.path().join("in.jsonl");
+    let target = dir.path().join("out.jsonl");
+    let rows: String = (0..5000).map(|id| format!("{{\"id\":{id}}}\n")).collect();
+    std::fs::write(&source, rows).expect("write source");
+
+    let output = cli()
+        .args([
+            "copy",
+            &format!("file://{}?format=raw", source.display()),
+            &format!("file://{}?format=raw", target.display()),
+            "--limit",
+            "3",
+            "--filter",
+            "id % 1000 == 7",
+        ])
+        .output()
+        .expect("run CLI copy");
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("read target"),
+        "{\"id\":7}\n{\"id\":1007}\n{\"id\":2007}\n"
+    );
+}
+
+/// A `.gz` path sets `compression` on both sides, so the round trip needs no parameter.
+#[test]
+fn copy_infers_compression_from_the_file_extension() {
+    let dir = TestDir::new();
+    let source = dir.path().join("in.jsonl");
+    let packed = dir.path().join("packed.jsonl.gz");
+    let back = dir.path().join("back.jsonl");
+    std::fs::write(&source, "{\"id\":1}\n{\"id\":2}\n").expect("write source");
+    let uri = |path: &Path| format!("file://{}?format=raw", path.display());
+
+    let output = copy(&uri(&source), &uri(&packed));
+    assert!(output.status.success(), "{output:?}");
+    let head = std::fs::read(&packed).expect("read packed");
+    assert_eq!(&head[..2], &[0x1f, 0x8b], "the sink should write gzip");
+
+    let output = copy(&uri(&packed), &uri(&back));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&back).expect("read back"),
+        "{\"id\":1}\n{\"id\":2}\n"
+    );
 }

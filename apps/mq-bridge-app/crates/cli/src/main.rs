@@ -340,20 +340,41 @@ struct CopyArgs {
     /// `...?table=src|retry?max_attempts=5|metrics`. Middleware params are that
     /// middleware's config fields. A literal `|` inside the URI must be written
     /// as `%7C`.
-    #[arg(long, value_name = "SOURCE", conflicts_with = "source")]
+    #[arg(
+        long,
+        value_name = "SOURCE",
+        conflicts_with = "source",
+        allow_hyphen_values = true
+    )]
     from: Option<String>,
 
     /// Destination endpoint URI (same URI and middleware forms as `--from`), e.g.
     /// `postgres://user:pass@host/db?table=dst&insert_query=<url-encoded SQL>`.
-    #[arg(long, value_name = "TARGET", conflicts_with = "target")]
+    #[arg(
+        long,
+        value_name = "TARGET",
+        conflicts_with = "target",
+        allow_hyphen_values = true
+    )]
     to: Option<String>,
 
-    /// Source endpoint URI in the positional `copy SOURCE TARGET` form.
-    #[arg(value_name = "SOURCE", index = 1, conflicts_with = "from")]
+    /// Source endpoint URI in the positional `copy SOURCE TARGET` form. `-` is
+    /// stdin (and stdout as TARGET); the copy ends when the input does.
+    #[arg(
+        value_name = "SOURCE",
+        index = 1,
+        conflicts_with = "from",
+        allow_hyphen_values = true
+    )]
     source: Option<String>,
 
     /// Destination endpoint URI in the positional `copy SOURCE TARGET` form.
-    #[arg(value_name = "TARGET", index = 2, conflicts_with = "to")]
+    #[arg(
+        value_name = "TARGET",
+        index = 2,
+        conflicts_with = "to",
+        allow_hyphen_values = true
+    )]
     target: Option<String>,
 
     /// Only copy messages for which EXPR evaluates to true.
@@ -362,6 +383,13 @@ struct CopyArgs {
     /// `amount > 100` or `country == "DE" && amount >= 50`.
     #[arg(long, value_name = "EXPR")]
     filter: Option<String>,
+
+    /// Stop after N rows reached the destination; with `--filter`, N matching rows.
+    ///
+    /// The copy ends there, with or without `--drain`. Meant for a preview: a
+    /// queue source may have handed out a few more messages than were copied.
+    #[arg(long, value_name = "N", conflicts_with = "resume")]
+    limit: Option<u64>,
 
     /// Resume from the last successfully processed position.
     ///
@@ -1023,6 +1051,7 @@ async fn run_agent_listen(args: AgentListenArgs) -> anyhow::Result<()> {
             source: None,
             target: None,
             filter: None,
+            limit: None,
             resume: false,
             no_resume: false,
             // Draining is what `--wait 0` means here; any other budget holds the
@@ -1089,7 +1118,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     // Attached outside every other source middleware, so it sees only what the
     // whole chain let through — past the filter below and past any URI-configured
     // `transform` that rejects rows: what was copied.
-    let copied = copy_pipeline::configure_delivered_counter(&mut input)?;
+    let copied = copy_pipeline::configure_delivered_counter(&mut input, args.limit)?;
     if let Some(expression) = &args.filter {
         copy_pipeline::configure_filter(&mut input, expression);
     }
@@ -1118,6 +1147,7 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
     // An empty source drains instantly, so waiting for one means retrying that
     // drain until an attempt finds something or the budget is spent.
     let wait_until = args.wait.map(|secs| started + Duration::from_secs(secs));
+    let _progress = CopyProgress::start(Arc::clone(&copied), args.verbose);
 
     info!(
         // Redacted: this line is the one that reaches journald, Docker logs and CI.
@@ -1181,9 +1211,16 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
         }
 
         if !drain {
-            // Continuous bridge: run until Ctrl-C, then stop gracefully.
-            shutdown_requested().await;
-            info!("Shutdown requested; stopping copy");
+            // Continuous bridge: run until Ctrl-C, then stop gracefully. A source
+            // that ends by itself (stdin at end of input) ends the copy too.
+            tokio::select! {
+                _ = shutdown_requested() => info!("Shutdown requested; stopping copy"),
+                _ = async {
+                    while handle.outcome().is_none() {
+                        tokio::time::sleep(COPY_POLL_INTERVAL).await;
+                    }
+                } => {}
+            }
             // Through the same reporting as the drained branch: a bridge that dropped
             // rows did not run clean either, and a supervisor restarting it needs to
             // hear that from the exit status. The fallback only guards against a
@@ -1296,13 +1333,79 @@ fn copy_route_endpoints(
 ) -> anyhow::Result<(mq_bridge::models::Endpoint, mq_bridge::models::Endpoint)> {
     // Expanded here rather than by the shell, so a single-quoted URI can name a
     // credential without it ever appearing in the history or in `argv`.
-    let from = copy_pipeline::expand_uri_variables(from).context("invalid copy source endpoint")?;
-    let to =
-        copy_pipeline::expand_uri_variables(to).context("invalid copy destination endpoint")?;
+    let from = copy_pipeline::expand_uri_variables(&dash_as_stream(from, "/dev/stdin"))
+        .context("invalid copy source endpoint")?;
+    let to = copy_pipeline::expand_uri_variables(&dash_as_stream(to, "/dev/stdout"))
+        .context("invalid copy destination endpoint")?;
+    if to.starts_with("file:///dev/stdout") {
+        SUMMARY_TO_STDERR.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let mut input = endpoint_from_uri(&from).context("invalid copy source endpoint")?;
     make_listen_address(&mut input).context("invalid copy source endpoint")?;
     let output = endpoint_from_uri(&to).context("invalid copy destination endpoint")?;
     Ok((input, output))
+}
+
+/// How often a copy on a terminal redraws its running count.
+const COPY_PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A running row count on stderr while a copy is in flight. Only on a terminal, so a
+/// log file or a pipe never sees it; dropped (and its line cleared) before the summary.
+struct CopyProgress(Option<tokio::task::JoinHandle<()>>);
+
+impl CopyProgress {
+    fn start(copied: Arc<std::sync::atomic::AtomicU64>, verbose: bool) -> Self {
+        use std::io::IsTerminal;
+        if verbose || !std::io::stderr().is_terminal() {
+            return Self(None);
+        }
+        Self(Some(tokio::spawn(async move {
+            let mut before = 0;
+            loop {
+                tokio::time::sleep(COPY_PROGRESS_INTERVAL).await;
+                let rows = copied.load(std::sync::atomic::Ordering::Relaxed);
+                let rate = (rows - before) as f64 / COPY_PROGRESS_INTERVAL.as_secs_f64();
+                before = rows;
+                PROGRESS_DRAWN.store(true, std::sync::atomic::Ordering::Relaxed);
+                eprint!(
+                    "\r\x1b[2K{} rows ({} rows/s)",
+                    grouped(rows),
+                    grouped(rate as u64)
+                );
+            }
+        })))
+    }
+}
+
+impl Drop for CopyProgress {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+            clear_progress();
+        }
+    }
+}
+
+static PROGRESS_DRAWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Wipes the progress line, so the summary or an error starts on a clean line.
+fn clear_progress() {
+    if PROGRESS_DRAWN.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        eprint!("\r\x1b[2K");
+    }
+}
+
+/// Set when the rows themselves go to stdout, so the summary does not land among them.
+static SUMMARY_TO_STDERR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `-`, alone or followed by `?params` or `|middleware`, names stdin or stdout.
+fn dash_as_stream(uri: &str, device: &str) -> String {
+    match uri.strip_prefix('-') {
+        Some(rest) if rest.is_empty() || rest.starts_with(['?', '|']) => {
+            format!("file://{device}{rest}")
+        }
+        _ => uri.to_string(),
+    }
 }
 
 fn copy_endpoints(args: &CopyArgs) -> anyhow::Result<(&str, &str)> {
@@ -1425,12 +1528,17 @@ impl Throughput {
     /// directly rather than through `tracing`, so silencing the bridge's logging
     /// never silences the answer the user ran the command for.
     fn report(&self, verb: &str) {
-        println!(
+        let line = format!(
             "{verb} {} in {} ({} rows/s)",
             self.rows_display(),
             self.elapsed_display(),
             self.rate_display()
         );
+        if SUMMARY_TO_STDERR.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
     }
 }
 
@@ -1499,6 +1607,7 @@ fn copy_result(
 ) -> anyhow::Result<()> {
     use mq_bridge::route::RouteOutcome;
 
+    clear_progress();
     if matches!(outcome, Some(RouteOutcome::Failed)) {
         let cause = error.unwrap_or_else(|| "no error reported".to_string());
         anyhow::bail!("copy failed after {}: {cause}", moved.rows_display());
@@ -2331,6 +2440,15 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
         let path = path.strip_prefix("//").unwrap_or(path);
         if path.is_empty() {
             bail!("{tag} URI '{uri}' must include a path");
+        }
+        // `x.jsonl.gz` says how it is compressed; `compression=none` overrides.
+        if tag == "file" && !config.contains_key("compression") {
+            let codec = [(".gz", "gzip"), (".zst", "zstd"), (".lz4", "lz4")]
+                .into_iter()
+                .find(|(extension, _)| path.ends_with(extension));
+            if let Some((_, codec)) = codec {
+                config.insert("compression".into(), codec.into());
+            }
         }
         config.insert("path".into(), serde_json::Value::String(path.to_string()));
     } else if let Some(url) = escaped_url {
@@ -3171,8 +3289,10 @@ mod uri_tests {
     #[test]
     fn file_csv_dialect_is_a_json_param() {
         let mut uri = url::Url::parse("file:///tmp/export.csv?format=csv").unwrap();
-        uri.query_pairs_mut()
-            .append_pair("csv", r#"{"separator":"auto","header":false,"columns":["id"]}"#);
+        uri.query_pairs_mut().append_pair(
+            "csv",
+            r#"{"separator":"auto","header":false,"columns":["id"]}"#,
+        );
         let cfg = config(uri.as_str(), "file");
         assert_eq!(cfg["format"], "csv");
         assert_eq!(cfg["csv"]["separator"], "auto");

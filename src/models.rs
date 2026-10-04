@@ -1147,6 +1147,24 @@ impl CsvConfig {
     }
 }
 
+/// How a SQL source renders timestamp columns.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum SqlTimestamps {
+    /// The database's own text form (`2026-10-04 09:15:23.923277+00`).
+    #[default]
+    Text,
+    /// RFC 3339 in UTC (`2026-10-04T09:15:23.923277Z`); `timestamp` without zone has no offset.
+    Rfc3339,
+}
+
+impl SqlTimestamps {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// How a CSV sink writes a nested JSON object.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -2811,6 +2829,9 @@ pub struct SqlxConfig {
     /// (Consumer only) Include authoritative `mqb.src.sqlx_*` source positions; `cursor_column` must then be a unique integer. Defaults to false.
     #[serde(default)]
     pub source_metadata: bool,
+    /// (Consumer only, `cursor_column` mode, PostgreSQL) How timestamp columns are rendered: `text` (default) or `rfc3339`.
+    #[serde(default, skip_serializing_if = "SqlTimestamps::is_default")]
+    pub timestamps: SqlTimestamps,
     /// TLS configuration for the database connection.
     #[serde(default)]
     pub tls: TlsConfig,

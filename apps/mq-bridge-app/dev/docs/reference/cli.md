@@ -103,8 +103,9 @@ mqb copy \
 | `--filter <expr>` | off | Retain messages for which the expression is true. Top-level JSON scalar fields are variables. |
 | `--resume` | off | Configure the source's safe native resume mechanism, or fail before route startup. |
 | `--no-resume` | off | Ignore optional cursor/checkpoint resume state, including its warnings and errors. Conflicts with `--resume`; native queue/CDC offsets are unchanged. |
-| `--drain` | off | Exit once the source yields an empty batch. Without it, `copy` runs as a continuous bridge until Ctrl-C. |
+| `--drain` | off | Exit once the source yields an empty batch. Without it, `copy` runs as a continuous bridge until Ctrl-C. A drain does not wait for an endpoint: it fails on the first error while nothing has been delivered yet. |
 | `--wait <secs>` | off | Wait up to that long for the source to produce something, then drain and exit. |
+| `--limit <n>` | off | Stop after `n` rows reached the destination (with `--filter`: `n` matching rows). Ends the copy with or without `--drain`. For previews; conflicts with `--resume`. |
 | `-v`, `--verbose` | off | Log endpoints, connections and shutdown. Without it only warnings and errors are logged. |
 | `--concurrency <N>` | `4` | Route concurrency. |
 | `--batch-size <N>` | `1024` | Batch size. |
@@ -122,6 +123,20 @@ processes share one port; a second process started by mistake raises no error.
 > Note: `copy`'s defaults (`--concurrency 4`, `--batch-size 1024`) are higher than the
 > library's route defaults (`concurrency: 1`, `batch_size: 512`), because `copy` is built for
 > bulk throughput. See [Performance tuning](../operations/tuning.md).
+
+### Pipes: stdin and stdout
+
+`-` as SOURCE reads stdin, `-` as TARGET writes stdout. Parameters follow as usual
+(`-?format=csv`). The copy ends when the input does, with or without `--drain`, and the
+`copied …` summary goes to stderr so it does not land among the rows.
+
+```bash
+pg_dump_rows | mqb copy '-?format=raw' 'kafka://localhost:9092?topic=rows'
+mqb copy 'postgres://…/shop?table=orders&cursor_column=id' '-?format=raw' --limit 5
+```
+
+On a terminal a copy that runs longer than two seconds shows a running row count on stderr;
+it is not written to a pipe or a log file.
 
 ### Resumable copies
 

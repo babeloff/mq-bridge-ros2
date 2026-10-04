@@ -4723,6 +4723,21 @@
         }
       ]
     },
+    "SqlTimestamps": {
+      "description": "How a SQL source renders timestamp columns.",
+      "oneOf": [
+        {
+          "description": "The database's own text form (`2026-10-04 09:15:23.923277+00`).",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "RFC 3339 in UTC (`2026-10-04T09:15:23.923277Z`); `timestamp` without zone has no offset.",
+          "type": "string",
+          "const": "rfc3339"
+        }
+      ]
+    },
     "SqlxConfig": {
       "description": "General SQLx connection configuration.",
       "type": "object",
@@ -4899,6 +4914,10 @@
             "boolean",
             "null"
           ]
+        },
+        "timestamps": {
+          "description": "(Consumer only, `cursor_column` mode, PostgreSQL) How timestamp columns are rendered: `text` (default) or `rfc3339`.",
+          "$ref": "#/$defs/SqlTimestamps"
         },
         "tls": {
           "description": "TLS configuration for the database connection.",

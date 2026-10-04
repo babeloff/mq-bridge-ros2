@@ -2549,6 +2549,7 @@ async fn build_cursor_projection(
     pool: &AnyPool,
     driver_name: &str,
     table: &str,
+    timestamps: crate::models::SqlTimestamps,
 ) -> (String, Vec<String>) {
     let star = || ("*".to_string(), Vec::new());
     type SafeFn = fn(&str) -> bool;
@@ -2620,6 +2621,8 @@ async fn build_cursor_projection(
         } else if driver_name == "PostgreSQL" && matches!(typname.as_str(), "json" | "jsonb") {
             parts.push(cast(&ident));
             raw_json.push(name);
+        } else if let Some(rendered) = pg_rfc3339(driver_name, &typname, &ident, timestamps) {
+            parts.push(rendered);
         } else if driver_name == "PostgreSQL" && typname.starts_with('_') {
             // Array types: the text form is `{1,2}`, so render them as a JSON array.
             parts.push(format!("to_jsonb({ident})::text AS {ident}"));
@@ -2630,6 +2633,27 @@ async fn build_cursor_projection(
         }
     }
     (parts.join(", "), raw_json)
+}
+
+/// The projection for a Postgres timestamp column under `timestamps: rfc3339`.
+fn pg_rfc3339(
+    driver_name: &str,
+    typname: &str,
+    ident: &str,
+    timestamps: crate::models::SqlTimestamps,
+) -> Option<String> {
+    if driver_name != "PostgreSQL" || timestamps != crate::models::SqlTimestamps::Rfc3339 {
+        return None;
+    }
+    match typname {
+        "timestamptz" => Some(format!(
+            "to_char({ident} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS {ident}"
+        )),
+        "timestamp" => Some(format!(
+            "to_char({ident}, 'YYYY-MM-DD\"T\"HH24:MI:SS.US') AS {ident}"
+        )),
+        _ => None,
+    }
 }
 
 /// A permanent (non-transient) failure: the `Any` driver cannot decode a column type, so
@@ -2958,7 +2982,7 @@ impl SqlxCursorReader {
         info!(table = %config.table, cursor_id = ?config.cursor_id, has_checkpoint = %last_value.is_some(), "SQLx cursor reader initialized");
 
         let (projection, raw_json_columns) =
-            build_cursor_projection(&pool, &driver_name, &config.table).await;
+            build_cursor_projection(&pool, &driver_name, &config.table, config.timestamps).await;
 
         let sql_first = format!(
             "SELECT {0} FROM {1} ORDER BY {2} ASC LIMIT {3}",

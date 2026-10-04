@@ -1900,6 +1900,10 @@ struct FileTailConsumer {
 fn sniff_compression_magic(path: &str) -> Option<&'static str> {
     use std::io::Read;
     let mut head = [0u8; 4];
+    // A pipe cannot be read twice: sniffing would swallow its first bytes.
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
     let mut f = std::fs::File::open(path).ok()?;
     let n = f.read(&mut head).ok()?;
     compression_magic_name(&head[..n])
@@ -1928,6 +1932,9 @@ fn looks_encrypted_at_rest(path: &str) -> bool {
         CIPHER_AES_GCM, CIPHER_XCHACHA, ENVELOPE_VERSION, MIN_ENVELOPE_LEN,
     };
     use std::io::Read;
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
     let Ok(mut f) = std::fs::File::open(path) else {
         return false;
     };
@@ -2027,6 +2034,8 @@ fn run_file_tail_task_sync(
     let mut current_sleep = std::time::Duration::from_millis(1);
     const MAX_SLEEP: std::time::Duration = std::time::Duration::from_millis(50);
     let mut initialized = false;
+    // A pipe, FIFO or terminal: read once without seeking, and its end is final.
+    let mut stream = false;
     // Tracks whether we've already emitted the empty end-of-file marker for the
     // current drained state, so we signal it once per EOF transition rather than
     // on every idle poll.
@@ -2049,14 +2058,18 @@ fn run_file_tail_task_sync(
                 }
             };
 
-            if let Ok(metadata) = file.metadata() {
+            let metadata = file.metadata().ok();
+            stream = metadata.as_ref().is_some_and(|m| !m.file_type().is_file());
+            if let Some(metadata) = metadata.filter(|_| !stream) {
                 if metadata.len() < last_position {
                     tracing::warn!("File {} was truncated. Resetting position to 0.", path);
                     last_position = 0;
                 }
             }
 
-            if let Err(e) = file.seek(std::io::SeekFrom::Start(last_position)) {
+            if stream {
+                // Not seekable.
+            } else if let Err(e) = file.seek(std::io::SeekFrom::Start(last_position)) {
                 tracing::error!("Failed to seek in {}: {}", path, e);
                 last_position = 0; // Reset on seek failure
                 if let Err(e) = file.seek(std::io::SeekFrom::Start(0)) {
@@ -2085,9 +2098,16 @@ fn run_file_tail_task_sync(
         let mut pending_partial = false;
         let mut open_quote = false;
         let mut fatal = None;
+        let mut stream_ended = false;
+        // The end of a stream is final, as the end of a file is under a drain.
+        let complete = stream || drain_on_empty.load(Ordering::SeqCst);
 
         if let Some(r) = reader.as_mut() {
             for _ in 0..BATCH_SIZE {
+                // A slow writer must not hold back what has already arrived.
+                if stream && lines_read_in_batch > 0 && r.buffer().is_empty() {
+                    break;
+                }
                 buf.clear();
                 match read_record_sync_checked(
                     r,
@@ -2097,9 +2117,12 @@ fn run_file_tail_task_sync(
                     &mut buf,
                     &mut open_quote,
                 ) {
-                    Ok(0) => break, // EOF
+                    Ok(0) => {
+                        stream_ended = stream;
+                        break; // EOF
+                    }
                     Ok(_) if open_quote => {
-                        if drain_on_empty.load(Ordering::SeqCst) {
+                        if complete {
                             fatal = Some(format!(
                                 "csv: {path} ends inside a quoted field (record at byte {last_position}); the file looks truncated"
                             ));
@@ -2112,7 +2135,7 @@ fn run_file_tail_task_sync(
                     }
                     Ok(n) => {
                         if !buf.ends_with(&delimiter) {
-                            if drain_on_empty.load(Ordering::SeqCst) {
+                            if complete {
                                 // Drain mode (exit_on_empty): the file is complete, so a
                                 // final record with no trailing delimiter is a whole
                                 // record. Emit it once, advancing past it; the next read
@@ -2150,6 +2173,10 @@ fn run_file_tail_task_sync(
                         spans.push((start, records_buf.len(), last_position));
                         lines_read_in_batch += 1;
                     }
+                    Err(e) if stream => {
+                        fatal = Some(format!("Error reading {path}: {e}"));
+                        break;
+                    }
                     Err(e) => {
                         tracing::error!("Error reading {}: {}", path, e);
                         reader = None; // Force reopen on next loop
@@ -2179,6 +2206,10 @@ fn run_file_tail_task_sync(
             tracing::error!("{reason}; closing stream");
             *fatal_error_slot.lock().unwrap() = Some(reason);
             break;
+        }
+
+        if stream_ended {
+            break; // Closing the channel ends the route: a stream does not resume.
         }
 
         if lines_read_in_batch == 0 {

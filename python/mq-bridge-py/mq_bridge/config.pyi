@@ -749,6 +749,7 @@ class SqlxConfig(TypedDict, total=False):
     source_metadata: bool
     table: Required[str]
     test_before_acquire: Optional[bool]
+    timestamps: SqlTimestamps
     tls: TlsConfig
     url: Required[str]
     username: Optional[str]
@@ -869,6 +870,7 @@ PostgresConsume = Literal["capture_new", "capture_all", "snapshot"]
 SpoolClaim = Literal["exclusive", "warn", "off"]
 SpoolDone = Literal["never", "success", "end"]
 SpoolFsync = Literal["chunk", "off"]
+SqlTimestamps = Literal["text", "rfc3339"]
 StaticConfig = Union[str, Dict[str, Any]]
 TransformErrorPolicy = Literal["reject", "pass_through"]
 WeakJoinAck = Literal["on_join", "on_receive"]
