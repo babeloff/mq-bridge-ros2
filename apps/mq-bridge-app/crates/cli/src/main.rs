@@ -379,6 +379,9 @@ struct CopyArgs {
 
     /// Exit once the source yields an empty batch (drain-then-exit). Without it,
     /// `copy` keeps running like a continuous bridge until Ctrl-C.
+    ///
+    /// A drain does not wait for an endpoint: it fails on the first error while
+    /// nothing has been delivered yet.
     #[arg(long)]
     drain: bool,
 

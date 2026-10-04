@@ -1431,7 +1431,7 @@ pub(crate) async fn try_run_fast_path_route(
                 }
                 WebSocketDirectRouteSupport::Unsupported(reason) => match cfg.execution_mode {
                     crate::models::WebSocketExecutionMode::Auto => {
-                        tracing::warn!(
+                        tracing::debug!(
                             route = name,
                             reason = reason,
                             "WebSocket route cannot run in direct mode; falling back to routed mode"

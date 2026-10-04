@@ -225,8 +225,12 @@ impl MessagePublisher for GrpcPublisher {
         if failed.is_empty() && responses.is_empty() {
             Ok(SentBatch::Ack)
         } else if failed.len() == total {
+            let reason = failed
+                .first()
+                .map(|(_, e)| e.to_string())
+                .unwrap_or_default();
             Err(PublisherError::Retryable(anyhow::anyhow!(
-                "All messages in batch failed"
+                "All messages in batch failed: {reason}"
             )))
         } else {
             Ok(SentBatch::Partial {

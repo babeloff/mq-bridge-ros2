@@ -651,7 +651,7 @@ impl BridgeMcp {
 
     #[tool(
         description = "Publish one message or a batch of messages to any endpoint. \
-            The target is supplied inline as endpoint JSON keyed by type (e.g. \
+            The endpoint is supplied inline in `publisher` as JSON keyed by type (e.g. \
             {\"kafka\": {\"url\": \"...\", \"topic\": \"...\"}}); this is independent of routes. \
             Provide either `message` or `messages`; each message has a `payload` and optional \
             `metadata` headers (e.g. `kind` for the message type, `correlation_id`). Returns the \
@@ -1301,7 +1301,7 @@ const INSTRUCTIONS: &str =
      http, files, and more) ad hoc. `publish` and `start_route` take the endpoint(s) \
      inline as JSON keyed by type, e.g. {\"kafka\": {\"url\": \"...\", \"topic\": \
      \"...\"}}. Use `publish` to \
-     send messages to a target; `start_route` to move messages from a source (`input`) to \
+     send messages to the endpoint given in `publisher`; `start_route` to move messages from a source (`input`) to \
      a sink (`output`), optionally setting `exit_on_empty` to drain-then-exit; and \
      `list_routes` / `route_status` / `stop_route` to manage running routes. Prefer \
      `wait_route` over polling `route_status` for a drain-then-exit job: it is one call \

@@ -58,4 +58,8 @@ mqb copy \
 | `protocol` | `V3` or `V5`. Defaults to `V5`. |
 | `delayed_ack` | Consumer-only: ack after processing instead of on receipt (default). |
 
+A source can lose a few in-flight messages when the broker restarts abruptly: MQTT guarantees
+QoS 1/2 redelivery only across a session that survives, and a message the broker dropped never
+reaches the consumer to be retried. The sink is not affected; it re-publishes until confirmed.
+
 Full field list: [reference/mqtt.md](../reference/mqtt.md).

@@ -189,7 +189,7 @@ pub struct RouteOptions {
     pub allow_fault_injection: bool,
     /// If true, the route exits gracefully once the source yields an empty batch
     /// (drain-then-exit). Off by default — routes normally poll indefinitely.
-    /// A drain that keeps failing to reconnect gives up and fails rather than retrying forever.
+    /// A drain that fails before it delivered anything ends at once; later it gives up after ten reconnects.
     #[serde(default = "default_false", skip_serializing_if = "is_false")]
     #[cfg_attr(feature = "schema", schemars(default = "default_false"))]
     pub exit_on_empty: bool,

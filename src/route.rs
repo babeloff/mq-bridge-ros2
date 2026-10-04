@@ -112,7 +112,7 @@ impl DropReport {
                 .to_string();
         }
         let mut causes: Vec<&(String, u64)> = self.causes.iter().collect();
-        causes.sort_by(|a, b| b.1.cmp(&a.1));
+        causes.sort_by_key(|c| std::cmp::Reverse(c.1));
         let shown: Vec<String> = causes
             .iter()
             .take(3)
@@ -137,6 +137,8 @@ pub(crate) struct PendingSends {
     epoch: std::time::Instant,
     /// Nanoseconds since `epoch` plus one; zero while the worker is not sending.
     slots: Box<[AtomicU64]>,
+    /// Set once the sink accepted a batch at least in part: the drain rule's sign of progress.
+    delivered: std::sync::atomic::AtomicBool,
 }
 
 impl PendingSends {
@@ -144,6 +146,7 @@ impl PendingSends {
         Self {
             epoch: std::time::Instant::now(),
             slots: (0..workers.max(1)).map(|_| AtomicU64::new(0)).collect(),
+            delivered: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -547,10 +550,10 @@ fn endpoint_tree_has_buffer(endpoint: &Endpoint, visited_refs: &mut HashSet<Stri
 const YIELD_EVERY_MSGS: usize = 128;
 
 /// How many reconnects in a row a route with `exit_on_empty` may make before it is
-/// declared failed. A drain job that keeps failing on the same pass — an output leg at a
-/// dead address, say — never reaches the empty batch it exits on, so retrying forever
-/// leaves it running with nothing to show. A continuous route has no such bound: coming
-/// back after an outage is the whole point.
+/// declared failed, once it has delivered something. A drain job that keeps failing on
+/// the same pass never reaches the empty batch it exits on. A drain that has delivered
+/// nothing does not reconnect at all: see [`drain_gives_up`]. A continuous route has no
+/// bound: coming back after an outage is the whole point.
 const DRAIN_MAX_RECONNECT_ATTEMPTS: usize = 10;
 
 /// How long a connection has to stay up before the route counts as recovered: the flap
@@ -558,6 +561,12 @@ const DRAIN_MAX_RECONNECT_ATTEMPTS: usize = 10;
 /// the last error visible, so a route that only ever connects and immediately fails is
 /// never reported healthy on the strength of the connect alone.
 const STABLE_RUN: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether a failed drain pass ends the route. A drain copies what is there and does not
+/// wait for an endpoint to appear, so a failure before anything was delivered is final.
+fn drain_gives_up(delivered_anything: bool, consecutive_failures: usize) -> bool {
+    !delivered_anything || consecutive_failures >= DRAIN_MAX_RECONNECT_ATTEMPTS
+}
 
 /// Forward a ready signal the run task already emitted but the reconnect loop
 /// never observed.
@@ -808,6 +817,17 @@ async fn send_batch_and_commit(
         let _pending = send_slot.and_then(|(sends, index)| sends.begin(index));
         publisher.send_batch(messages).await
     };
+    // Read-mostly: written once per run, so workers do not contend on it.
+    if let Some((sends, _)) = send_slot.filter(|(s, _)| !s.delivered.load(Ordering::Relaxed)) {
+        let accepted = match &sent {
+            Ok(SentBatch::Ack) => true,
+            Ok(SentBatch::Partial { failed, .. }) => failed.len() < batch_len,
+            Err(_) => false,
+        };
+        if accepted {
+            sends.delivered.store(true, Ordering::Relaxed);
+        }
+    }
     match sent {
         Ok(SentBatch::Ack) => {
             for id in scratch.message_ids.iter() {
@@ -1592,15 +1612,23 @@ impl Route {
                                     // failure it will never reach the empty batch it is
                                     // waiting for, so bound it instead of retrying forever.
                                     // A continuous route is meant to reconnect indefinitely.
+                                    let delivered_anything = sends_loop.delivered.load(Ordering::Relaxed);
                                     if !is_permanent
                                         && exit_on_empty
-                                        && consecutive_failures >= DRAIN_MAX_RECONNECT_ATTEMPTS
+                                        && drain_gives_up(delivered_anything, consecutive_failures)
                                     {
                                         outcome_guard.set(RouteOutcome::Failed);
-                                        error!(
-                                            "Route '{}' failed {} times in a row while draining; giving up. Last error: {}",
-                                            name, consecutive_failures, e
-                                        );
+                                        if delivered_anything {
+                                            error!(
+                                                "Route '{}' failed {} times in a row while draining; giving up. Last error: {}",
+                                                name, consecutive_failures, e
+                                            );
+                                        } else {
+                                            error!(
+                                                "Route '{}' failed before it delivered anything; a drain does not wait for an endpoint to become available. Error: {}",
+                                                name, e
+                                            );
+                                        }
                                         break 'reconnect;
                                     }
 
@@ -1636,7 +1664,10 @@ impl Route {
                                     // Same bound as the error arm: a drain whose task keeps
                                     // panicking will never reach its empty batch.
                                     if exit_on_empty
-                                        && consecutive_failures >= DRAIN_MAX_RECONNECT_ATTEMPTS
+                                        && drain_gives_up(
+                                            sends_loop.delivered.load(Ordering::Relaxed),
+                                            consecutive_failures,
+                                        )
                                     {
                                         outcome_guard.set(RouteOutcome::Failed);
                                         error!(
@@ -4934,6 +4965,67 @@ mod tests {
         );
 
         Route::stop("test_dead_output_drain").await;
+    }
+
+    // A drain copies what is there: a sink that never accepted anything is not waited for.
+    #[tokio::test]
+    async fn test_drain_does_not_reconnect_before_anything_was_delivered() {
+        let factory_name = format!("never_up_{}", fast_uuid_v7::gen_id());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_pub = attempts.clone();
+
+        let mut factory = MockEndpointFactory::new();
+        factory.publisher_behavior = Arc::new(Mutex::new(move || {
+            struct NeverUp(Arc<AtomicUsize>);
+            #[async_trait::async_trait]
+            impl MessagePublisher for NeverUp {
+                async fn send_batch(
+                    &self,
+                    _: Vec<crate::CanonicalMessage>,
+                ) -> Result<SentBatch, PublisherError> {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    Err(PublisherError::Retryable(anyhow::anyhow!("no such stream")))
+                }
+                fn as_any(&self) -> &dyn Any {
+                    self
+                }
+            }
+            Ok(Box::new(NeverUp(attempts_pub.clone())) as Box<dyn MessagePublisher>)
+        }));
+        register_endpoint_factory(&factory_name, Arc::new(factory)).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let in_path = dir.path().join("in.jsonl");
+        std::fs::write(&in_path, "a\nb\nc\n").unwrap();
+        let input = Endpoint::new(EndpointType::File(crate::models::FileConfig {
+            path: in_path.to_str().unwrap().to_string(),
+            format: crate::models::FileFormat::Raw,
+            ..Default::default()
+        }));
+        let output = Endpoint {
+            endpoint_type: EndpointType::Custom {
+                name: factory_name,
+                config: serde_json::Value::Null,
+            },
+            middlewares: vec![],
+            handler: None,
+        };
+        let route = Route::new(input, output)
+            .with_exit_on_empty(true)
+            .with_reconnect_interval_ms(10);
+
+        let handle = route.run("test_drain_no_reconnect").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while handle.outcome().is_none() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the drain should end on its first failure");
+
+        assert_eq!(handle.outcome(), Some(RouteOutcome::Failed));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "no second pass");
+        Route::stop("test_drain_no_reconnect").await;
     }
 
     // Regression: with `concurrency > 1`, a source that reports `EndOfStream` used to

@@ -64,6 +64,39 @@ mixes JSON into its cells. The second is a behaviour change, listed below.
   CSV and JSON. It now becomes one column per leaf, named by its path: `stats.n`, `stats.avg`.
   **A new file gets different columns than before; a file that already has a header keeps
   it.** Set `csv.nested: json` for the previous output. Arrays are still written as JSON text.
+- **A drain does not wait for an endpoint.** With `exit_on_empty` (`mqb copy --drain`) a route
+  that failed reconnected up to ten times, 5 s apart, before it gave up: about 50 s against a
+  closed port, a WebSocket path that answers 404, a NATS subject outside every stream or a gRPC
+  topic nobody serves. It now ends on the first failure when nothing has been delivered yet,
+  with the endpoint's error. A drain that has delivered something keeps the ten reconnects, so
+  a short outage in the middle of a long copy does not end it. Routes without `exit_on_empty`
+  reconnect without limit, as before. Add a `retry` middleware to a drain that should wait for
+  its sink.
+- **A CSV file that ends inside a quoted field fails a drain.** The reader took everything
+  after the open quote as one field and reported success. A drain now writes the records before
+  it and fails, naming the byte offset of the open record; a tailing route waits for the writer
+  to finish the record.
+- **Blank lines in a line-based file are skipped.** `raw`, `json`, `text` and `normal` sources
+  emitted an empty line as a message with an empty payload, which a SQL or Parquet sink then
+  rejected. The CSV reader already skipped them. Row counts change for files with blank lines.
+- **A `file` route whose source and sink are the same path is refused.** It doubled the file
+  under a drain and would grow it without end otherwise.
+- **SQLite `has no column named` is not retried.** A sink writing to a table without the
+  expected columns retried for ever; it is now a non-retryable error like the same case on
+  Postgres and MySQL.
+- **An `object_store` source on a local path that does not exist fails a drain.** It reported
+  `copied 0 rows`. An empty directory or cloud prefix still does. A drain of a local path also
+  ends after one listing instead of waiting out the idle interval.
+- **NATS: a missing `subject` or `stream` stops the route.** It was retried as a connection
+  error until the start timeout.
+- **Clearer errors and quieter logs.** A queue read on a plain SQL table names
+  `cursor_column`; Postgres errors no longer end in `at line N` (a line of the server's source);
+  a closed database port reports `Connection refused` at once; a `filter` that does not compile
+  lists the operators, and one with a single `=` says so; a gRPC server names the topic it has
+  no consumer for; the drop summary counts messages per cause; an unknown `aggregate` field
+  lists the built-ins; `csv` settings without `format: csv` and an `insert_query` token that
+  binds NULL each warn once. The WebSocket "falling back to routed mode" line is now DEBUG and
+  the MQTT note on restart loss INFO.
 
 ## 0.4.18
 

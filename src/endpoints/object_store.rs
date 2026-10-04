@@ -729,6 +729,10 @@ pub struct ObjectStoreConsumer {
     /// Sorted rest of an unordered listing, valid while the cursor is `handed_out`.
     pending: std::collections::VecDeque<object_store::ObjectMeta>,
     handed_out: Option<String>,
+    /// The directory or file of a `file:` URL.
+    local_path: Option<std::path::PathBuf>,
+    /// Set by a draining route: an empty listing then ends the read at once.
+    draining: bool,
 }
 
 /// Consecutive decode failures on one object before it is quarantined (skipped) so a
@@ -868,6 +872,11 @@ impl ObjectStoreConsumer {
             unordered_listing: config.url.starts_with("file:"),
             pending: Default::default(),
             handed_out: None,
+            local_path: url::Url::parse(&config.url)
+                .ok()
+                .filter(|url| url.scheme() == "file")
+                .and_then(|url| url.to_file_path().ok()),
+            draining: false,
         })
     }
 
@@ -901,6 +910,8 @@ impl ObjectStoreConsumer {
             unordered_listing: false,
             pending: Default::default(),
             handed_out: None,
+            local_path: None,
+            draining: false,
         }
     }
 
@@ -1080,6 +1091,16 @@ impl MessageConsumer for ObjectStoreConsumer {
                     .await
                     .map_err(ConsumerError::from)?
                 {
+                    None if self.draining => {
+                        // A cloud prefix may be empty; a local path that is not there is a typo.
+                        if let Some(path) = self.local_path.as_ref().filter(|p| !p.exists()) {
+                            return Err(ConsumerError::Permanent(anyhow!(
+                                "object_store source path '{}' does not exist",
+                                path.display()
+                            )));
+                        }
+                        return Ok(empty_batch());
+                    }
                     None => {
                         tokio::time::sleep(self.idle_delay).await;
                         return Ok(empty_batch());
@@ -1234,6 +1255,10 @@ impl MessageConsumer for ObjectStoreConsumer {
             messages: batch,
             commit,
         })
+    }
+
+    fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
+        self.draining = exit_on_empty;
     }
 
     fn as_any(&self) -> &dyn Any {

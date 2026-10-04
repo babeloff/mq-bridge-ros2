@@ -159,7 +159,7 @@
           "default": false
         },
         "exit_on_empty": {
-          "description": "If true, the route exits gracefully once the source yields an empty batch\n(drain-then-exit). Off by default — routes normally poll indefinitely.\nA drain that keeps failing to reconnect gives up and fails rather than retrying forever.",
+          "description": "If true, the route exits gracefully once the source yields an empty batch\n(drain-then-exit). Off by default — routes normally poll indefinitely.\nA drain that fails before it delivered anything ends at once; later it gives up after ten reconnects.",
           "type": "boolean"
         }
       },
@@ -3928,7 +3928,7 @@
           "type": "boolean"
         },
         "exit_on_empty": {
-          "description": "If true, the route exits gracefully once the source yields an empty batch\n(drain-then-exit). Off by default — routes normally poll indefinitely.\nA drain that keeps failing to reconnect gives up and fails rather than retrying forever.",
+          "description": "If true, the route exits gracefully once the source yields an empty batch\n(drain-then-exit). Off by default — routes normally poll indefinitely.\nA drain that fails before it delivered anything ends at once; later it gives up after ten reconnects.",
           "type": "boolean"
         }
       },
