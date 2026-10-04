@@ -2396,6 +2396,16 @@ fn base_endpoint_from_uri(uri: &str) -> anyhow::Result<mq_bridge::models::Endpoi
                 break;
             }
         }
+        // `zeromq://tcp://host:port` names the transport itself; it is taken as written.
+        if tag == "zeromq" {
+            let address = uri.split(['?', '#']).next().unwrap_or(uri);
+            let transport = ["zeromq://", "zmq://"]
+                .iter()
+                .find_map(|prefix| address.strip_prefix(prefix));
+            if let Some(transport) = transport.filter(|t| t.contains("://")) {
+                url = transport.to_string();
+            }
+        }
         if tag == "kafka" {
             url = url.trim_end_matches('/').to_string();
         }
@@ -4032,6 +4042,16 @@ mod uri_tests {
 
         let cfg = config("zmq://127.0.0.1:5555", "zeromq");
         assert_eq!(cfg["url"], "tcp://127.0.0.1:5555");
+
+        // The form the book documents: the transport address after the scheme.
+        let cfg = config(
+            "zeromq://tcp://127.0.0.1:5555?socket_type=pull&bind=true",
+            "zeromq",
+        );
+        assert_eq!(cfg["url"], "tcp://127.0.0.1:5555");
+        assert_eq!(cfg["bind"], true);
+        let cfg = config("zmq://ipc:///tmp/mqb.sock", "zeromq");
+        assert_eq!(cfg["url"], "ipc:///tmp/mqb.sock");
     }
 
     // `consume: capture_all` is the documented way to back fill a CDC source, so it has to

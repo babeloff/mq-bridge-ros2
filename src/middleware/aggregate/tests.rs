@@ -29,7 +29,8 @@ fn fold(aggregate: &Aggregate, payloads: Vec<Value>) -> Vec<Option<Value>> {
 
 fn sum_by_card() -> Aggregate {
     aggregate(&format!(
-        "{{ key: '${{payload:card}}', into: stats, expression: '{SUM}' }}"
+        "{{ consistency: single_writer, key: '${{payload:card}}', into: stats, \
+         expression: '{SUM}' }}"
     ))
 }
 
@@ -308,7 +309,8 @@ async fn consumer_drops_and_acks_a_message_it_cannot_fold() {
         committed: committed.clone(),
     };
     let config = serde_yaml_ng::from_str(&format!(
-        "{{ key: '${{payload:card}}', into: stats, expression: '{SUM}' }}"
+        "{{ consistency: single_writer, key: '${{payload:card}}', into: stats, \
+         expression: '{SUM}' }}"
     ))
     .unwrap();
     let mut consumer = AggregateConsumer::new(Box::new(inner), &config, "test")
@@ -337,7 +339,8 @@ async fn consumer_drops_and_acks_a_message_it_cannot_fold() {
 async fn publisher_fails_only_the_message_it_cannot_fold() {
     let inner = Box::new(crate::endpoints::structural::null::NullPublisher);
     let config = serde_yaml_ng::from_str(&format!(
-        "{{ key: '${{payload:card}}', into: stats, expression: '{SUM}' }}"
+        "{{ consistency: single_writer, key: '${{payload:card}}', into: stats, \
+         expression: '{SUM}' }}"
     ))
     .unwrap();
     let publisher = AggregatePublisher::new(inner, &config, "test")
@@ -970,7 +973,10 @@ async fn aggregate_chain_bench() {
             )
         })
         .collect();
-    let aggregate = format!("- aggregate: {{ entries: [{}] }}", entries.join(", "));
+    let aggregate = format!(
+        "- aggregate: {{ consistency: single_writer, entries: [{}] }}",
+        entries.join(", ")
+    );
     let dedup = |key: &str| {
         format!("- deduplication: {{ store: 'memory://chain#', ttl_seconds: 3600{key} }}")
     };
@@ -1266,7 +1272,8 @@ async fn consumer_nacks_a_message_it_cannot_fold_under_fail() {
         committed: committed.clone(),
     };
     let config = serde_yaml_ng::from_str(&format!(
-        "{{ on_error: fail, key: '${{payload:card}}', into: stats, expression: '{SUM}' }}"
+        "{{ on_error: fail, consistency: single_writer, key: '${{payload:card}}', into: stats, \
+         expression: '{SUM}' }}"
     ))
     .unwrap();
     let mut consumer = AggregateConsumer::new(Box::new(inner), &config, "test")
@@ -1409,4 +1416,18 @@ async fn read_only_reads_the_stored_states_and_changes_none() {
         .unwrap()
         .to_string()
         .contains("`read_only` needs a `store`"));
+}
+
+#[tokio::test]
+async fn states_in_memory_only_are_opt_in() {
+    let yaml = "key: '${payload:card}'\ninto: stats\nfields: { n: count }";
+    let config = serde_yaml_ng::from_str(yaml).unwrap();
+    let unstored = Aggregate::connect(&config, "test").await;
+    let error = unstored.err().unwrap();
+    assert!(error.is::<crate::errors::InvalidConfig>());
+    assert!(error.to_string().contains("`consistency: single_writer`"));
+
+    let config = serde_yaml_ng::from_str(&format!("consistency: single_writer\n{yaml}")).unwrap();
+    let opted_in = Aggregate::connect(&config, "test").await.unwrap();
+    assert!(opted_in.store.is_none() && opted_in.writer.is_none());
 }

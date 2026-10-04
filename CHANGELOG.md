@@ -53,6 +53,12 @@ mixes JSON into its cells. The second is a behaviour change, listed below.
 
 ### Behaviour changes
 
+- **`aggregate`: states in memory only are opt-in.** An `aggregate` without
+  a `store` kept its states in the process, lost on restart and wrong with two instances, and
+  that was the default. It now needs `consistency: single_writer` next to it; with neither a
+  `store` nor that, the route fails to start with an error naming both. Add
+  `consistency: single_writer` to a config from 0.4.17 or 0.4.18 that has no `store` to keep
+  what it did.
 - **A CSV sink flattens nested objects.** A nested object used to be written as JSON text in
   one cell, so the output of `aggregate` (`{"stats":{"n":3,"avg":2.5}}`) came out as a mix of
   CSV and JSON. It now becomes one column per leaf, named by its path: `stats.n`, `stats.avg`.

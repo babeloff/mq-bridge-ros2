@@ -809,10 +809,24 @@ impl Aggregate {
 
     /// Like `new`, and opens the configured `store`.
     async fn connect(config: &AggregateMiddleware, route_name: &str) -> anyhow::Result<Self> {
-        let mut aggregate = Self::new(config)?;
+        // Whatever `new` rejects is a config that cannot work, so the route stops.
+        let mut aggregate = Self::new(config).map_err(|e| {
+            if e.is::<crate::errors::InvalidConfig>() {
+                e
+            } else {
+                crate::errors::InvalidConfig(e).into()
+            }
+        })?;
         if config.read_only && config.store.is_none() {
             return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                 "aggregate: `read_only` needs a `store` to read the states from"
+            ))
+            .into());
+        }
+        if config.store.is_none() && config.consistency != AggregateConsistency::SingleWriter {
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
+                "aggregate: without a `store` the states live in this process only and are \
+                 lost on restart; set a `store`, or `consistency: single_writer` to accept that"
             ))
             .into());
         }

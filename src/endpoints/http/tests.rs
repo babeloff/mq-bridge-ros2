@@ -2215,6 +2215,7 @@ async fn test_http_status_for_a_message_aggregate_cannot_fold() {
         let consumer = HttpConsumer::new(&config).await.unwrap();
         let aggregate = serde_json::from_value(serde_json::json!({
             "on_error": on_error,
+            "consistency": "single_writer",
             "key": "${payload:card}",
             "into": "stats",
             "fields": { "avg": "ema(amount, 0.5)" },

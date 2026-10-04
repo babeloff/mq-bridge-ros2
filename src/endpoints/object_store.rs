@@ -45,7 +45,7 @@ use crate::CanonicalMessage;
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use fast_uuid_v7::SequentialGenerator;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use object_store::{
     path::Path as ObjPath, Error as ObjectStoreError, ObjectStore, ObjectStoreExt, PutMode,
     PutOptions, PutPayload,
@@ -724,6 +724,11 @@ pub struct ObjectStoreConsumer {
     /// Consecutive decode failures on `decode_failing_key` before it is quarantined.
     decode_failures: u32,
     decode_failing_key: Option<String>,
+    /// The local filesystem lists in directory order, so its listing is sorted here.
+    unordered_listing: bool,
+    /// Sorted rest of an unordered listing, valid while the cursor is `handed_out`.
+    pending: std::collections::VecDeque<object_store::ObjectMeta>,
+    handed_out: Option<String>,
 }
 
 /// Consecutive decode failures on one object before it is quarantined (skipped) so a
@@ -860,6 +865,9 @@ impl ObjectStoreConsumer {
             max_object_bytes: config.max_object_bytes,
             decode_failures: 0,
             decode_failing_key: None,
+            unordered_listing: config.url.starts_with("file:"),
+            pending: Default::default(),
+            handed_out: None,
         })
     }
 
@@ -890,6 +898,9 @@ impl ObjectStoreConsumer {
             max_object_bytes: None,
             decode_failures: 0,
             decode_failing_key: None,
+            unordered_listing: false,
+            pending: Default::default(),
+            handed_out: None,
         }
     }
 
@@ -929,9 +940,29 @@ impl ObjectStoreConsumer {
                 .chain(stream)
                 .boxed();
         }
-        while let Some(meta) = stream.next().await {
-            let meta = meta?;
+        if self.unordered_listing && self.single_object != Some(true) {
+            if last != self.handed_out.as_deref() {
+                self.pending.clear();
+            }
+            if self.pending.is_empty() {
+                let mut listed: Vec<_> = stream.try_collect().await?;
+                listed.sort_unstable_by(|a, b| a.location.cmp(&b.location));
+                self.pending = listed.into();
+            }
+            stream = futures::stream::empty().boxed();
+        }
+        loop {
+            let meta = match self.pending.pop_front() {
+                Some(meta) => meta,
+                None => match stream.next().await {
+                    Some(meta) => meta?,
+                    None => break,
+                },
+            };
             let key = meta.location.to_string();
+            if self.unordered_listing {
+                self.handed_out = Some(key.clone());
+            }
             // Skip pseudo-directory markers; `list_with_offset` may also surface the offset key.
             if key.ends_with('/') || last == Some(key.as_str()) {
                 continue;

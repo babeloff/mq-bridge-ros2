@@ -42,6 +42,7 @@ sensor_stats:
     kafka: { topic: "readings", url: "localhost:9092" }
     middlewares:
       - aggregate:
+          consistency: single_writer
           key: "${payload:sensor_id}"
           into: sensor
           expression: "{ total: (state.total ?? 0) + reading, count: (state.count ?? 0) + 1 }"
@@ -52,6 +53,10 @@ sensor_stats:
 `{"sensor_id": 7, "reading": 20}` leaves as
 `{"sensor_id": 7, "reading": 20, "sensor": {"total": 20, "count": 1}}`. The next message for
 sensor 7 continues from that state.
+
+`consistency: single_writer` without a `store` says that the states may live in this process
+only: they are gone after a restart and one instance runs the route. Leaving out both is a
+startup error, so that states in memory are never the result of a forgotten `store`.
 
 A CSV sink writes that nested result as the columns `sensor.total` and `sensor.count`, not as
 JSON text in one cell; see [CSV](../connectors/file.md#csv).
@@ -67,6 +72,7 @@ of messages to forget it. Keep the weighted sum and the weight, and divide when 
 
 ```yaml
 - aggregate:
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor.avg_reading
     expression: "{ s: (state.s ?? 0) * 0.99 + reading, w: (state.w ?? 0) * 0.99 + 1 }"
@@ -84,6 +90,7 @@ a rule such as "this reading is five times the sensor's average" needs:
 
 ```yaml
 - aggregate:
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor.avg_before
     emit: previous
@@ -99,6 +106,7 @@ carry the average and the standard deviation from before its own update, and a `
 
 ```yaml
 - aggregate:
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: before
     emit: previous
@@ -117,6 +125,7 @@ values (divided by n − 1) and `null` for the first message of a key, which has
 
 ```yaml
 - aggregate:
+    consistency: single_writer
     entries:
       - key: "${payload:sensor_id}"
         into: stats.sensor
@@ -133,6 +142,7 @@ what each one computes:
 
 ```yaml
 - aggregate:
+    consistency: single_writer
     entries:
       - key: "${payload:sensor_id}"
         into: sensor
@@ -159,6 +169,7 @@ instead of `alpha` and the weight follows the time between two messages of a key
 
 ```yaml
 - aggregate:
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor
     time: measured_at
@@ -193,6 +204,7 @@ what happens then:
 
 ```yaml
 - aggregate:
+    consistency: single_writer
     on_error: skip
     entries:
       - { key: "${payload:sensor_id}", into: sensor, fields: { avg: "ema(reading, 0.01)" } }
@@ -349,7 +361,8 @@ If you need one of these, compute the aggregate in the database with a
 ## What to know before relying on it
 
 - **Without `store`, state lives in memory only.** A restart starts from empty states and
-  two instances do not share them.
+  two instances do not share them. That is why it has to be asked for with
+  `consistency: single_writer`.
 - **Memory is bounded.** An entry keeps at most `max_keys` states in memory, one million
   unless you set it. See [Memory](#memory) for what happens beyond that.
 - **`single_writer` with two instances is wrong.** The second writer is noticed as a failed
@@ -417,7 +430,7 @@ a key that went quiet goes. What "dropped" means depends on where the states liv
 
 | Setup | A dropped state |
 |---|---|
-| no `store` | is forgotten; its key starts again from an empty state |
+| no `store` (`single_writer`) | is forgotten; its key starts again from an empty state |
 | `store`, `single_writer` | is only dropped from memory and loaded again when its key returns |
 | `store`, `shared` | does not occur; nothing is kept in memory between batches |
 
@@ -428,6 +441,7 @@ weeks: set `max_keys` to what you can afford, or use a `store` so that no state 
 
 ```yaml
 - aggregate:
+    consistency: single_writer
     key: "${payload:session_id}"
     into: session
     max_keys: 200000

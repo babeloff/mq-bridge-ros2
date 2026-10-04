@@ -570,10 +570,10 @@ fn default_lookup_concurrency() -> usize {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AggregateMiddleware {
-    /// Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it they live in memory.
+    /// Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it `consistency: single_writer` is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<String>,
-    /// With a `store`: `shared` is correct with several instances, `single_writer` is faster with one.
+    /// `shared` needs a `store`; `single_writer` is for one instance and works without one, in memory only.
     #[serde(default)]
     pub consistency: AggregateConsistency,
     /// States kept in memory per entry; beyond it the least recently used are dropped. Defaults to 1000000, 0 is unlimited.
@@ -660,15 +660,15 @@ pub enum AggregateOnError {
     Skip,
 }
 
-/// How an `aggregate` middleware with a `store` keeps its states consistent.
+/// How an `aggregate` middleware keeps its states consistent.
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AggregateConsistency {
-    /// Loads and writes the states of every batch; correct with several instances.
+    /// Loads and writes the states of every batch; correct with several instances. Needs a `store`.
     #[default]
     Shared,
-    /// Keeps the states in memory and writes them behind; correct with one instance only.
+    /// Keeps the states in memory and writes them behind; correct with one instance only. Without a `store` they are lost on restart.
     SingleWriter,
 }
 

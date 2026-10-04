@@ -5,6 +5,7 @@
 
 //! The CSV dialect a `file` or `object_store` endpoint reads and writes.
 
+use crate::errors::InvalidConfig;
 use crate::models::{CsvConfig, CsvNested, FileFormat};
 use anyhow::{anyhow, bail};
 use std::sync::{Arc, OnceLock};
@@ -68,7 +69,9 @@ impl CsvDialect {
         delimiter: &[u8],
     ) -> anyhow::Result<Self> {
         match format {
-            FileFormat::Csv => Self::from_config(config, delimiter),
+            FileFormat::Csv => {
+                Self::from_config(config, delimiter).map_err(|e| InvalidConfig(e).into())
+            }
             _ => Ok(Self::default()),
         }
     }
@@ -112,7 +115,10 @@ impl CsvDialect {
     /// A source has nothing else to name its columns by.
     pub(crate) fn check_source(&self) -> anyhow::Result<()> {
         if !self.header && self.columns.is_none() {
-            bail!("csv: a source with `header: false` needs `columns`");
+            return Err(InvalidConfig(anyhow!(
+                "csv: a source with `header: false` needs `columns`"
+            ))
+            .into());
         }
         Ok(())
     }
@@ -120,7 +126,10 @@ impl CsvDialect {
     /// A sink has no record to guess the separator from.
     pub(crate) fn check_sink(&self) -> anyhow::Result<()> {
         if matches!(self.separator, Separator::Auto(_)) {
-            bail!("csv: `separator: auto` is for sources; a sink needs the separator itself");
+            return Err(InvalidConfig(anyhow!(
+                "csv: `separator: auto` is for sources; a sink needs the separator itself"
+            ))
+            .into());
         }
         Ok(())
     }

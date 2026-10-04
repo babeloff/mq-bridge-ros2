@@ -1187,8 +1187,8 @@ to keep a counter: the arithmetic runs here, so no request is made per message.
 | `output` | expression | the state itself; shapes what is written to the message |
 | `emit` | `updated` \| `previous` | `updated` |
 | `entries` | list of `{key, expression, fields, into, output, emit}` | `[]`; further aggregates |
-| `store` | URL | – (states live in memory); `postgres://…/db[/table]`, `sqlite://…`, `mongodb://host/db[/collection]` |
-| `consistency` | `shared` \| `single_writer` | `shared`; only used with `store` |
+| `store` | URL | –; `postgres://…/db[/table]`, `sqlite://…`, `mongodb://host/db[/collection]`. Without it `consistency: single_writer` is required |
+| `consistency` | `shared` \| `single_writer` | `shared`, which needs a `store`; `single_writer` without a `store` keeps the states in memory only |
 | `max_keys` | integer | `1000000`; states kept in memory per entry, `0` is unlimited |
 | `time` | dotted payload path | – (the clock); the message's event time, for `fields` entries |
 | `on_error` | `drop` \| `fail` \| `skip` | `drop`; what happens to a message that cannot be folded |
@@ -1196,6 +1196,7 @@ to keep a counter: the arithmetic runs here, so no request is made per message.
 
 ```yaml middleware
 - aggregate:
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor
     expression: "{ total: (state.total ?? 0) + reading, count: (state.count ?? 0) + 1 }"
@@ -1204,6 +1205,11 @@ to keep a counter: the arithmetic runs here, so no request is made per message.
 `{"sensor_id": 7, "reading": 20}` leaves as
 `{"sensor_id": 7, "reading": 20, "sensor": {"total": 20, "count": 1}}`; the next message for sensor 7
 continues from that state.
+
+**States in memory only are opt-in.** Without a `store` the states are lost on restart and
+not shared between instances, so that has to be asked for with `consistency: single_writer`,
+as above. An `aggregate` with neither a `store` nor `consistency: single_writer` is a startup
+error.
 
 **Expressions** are the ones [`filter`](#filter) and [`transform`](#transform) use. They read
 payload fields by name and metadata as `meta.<key>`, plus `state`: the value `expression`
@@ -1223,6 +1229,7 @@ to forget it. Keep the weighted sum and the weight instead and divide when writi
 
 ```yaml middleware
 - aggregate:
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor.avg_reading
     expression: "{ s: (state.s ?? 0) * 0.99 + reading, w: (state.w ?? 0) * 0.99 + 1 }"
@@ -1236,6 +1243,7 @@ the usual form still reads 216.
 
 ```yaml middleware
 - aggregate:
+    consistency: single_writer
     entries:
       - key: "${payload:sensor_id}"
         into: features.sensor
@@ -1251,6 +1259,7 @@ times faster, because no expression runs and the payload is not parsed into a tr
 
 ```yaml middleware
 - aggregate:
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor
     fields:
@@ -1285,6 +1294,7 @@ this process is used, which makes a replay compute different values.
 
 ```yaml middleware
 - aggregate:
+    consistency: single_writer
     key: "${payload:sensor_id}"
     into: sensor
     time: measured_at
@@ -1320,6 +1330,7 @@ the reason for each is logged at debug level.
 
 ```yaml middleware
 - aggregate:
+    consistency: single_writer
     on_error: skip
     entries:
       - { key: "${payload:sensor_id}", into: sensor, fields: { avg: "ema(reading, 0.01)" } }
@@ -1390,7 +1401,7 @@ and MongoDB are supported.
 **What to expect.**
 
 - **Without `store`, state lives in memory only.** It is lost on restart and it is not shared
-  between instances.
+  between instances, which is why it needs `consistency: single_writer`.
 - **Memory is bounded by `max_keys`.** An entry keeps at most that many states in memory,
   one million unless set. When it is full, the half that was used least recently is dropped.
   Without a `store` those states are forgotten: their key starts again from an empty state,

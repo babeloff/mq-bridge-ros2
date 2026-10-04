@@ -689,22 +689,27 @@ pub(crate) fn parse_delimiter(delimiter: Option<&str>) -> anyhow::Result<Vec<u8>
         Some(s) if s.starts_with("0x") => {
             let hex = s.trim_start_matches("0x");
             if hex.len() != 2 {
-                return Err(anyhow::anyhow!(
+                return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                     "Hex delimiter must be 1 byte (2 hex chars)"
-                ));
+                ))
+                .into());
             }
             (0..hex.len())
                 .step_by(2)
                 .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
                 .collect::<Result<Vec<u8>, _>>()
-                .map_err(|e| anyhow::anyhow!("Invalid hex delimiter: {}", e))?
+                .map_err(|e| {
+                    crate::errors::InvalidConfig(anyhow::anyhow!("Invalid hex delimiter: {}", e))
+                })?
         }
         Some(s) => s.as_bytes().to_vec(),
         None => vec![b'\n'],
     };
 
     if bytes.is_empty() {
-        return Err(anyhow::anyhow!("Delimiter cannot be empty"));
+        return Err(
+            crate::errors::InvalidConfig(anyhow::anyhow!("Delimiter cannot be empty")).into(),
+        );
     }
     Ok(bytes)
 }
@@ -862,21 +867,24 @@ pub struct FilePublisher {
 /// publisher and consumer: both need their Cargo feature enabled.
 fn validate_member_settings(config: &FileConfig) -> anyhow::Result<()> {
     if config.format == FileFormat::Parquet {
-        return Err(anyhow::anyhow!(
+        return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
             "file 'format: parquet' is not supported (a Parquet file can't be appended to); parquet is only supported by object_store"
-        ));
+        ))
+        .into());
     }
     #[cfg(not(feature = "compression"))]
     if config.compression != Compression::None {
-        return Err(anyhow::anyhow!(
+        return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
             "file 'compression' requires the `compression` feature"
-        ));
+        ))
+        .into());
     }
     #[cfg(not(feature = "encryption"))]
     if config.encryption.is_some() {
-        return Err(anyhow::anyhow!(
+        return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
             "file 'encryption' requires the `encryption` feature"
-        ));
+        ))
+        .into());
     }
     Ok(())
 }
@@ -1050,9 +1058,10 @@ impl FilePublisher {
         let by_source_position = name_by == NameBy::SourcePosition;
         if by_source_position {
             if matches!(config.format, FileFormat::Csv) {
-                return Err(anyhow::anyhow!(
+                return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                     "file 'name_by: source_position' does not support CSV (per-part headers are unimplemented)"
-                ));
+                ))
+                .into());
             }
             tokio::fs::create_dir_all(path).await.with_context(|| {
                 format!("Failed to create part-file sink directory: {path_str}")
@@ -2726,9 +2735,10 @@ impl FileConsumer {
                 Some(FileConsumerMode::Subscribe { delete: true })
             )
         {
-            return Err(anyhow::anyhow!(
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                 "FileFormat::Csv is not supported with Subscribe {{ delete: true }} mode"
-            ));
+            ))
+            .into());
         }
         validate_member_settings(config)?;
         if config.compression != Compression::None || config.encryption.is_some() {
@@ -2736,9 +2746,10 @@ impl FileConsumer {
                 &config.mode,
                 None | Some(FileConsumerMode::Consume { delete: false })
             ) {
-                return Err(anyhow::anyhow!(
+                return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                     "file 'compression'/'encryption' is only supported with the default `consume` mode (no delete, no group_id)"
-                ));
+                ))
+                .into());
             }
             // Member-based files (compressed and/or encrypted) have no seekable
             // line offsets, so they use a dedicated reader that decodes from the
@@ -2751,20 +2762,22 @@ impl FileConsumer {
         // as "messages" under a clean success. A known compressor magic at offset 0 is
         // unambiguous here (a JSON/text member never starts with these bytes).
         if let Some(codec) = sniff_compression_magic(&config.path) {
-            return Err(anyhow::anyhow!(
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                 "file '{}' begins with a {codec} magic header but no `compression` is configured; \
                  set `compression: {codec}` (and any `encryption`) to match how it was written",
                 config.path
-            ));
+            ))
+            .into());
         }
         // Same guard for encryption: the envelope is behind an 8-byte frame prefix,
         // so a compressor magic never shows up at offset 0 for an encrypted file.
         if looks_encrypted_at_rest(&config.path) {
-            return Err(anyhow::anyhow!(
+            return Err(crate::errors::InvalidConfig(anyhow::anyhow!(
                 "file '{}' looks encrypted but no `encryption` is configured; \
                  set `encryption` (and any `compression`) to match how it was written",
                 config.path
-            ));
+            ))
+            .into());
         }
         match &config.mode {
             None | Some(FileConsumerMode::Consume { delete: false }) => {

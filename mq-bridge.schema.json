@@ -7,15 +7,15 @@
   },
   "$defs": {
     "AggregateConsistency": {
-      "description": "How an `aggregate` middleware with a `store` keeps its states consistent.",
+      "description": "How an `aggregate` middleware keeps its states consistent.",
       "oneOf": [
         {
-          "description": "Loads and writes the states of every batch; correct with several instances.",
+          "description": "Loads and writes the states of every batch; correct with several instances. Needs a `store`.",
           "type": "string",
           "const": "shared"
         },
         {
-          "description": "Keeps the states in memory and writes them behind; correct with one instance only.",
+          "description": "Keeps the states in memory and writes them behind; correct with one instance only. Without a `store` they are lost on restart.",
           "type": "string",
           "const": "single_writer"
         }
@@ -89,7 +89,7 @@
       "type": "object",
       "properties": {
         "consistency": {
-          "description": "With a `store`: `shared` is correct with several instances, `single_writer` is faster with one.",
+          "description": "`shared` needs a `store`; `single_writer` is for one instance and works without one, in memory only.",
           "$ref": "#/$defs/AggregateConsistency",
           "default": "shared"
         },
@@ -162,7 +162,7 @@
           "type": "boolean"
         },
         "store": {
-          "description": "Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it they live in memory.",
+          "description": "Store URL keeping the states: `postgres|sqlite://…[/table]` or `mongodb://host/db[/collection]`. Without it `consistency: single_writer` is required.",
           "type": [
             "string",
             "null"
