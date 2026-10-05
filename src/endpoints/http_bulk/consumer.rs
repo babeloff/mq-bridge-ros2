@@ -1183,7 +1183,9 @@ mod tests {
         let failed = server(|_| (404, "no such feed".to_string())).await;
         let mut consumer =
             consumer(&failed, json!({"read": {"path": "/e", "stream": "sse"}})).await;
-        let error = consumer.receive_batch(1).await.err().expect("refused");
+        let Err(error) = consumer.receive_batch(1).await else {
+            panic!("a 404 opens no stream");
+        };
         assert!(matches!(error, ConsumerError::Permanent(_)), "{error:#}");
     }
 }
