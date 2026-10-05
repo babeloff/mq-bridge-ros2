@@ -3689,7 +3689,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge"
-version = "0.4.19"
+version = "0.4.20"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3792,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-bindings-common"
-version = "0.4.19"
+version = "0.4.20"
 dependencies = [
  "anyhow",
  "fast-uuid-v7",
@@ -3806,7 +3806,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-node"
-version = "0.4.19"
+version = "0.4.20"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3861,7 +3861,7 @@ dependencies = [
 
 [[package]]
 name = "mq-bridge-py"
-version = "0.4.19"
+version = "0.4.20"
 dependencies = [
  "anyhow",
  "async-trait",

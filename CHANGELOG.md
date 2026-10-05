@@ -2,6 +2,20 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 0.4.20
+
+Kafka outputs publish faster with their default settings.
+
+### Changed
+
+- **Kafka publishing no longer waits 5 ms per batch.** A Kafka output awaits the delivery of
+  every batch, and the producer's `linger.ms` of 5 held each batch back for that long before
+  sending it. The default is now 1 ms, which still sends a batch as one request per partition.
+  With the defaults (`batch_size: 512`, `concurrency: 1`) a local broker took about 71,000
+  messages per second instead of 29,000. `delayed_ack: true`, which awaits nothing, keeps
+  5 ms; the producer a Kafka input uses for replies also moves to 1 ms. A
+  `linger.ms` in `producer_options` overrides the default as before.
+
 ## 0.4.19
 
 CSV in more shapes: the reader takes other separators and quoting, and a CSV sink no longer
