@@ -36,6 +36,14 @@ A **route** connects one input to one output. In between, it can transform, filt
 
 It is a **library you embed in your own service**, not a daemon or platform you operate. If you'd rather not write code, [`mq-bridge-app`](apps/mq-bridge-app) runs the same engine and config as a CLI, server, desktop app, and MCP server.
 
+## Use cases
+
+| Problem | Guide with a runnable example |
+| :--- | :--- |
+| A RAG or semantic-search index drifts from its Postgres source | [Keep a vector index in sync with Postgres: CDC → embeddings → Qdrant](https://marcomq.github.io/mq-bridge/use-cases/sync-postgres-to-qdrant.html) |
+| A service must update its database and publish an event atomically | [Transactional outbox with Postgres and Kafka](https://marcomq.github.io/mq-bridge/use-cases/transactional-outbox-postgres-kafka.html) |
+| Tests for Kafka, NATS or RabbitMQ consumers need a running broker | [Test message handlers without a broker](https://marcomq.github.io/mq-bridge/use-cases/test-without-a-broker.html) |
+
 ## Quick Start
 
 Install the library for your language:

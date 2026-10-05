@@ -61,7 +61,9 @@ impl KafkaPublisher {
         let mut client_config = create_common_config(config);
         client_config
             // --- Performance Tuning ---
-            .set("linger.ms", "5")
+            // An awaited batch waits out the linger before it is sent: 1 ms keeps it in one
+            // request per partition (0 splits it). Nothing waits with `delayed_ack`.
+            .set("linger.ms", if config.delayed_ack { "5" } else { "1" })
             .set("batch.num.messages", "10000") // Max messages per batch.
             .set("compression.type", "lz4") // Efficient compression.
             // --- Reliability ---
@@ -141,6 +143,8 @@ impl KafkaPublisher {
             &config.tls.key_file,
             config.tls.accept_invalid_certs,
             &producer_options,
+            // Sets the default `linger.ms`, so the two modes cannot share a producer.
+            config.delayed_ack,
         ));
         let shared = config.shared.unwrap_or(true);
         let producer = crate::support::connection_registry::get_or_create(
@@ -523,7 +527,8 @@ impl KafkaConsumer {
             let mut producer_config = create_common_config(config);
             // Apply similar defaults as KafkaPublisher for reliability
             producer_config
-                .set("linger.ms", "5")
+                // Replies are awaited one at a time and each waits out the linger: keep it short.
+                .set("linger.ms", "1")
                 .set("batch.num.messages", "10000")
                 .set("compression.type", "lz4")
                 .set("enable.idempotence", "true")

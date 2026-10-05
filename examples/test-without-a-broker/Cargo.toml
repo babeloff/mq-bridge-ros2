@@ -1,0 +1,14 @@
+[package]
+name = "test-without-a-broker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The memory endpoint needs no Cargo feature. Production adds the transport it
+# uses (for example `features = ["kafka", "yaml"]`); the handler does not change.
+[dependencies]
+mq-bridge = { version = "=0.4.18", default-features = false }
+serde_json = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

@@ -1,0 +1,62 @@
+name: Examples
+
+# Runs the use-case examples under examples/ the way their READMEs describe.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "examples/postgres-cdc-to-qdrant/**"
+      - "examples/transactional-outbox/**"
+      - "examples/test-without-a-broker/**"
+      - ".github/workflows/examples.yml"
+  pull_request:
+    paths:
+      - "examples/postgres-cdc-to-qdrant/**"
+      - "examples/transactional-outbox/**"
+      - "examples/test-without-a-broker/**"
+      - ".github/workflows/examples.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: examples-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: ${{ matrix.example }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [postgres-cdc-to-qdrant, transactional-outbox]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Run the example's smoke test
+        working-directory: examples/${{ matrix.example }}
+        run: ./test.sh
+
+  test-without-a-broker:
+    name: test-without-a-broker
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Rust
+        working-directory: examples/test-without-a-broker
+        run: cargo test --locked
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Python
+        working-directory: examples/test-without-a-broker/python
+        run: |
+          pip install -r requirements.txt
+          pytest -q
