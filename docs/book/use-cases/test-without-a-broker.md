@@ -85,6 +85,8 @@ pub fn orders_route(input: Endpoint, output: Endpoint) -> Route {
 The test passes memory endpoints, sends messages into one channel and reads the other:
 
 ```rust
+use std::time::Duration;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn valid_orders_are_checked_and_invalid_ones_dropped() {
     let input = Endpoint::new_memory("orders.in", 100);

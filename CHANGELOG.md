@@ -6,6 +6,22 @@ All notable changes to `mq-bridge`. Newest first.
 
 Kafka outputs publish faster with their default settings.
 
+### Added
+
+- **`http_bulk` reads an open stream.** `read.stream: sse` or `ndjson` sends one request and
+  turns every server-sent event or line of the response into a message, instead of asking
+  for pages. An SSE source resumes with `Last-Event-ID` from the last acknowledged event, an
+  NDJSON source from a field named by `cursor.item`; both save the position in
+  `checkpoint_store` and connect again when the response ends. With a stream,
+  `request_timeout_ms` is the longest silence, not the length of the response. This is the
+  way to consume a remote SSE feed or a one-response export; the `http` endpoint's
+  `receive_streamable` and `stream_response_to` are unchanged.
+- **Named `http_bulk` endpoints from your own crate.** `typesense` and `elasticsearch` are
+  `http_bulk` configurations behind a name, and that table was closed.
+  `endpoints::http_bulk::register_preset_with(name, schema, resolve)` registers one of your
+  own as a `custom` endpoint; `preset_schema`, `preset_base_url` and `preset_segment` are the
+  helpers the built-in ones use.
+
 ### Changed
 
 - **Kafka publishing no longer waits 5 ms per batch.** A Kafka output awaits the delivery of

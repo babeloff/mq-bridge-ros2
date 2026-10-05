@@ -37,7 +37,7 @@ flowchart LR
 Postgres needs `wal_level = logical` and a publication on the table:
 
 ```sql
-CREATE PUBLICATION docs_pub FOR TABLE docs;
+CREATE PUBLICATION docs_pub FOR TABLE docs WITH (publish = 'insert, update, delete');
 ```
 
 The route, as it runs in the example (`routes.yaml`):
@@ -167,6 +167,7 @@ and a semantic search; it runs in CI.
 | **mq-bridge restarts** | It resumes from the replication slot and the checkpoint file. Changes made while it was down are applied after the restart. Without `checkpoint_store`, `capture_all` copies the whole table again, which re-embeds every row. Keep the checkpoint file on a volume. |
 | **Duplicates** | Delivery is [at-least-once](../engine/delivery.md): a change can be delivered again after a crash or restart. A repeated upsert writes the same point id again and a repeated delete removes nothing, so the index converges. The cost of a replay is the repeated embedding calls. |
 | **Deletes** | A delete event carries only the key columns. The table needs a primary key (or a replica identity), and the point id must be that key. |
+| **`TRUNCATE`** | Not synchronized. A truncate event names no rows, so the route has nothing to delete by; the publication leaves it out (`publish = 'insert, update, delete'`). After truncating the table, delete the points or recreate the collection yourself. |
 | **Qdrant unavailable** | `http_bulk` treats 408, 429 and most 5xx responses as retryable and `retry` repeats the request. A message is acknowledged to Postgres only after the output accepted it, so unconfirmed changes stay in the replication slot. |
 | **Embeddings API unavailable or rejecting** | A temporary error is retried. A permanent error (an HTTP 4xx, a non-JSON row) is logged and drops only that message; add a [`dlq`](../cookbook/dlq.md) after the `lookup` to keep such rows. |
 | **mq-bridge stays down** | Postgres keeps the WAL the slot has not confirmed. Monitor the slot's lag and drop the slot if you retire the route. |

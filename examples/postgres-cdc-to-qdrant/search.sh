@@ -2,6 +2,11 @@
 # Semantic search over the synced collection. Usage: ./search.sh "how long do refunds take"
 set -euo pipefail
 
+if [ $# -lt 1 ] || [ -z "$1" ]; then
+  echo "usage: $0 \"<query>\"" >&2
+  exit 1
+fi
+
 vector=$(curl -sS --fail http://localhost:11434/v1/embeddings \
   -d "$(jq -n --arg q "$1" '{model: "all-minilm", input: $q}')" | jq -c '.data[0].embedding')
 

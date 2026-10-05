@@ -42,4 +42,9 @@ docker compose start mq-bridge
 wait_for "an event written while the relay was down arrives after a restart" "order.paid,order.placed"
 
 keys=$(./consume.sh | cut -d' ' -f1 | sort -u | paste -sd, -)
-[ "$keys" = "order-1" ] && echo "ok: the Kafka key is the aggregate id" || { echo "FAILED: keys were: $keys"; exit 1; }
+if [ "$keys" = "order-1" ]; then
+  echo "ok: the Kafka key is the aggregate id"
+else
+  echo "FAILED: keys were: $keys"
+  exit 1
+fi

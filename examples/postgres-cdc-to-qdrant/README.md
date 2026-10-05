@@ -35,6 +35,9 @@ docker compose exec postgres psql -U app -d app -c "DELETE FROM docs WHERE title
 `./test.sh` runs the whole sequence (backfill, insert, update, delete, restart, search) and is what
 CI executes. `docker compose down -v` removes everything.
 
+`TRUNCATE docs` is not synchronized: the publication in `init.sql` publishes inserts, updates and
+deletes only, so the points stay in Qdrant until you delete them or recreate the collection.
+
 ## Files
 
 | File | Purpose |

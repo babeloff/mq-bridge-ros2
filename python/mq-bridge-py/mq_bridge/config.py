@@ -81,6 +81,7 @@ DeliveryGuarantee = str
 FaultMode = str
 FileFormat = str
 HttpBulkFormat = str
+HttpBulkStream = str
 HttpServerProtocol = str
 IdHash = str
 MappingRule = str
@@ -153,6 +154,7 @@ __all__ = [
     "HttpBulkQuery",
     "HttpBulkRead",
     "HttpBulkResult",
+    "HttpBulkStream",
     "HttpBulkUpsert",
     "HttpConfig",
     "HttpServerProtocol",

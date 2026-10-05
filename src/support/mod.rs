@@ -33,4 +33,6 @@ pub(crate) mod parquet;
 pub mod plugin_abi;
 pub mod poll_job;
 pub mod source_ranges;
+#[cfg(any(feature = "http", feature = "http-bulk"))]
+pub(crate) mod sse;
 pub mod stream_batch;

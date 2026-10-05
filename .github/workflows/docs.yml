@@ -47,6 +47,10 @@ jobs:
       - name: Publish llms.txt
         run: cp llms.txt docs/book/book/llms.txt
 
+      # Canonical URLs, meta descriptions, sitemap.xml and llms-full.txt.
+      - name: Postprocess book
+        run: python3 docs/book/postprocess.py
+
       # The benchmark dashboard lives on the gh-pages branch. Copy it into the
       # book so this workflow is the only thing that publishes to Pages.
       - name: Checkout benchmark data
