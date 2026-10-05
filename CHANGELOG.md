@@ -368,7 +368,7 @@ Each of these changes what an existing setup sees. Check them before upgrading.
   SOURCE, TARGET and `--filter` of a `copy --resume` job. `reset` prints the old value so
   `set --value` can undo it. Works for SQL, ClickHouse and object-store cursor readers and
   MongoDB change streams; Postgres CDC is refused, its slot is authoritative. See
-  [Checkpoints](apps/mq-bridge-app/dev/docs/cookbook/checkpoints.md#inspecting-and-editing-a-checkpoint).
+  [Checkpoints](docs/book/cookbook/checkpoints.md#inspecting-and-editing-a-checkpoint).
 - **`CheckpointStore::clear`**, implemented for the file, SQL, MongoDB and object-store
   backends. The default returns an error, so existing implementations still compile.
 

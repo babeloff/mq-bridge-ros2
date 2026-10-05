@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generates the Connect plugin's component pages in dev/docs/connectors/.
+"""Generates the Connect plugin's component pages in docs/book/connectors/.
 
 The component list and every config field come from the specs Redpanda Connect
 registers in the plugin's Go bridge, so the pages describe exactly what the
@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 
-DOCS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "connectors")
+DOCS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..", "docs", "book", "connectors")
 UPSTREAM = "https://docs.redpanda.com/redpanda-connect/components"
 
 SPECDUMP = """package main

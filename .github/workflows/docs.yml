@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths:
       - "docs/**"
-      - "apps/mq-bridge-app/dev/docs/**"
+      - "llms.txt"
       - "apps/mq-bridge-app/crates/cli/examples/gen_url_docs.rs"
       - ".github/workflows/docs.yml"
   # The benchmark workflow pushes new data to the gh-pages branch; republish the
@@ -38,14 +38,14 @@ jobs:
           mdbook-version: "0.5.4"
 
       - name: Vendor engine docs
-        run: bash apps/mq-bridge-app/dev/docs/sync-engine-docs.sh
+        run: bash docs/book/sync-engine-docs.sh
 
       - name: Build book
-        run: mdbook build apps/mq-bridge-app/dev/docs
+        run: mdbook build docs/book
 
-      # mdbook copies non-Markdown files from the book source; fail if that ever stops.
-      - name: Check llms.txt is published
-        run: test -s apps/mq-bridge-app/dev/docs/book/llms.txt
+      # llms.txt lives at the repository root; publish it with the book.
+      - name: Publish llms.txt
+        run: cp llms.txt docs/book/book/llms.txt
 
       # The benchmark dashboard lives on the gh-pages branch. Copy it into the
       # book so this workflow is the only thing that publishes to Pages.
@@ -61,8 +61,8 @@ jobs:
         run: |
           src=.benchmark-data/dev/bench
           if [ -d "$src" ]; then
-            mkdir -p apps/mq-bridge-app/dev/docs/book/dev
-            cp -R "$src" apps/mq-bridge-app/dev/docs/book/dev/bench
+            mkdir -p docs/book/book/dev
+            cp -R "$src" docs/book/book/dev/bench
           else
             echo "::warning::no benchmark data on gh-pages; /dev/bench/ will be missing"
           fi
@@ -70,7 +70,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: apps/mq-bridge-app/dev/docs/book
+          path: docs/book/book
 
   deploy:
     name: Deploy to Pages

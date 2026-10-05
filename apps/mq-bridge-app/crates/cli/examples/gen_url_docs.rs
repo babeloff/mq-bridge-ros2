@@ -1,8 +1,8 @@
-//! Generates `dev/docs/reference/<connector>.md` from the JSON Schemas of the
+//! Generates `docs/book/reference/<connector>.md` from the JSON Schemas of the
 //! endpoint config structs used by `mqb copy --from/--to` (see
 //! `endpoint_from_uri` in `src/main.rs`). The JSON Schema is the single
 //! source of truth for parameter name/type/default/required/description;
-//! this tool only renders it as a table. Examples in `dev/docs/connectors/`
+//! this tool only renders it as a table. Examples in `docs/book/connectors/`
 //! are hand-written and not touched by this generator.
 //!
 //! Run with `cargo run -p mq-bridge-app --example gen_url_docs`.
@@ -18,7 +18,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 struct Connector {
-    /// File stem under `dev/docs/reference/` and `dev/docs/connectors/`.
+    /// File stem under `docs/book/reference/` and `docs/book/connectors/`.
     slug: &'static str,
     /// Human-readable name for the page heading.
     title: &'static str,
@@ -168,7 +168,7 @@ fn main() -> std::io::Result<()> {
         },
     ];
 
-    let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/docs/reference");
+    let out_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../docs/book/reference");
     std::fs::create_dir_all(&out_dir)?;
 
     let mut index = String::from(

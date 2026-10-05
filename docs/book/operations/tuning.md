@@ -165,7 +165,7 @@ Measured through `mq-bridge-app`'s `copy` CLI (the zero-code path) on an Apple M
 
 <!-- Pulled from the benchmark harness README, which is the single source of truth for
      every measured number. Do not paste a copy here — update it there. -->
-{{#include ../../../benches/etl/README.md:reference_numbers}}
+{{#include ../../../apps/mq-bridge-app/benches/etl/README.md:reference_numbers}}
 
 All rows measured with the mimalloc allocator used by the shipped binaries. It is
 the default-on `mimalloc` cargo feature (also implied by `bench`); build with

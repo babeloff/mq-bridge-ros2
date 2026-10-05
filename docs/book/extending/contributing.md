@@ -33,8 +33,8 @@ page is a short orientation.
 
 ## Building this book
 
-The documentation lives here in `mq-bridge-app` under `dev/docs/`. To build it locally,
-see [`dev/docs/README.md`](../README.md).
+The documentation lives in the repository under `docs/book/`. To build it locally,
+see [`docs/book/README.md`](../README.md).
 
 ## See also
 

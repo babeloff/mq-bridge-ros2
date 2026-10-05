@@ -9,7 +9,7 @@ default-theme      = "light"
 preferred-dark-theme = "navy"
 site-url           = "/mq-bridge/"
 git-repository-url = "https://github.com/marcomq/mq-bridge"
-edit-url-template  = "https://github.com/marcomq/mq-bridge/edit/main/apps/mq-bridge-app/dev/docs/{path}"
+edit-url-template  = "https://github.com/marcomq/mq-bridge/edit/main/docs/book/{path}"
 additional-css     = ["theme/custom.css"]
 
 [output.html.fold]

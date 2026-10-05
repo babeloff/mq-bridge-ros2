@@ -186,7 +186,7 @@ mod tests {
     fn the_recipes_in_the_book_are_valid_configurations() {
         let book = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/apps/mq-bridge-app/dev/docs/connectors/"
+            "/docs/book/connectors/"
         );
         for (name, recipes) in [
             ("http-bulk.md", 8),

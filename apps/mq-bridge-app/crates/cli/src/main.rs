@@ -3359,7 +3359,7 @@ mod uri_tests {
 
     // Rejecting unrecognised params on the endpoints that have no driver options
     // only works if every documented param really is a config field. These are the
-    // example URIs from README.md, dev/docs/ and benches/etl/.
+    // example URIs from README.md, docs/book/ and benches/etl/.
     #[test]
     fn documented_example_uris_parse() {
         for uri in [

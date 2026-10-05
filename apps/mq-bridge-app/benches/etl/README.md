@@ -8,8 +8,8 @@ mq-bridge engine, driven the way a real no-code user drives it** — through
 library's [`benches/ETL_BENCHMARKS.md`](https://github.com/marcomq/mq-bridge/blob/dev/benches/ETL_BENCHMARKS.md)
 states the methodology and reporting rules and links here; it does not carry its own
 copy of the results. Update a number here and nowhere else — the book's
-[tuning page](../../dev/docs/operations/tuning.md) and
-[MCP page](../../dev/docs/MCP.md) pull their tables straight out of this file by
+[tuning page](../../../../docs/book/operations/tuning.md) and
+[MCP page](../../../../docs/book/MCP.md) pull their tables straight out of this file by
 anchor, so they follow automatically.
 
 **The two headline scenarios (§5 Postgres → JSONL and §6 CSV → JSONL)** are
