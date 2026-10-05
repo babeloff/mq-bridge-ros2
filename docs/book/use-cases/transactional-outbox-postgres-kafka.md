@@ -198,15 +198,9 @@ write contention on the outbox table.
 
 ### Measured: memory of the relay
 
-Relaying a backlog of 500,000 outbox rows to Kafka, mq-bridge-app 0.4.18 peaked at 51 MiB and
-98 MiB of container memory in two passes; Debezium Server 3.0.7.Final peaked at 546 MiB and
-531 MiB on the same backlog.
-
-Parameters: the outbox table above with a three-field `jsonb` payload, 1,000 rows per transaction,
-a one-partition topic; memory is the highest `docker stats` sample taken once per second.
-Postgres 16, Apache Kafka 3.9.0, all in Docker Desktop on an Apple M1 with 8 GB, measured
-2026-10-05. Both tools ran with default settings: mq-bridge with the route above, Debezium Server
-with the Postgres connector (`pgoutput`), JSON without schemas and the Kafka sink.
+Relaying a backlog of 500,000 outbox rows to Kafka, mq-bridge-app peaked at 51 to 142 MiB of
+container memory and Debezium Server at 562 to 603 MiB (two passes each, the same Kafka producer
+settings, Docker Desktop on an Apple M1, 2026-10-05).
 
 Other measurements of mq-bridge are on the
 [benchmark dashboard](https://marcomq.github.io/mq-bridge/dev/bench/) and in the
