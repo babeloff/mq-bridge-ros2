@@ -1,1 +1,87 @@
-apps/mq-bridge-app/dev/docs/llms.txt
+# mq-bridge
+
+> mq-bridge is an asynchronous Rust library, with Python and Node.js bindings, that moves messages and data between brokers (Kafka, NATS, RabbitMQ/AMQP, MQTT, Redis Streams, AWS SQS/SNS, IBM MQ, ZeroMQ), databases (PostgreSQL, MySQL, SQLite, MongoDB, ClickHouse, with change data capture for Postgres and MongoDB), object storage (S3, GCS, Azure Blob as Parquet or JSONL), files (CSV, JSONL), and HTTP, gRPC and WebSocket. A route connects one input to one output and adds retries, dead-letter queues, deduplication, schema validation and routing by configuration.
+
+Key facts:
+
+- It is a library you embed in your own service, not a daemon. The same engine and the same YAML config also run without code as `mq-bridge-app` (the `mqb` CLI, a server, a desktop UI, and an MCP server).
+- Packages: `mq-bridge` on crates.io (connectors are Cargo features, none enabled by default), `mq-bridge` on PyPI and `mq-bridge` on npm (all connectors built in), `mq-bridge-app` on crates.io.
+- Change data capture: the `postgres_cdc` endpoint (logical replication) and the `mongodb` endpoint (change streams) feed any output, for example Kafka.
+- Warehouses (Snowflake, BigQuery, Databricks, Athena, Trino, DuckDB) are reached by writing Parquet to S3, GCS or Azure with the `object_store` endpoint. There are no native warehouse connectors. ClickHouse has a native endpoint.
+- The `memory` endpoint runs routes and handlers in-process, so tests need no broker and no Docker.
+- This book documents the library and the app; connectors, middleware and tuning use the same settings in both.
+
+## Getting started
+
+- [Quick start: library](https://marcomq.github.io/mq-bridge/getting-started/library-quick-start.html): install, describe a route, run it from Rust, Python or Node.js
+- [Quick start: app](https://marcomq.github.io/mq-bridge/quick-start.html): move data with `mqb copy <from> <to>` and no code
+- [Core concepts](https://marcomq.github.io/mq-bridge/getting-started/concepts.html): route, endpoint, middleware, handler, message
+- [Library, CLI or desktop?](https://marcomq.github.io/mq-bridge/getting-started/run-forms.html): which form to run
+- [Embed the library](https://marcomq.github.io/mq-bridge/tutorials/embedding.html): handlers, publishers, in-memory routes for tests
+- [Request / reply](https://marcomq.github.io/mq-bridge/tutorials/request-reply.html)
+- [Rust API on docs.rs](https://docs.rs/mq-bridge): feature flags and types
+
+## Connectors
+
+- [Overview and capabilities](https://marcomq.github.io/mq-bridge/reference/endpoints.html): every transport, subscriber mode, request-reply and nack support, plugin endpoints
+- [All connectors](https://marcomq.github.io/mq-bridge/connectors/index.html): YAML and URL examples for each
+- [PostgreSQL / MySQL / SQLite](https://marcomq.github.io/mq-bridge/connectors/postgres.html)
+- [Postgres CDC tutorial](https://marcomq.github.io/mq-bridge/tutorials/postgres-cdc.html) and [CDC parameters](https://marcomq.github.io/mq-bridge/reference/postgres-cdc.html)
+- [MongoDB](https://marcomq.github.io/mq-bridge/connectors/mongodb.html): source, sink and change streams
+- [Kafka](https://marcomq.github.io/mq-bridge/connectors/kafka.html)
+- [NATS](https://marcomq.github.io/mq-bridge/connectors/nats.html)
+- [RabbitMQ](https://marcomq.github.io/mq-bridge/connectors/rabbitmq.html)
+- [MQTT](https://marcomq.github.io/mq-bridge/connectors/mqtt.html)
+- [ClickHouse](https://marcomq.github.io/mq-bridge/connectors/clickhouse.html)
+- [HTTP bulk](https://marcomq.github.io/mq-bridge/connectors/http-bulk.html): JSON documents in bulk to and from search engines and similar HTTP APIs (Meilisearch, Typesense, Elasticsearch, Qdrant, PostgREST, CouchDB); reads page by page with a resumable cursor
+- [Typesense](https://marcomq.github.io/mq-bridge/connectors/typesense.html): `typesense://host/collection` output; Postgres CDC to Typesense with backfill and deletes
+- [Elasticsearch](https://marcomq.github.io/mq-bridge/connectors/elasticsearch.html): `elasticsearch://host/index` output over the `_bulk` API; Postgres CDC to Elasticsearch
+- [PostgREST and Supabase](https://marcomq.github.io/mq-bridge/connectors/postgrest.html): upserts and deletes through the REST data API
+- [Object storage](https://marcomq.github.io/mq-bridge/connectors/object-store.html): S3, GCS, Azure Blob, local directory; Parquet, JSONL, CSV
+- [File](https://marcomq.github.io/mq-bridge/connectors/file.html): CSV and JSONL
+- [HTTP](https://marcomq.github.io/mq-bridge/connectors/http.html) and [gRPC](https://marcomq.github.io/mq-bridge/connectors/grpc.html)
+- [Apache Pulsar](https://marcomq.github.io/mq-bridge/connectors/pulsar.html): input and output, built into `mqb`, a plugin elsewhere
+- [Meilisearch](https://marcomq.github.io/mq-bridge/connectors/meilisearch.html): built-in `meilisearch://` sink and source; Postgres CDC to Meilisearch with backfill and deletes; which options need the plugin
+- [Connect plugin](https://marcomq.github.io/mq-bridge/connectors/connect.html): Redpanda Connect components as endpoints and middleware (Elasticsearch, OpenSearch, Cassandra, Google Pub/Sub, BigQuery, Azure storage, Bloblang, …), a separate install. Full lists with fields: [inputs](https://marcomq.github.io/mq-bridge/connectors/connect-inputs.html), [outputs](https://marcomq.github.io/mq-bridge/connectors/connect-outputs.html), [processors](https://marcomq.github.io/mq-bridge/connectors/connect-processors.html)
+
+## Cookbook
+
+- [Transform and schema mapping](https://marcomq.github.io/mq-bridge/cookbook/transform.html): schema validation, type coercion, field mapping
+- [Upserts and insert-if-absent](https://marcomq.github.io/mq-bridge/cookbook/upserts.html)
+- [Deduplication](https://marcomq.github.io/mq-bridge/cookbook/deduplication.html)
+- [Retries and backoff](https://marcomq.github.io/mq-bridge/cookbook/retries.html)
+- [Dead-letter queues](https://marcomq.github.io/mq-bridge/cookbook/dlq.html)
+- [Checkpoints and resumable copies](https://marcomq.github.io/mq-bridge/cookbook/checkpoints.html)
+- [Content-based routing](https://marcomq.github.io/mq-bridge/cookbook/switch.html)
+- [Enrichment and lookups](https://marcomq.github.io/mq-bridge/cookbook/lookup.html)
+- [Running aggregates](https://marcomq.github.io/mq-bridge/cookbook/aggregate.html): per-key sums, counters, moving averages
+- [Fan-out](https://marcomq.github.io/mq-bridge/cookbook/fanout.html)
+- [Weak join / correlation](https://marcomq.github.io/mq-bridge/cookbook/weak-join.html)
+- [Secrets and interpolation](https://marcomq.github.io/mq-bridge/cookbook/secrets.html)
+- [Encryption at rest](https://marcomq.github.io/mq-bridge/cookbook/encryption.html)
+- [Compression](https://marcomq.github.io/mq-bridge/cookbook/compression.html)
+
+## Warehouses and analytics (via Parquet)
+
+- [Snowflake](https://marcomq.github.io/mq-bridge/cookbook/snowflake.html): Parquet to an S3 stage, then COPY INTO or Snowpipe
+- [BigQuery](https://marcomq.github.io/mq-bridge/cookbook/bigquery.html): Parquet to GCS, then a load job or an external table
+- [Databricks / Spark](https://marcomq.github.io/mq-bridge/cookbook/databricks.html)
+- [Athena / Trino](https://marcomq.github.io/mq-bridge/cookbook/athena.html)
+- [ClickHouse](https://marcomq.github.io/mq-bridge/cookbook/clickhouse.html): the native endpoint or the `s3()` table function
+- [DuckDB](https://marcomq.github.io/mq-bridge/cookbook/duckdb.html): query Parquet files in place
+
+## Reference
+
+- [Middleware and structural endpoints](https://marcomq.github.io/mq-bridge/engine/reference.html): every middleware and structural endpoint, with fields, defaults and YAML
+- [Delivery guarantees](https://marcomq.github.io/mq-bridge/engine/delivery.html): at-least-once, idempotent sinks, replay-safe files
+- [Configuration grammar](https://marcomq.github.io/mq-bridge/engine/configuration.html)
+- [CLI commands](https://marcomq.github.io/mq-bridge/reference/cli.html)
+- [Language bindings API](https://marcomq.github.io/mq-bridge/reference/bindings.html): Python and Node.js
+
+## Optional
+
+- [Architecture](https://marcomq.github.io/mq-bridge/engine/architecture.html)
+- [Performance tuning](https://marcomq.github.io/mq-bridge/operations/tuning.html)
+- [MCP server](https://marcomq.github.io/mq-bridge/MCP.html): drive routes from an AI agent
+- [Native plugins](https://marcomq.github.io/mq-bridge/extending/plugins.html): Pulsar, Meilisearch, Redpanda Connect
+- [Source repository](https://github.com/marcomq/mq-bridge)

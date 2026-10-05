@@ -5,7 +5,7 @@ logs
 target
 **/target
 **/node_modules
-apps/mq-bridge-app/dev/docs/book
+docs/book/book
 
 # Local build output
 **/.venv

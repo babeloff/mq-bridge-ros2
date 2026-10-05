@@ -188,7 +188,7 @@ fixtures, not redistributed IBM software.
 - **`mq-bridge-app`** — the endpoint is compiled into any build made with
   `full` or `full-dynamic`, and routes are declared in
   YAML rather than in code. See
-  [`IBM_MQ_SETUP.md`](../../../apps/mq-bridge-app/dev/docs/IBM_MQ_SETUP.md) for
+  [`IBM_MQ_SETUP.md`](../../../docs/book/IBM_MQ_SETUP.md) for
   the install, the `/features` check and `mqb copy` one-off drains.
 - **The `mq-bridge` crate** — `features = ["ibm-mq"]` for the dlopen build, or
   `features = ["ibm-mq-static"]` to bind the client at link time, which then

@@ -8,9 +8,9 @@ is assembled from. `SUMMARY.md` is the book's table of contents.
 
 ```bash
 # from the mq-bridge repository root
-apps/mq-bridge-app/dev/docs/sync-engine-docs.sh
-mdbook build apps/mq-bridge-app/dev/docs
-mdbook serve apps/mq-bridge-app/dev/docs --open
+docs/book/sync-engine-docs.sh
+mdbook build docs/book
+mdbook serve docs/book --open
 ```
 
 `engine/` and `book/` are build artifacts (git-ignored). The engine
@@ -49,7 +49,7 @@ reference (`REFERENCE.md`, `CONFIGURATION.md`, `ARCHITECTURE.md`, `DELIVERY.md`,
 ## Folder structure
 
 ```text
-dev/docs/
+docs/book/
 ├── SUMMARY.md              book table of contents
 ├── book.toml               mdbook config (src = ".")
 ├── sync-engine-docs.sh     vendors engine docs into engine/ (build step)

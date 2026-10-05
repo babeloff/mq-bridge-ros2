@@ -222,7 +222,7 @@ is loaded lazily on first connect). The loader finds the client via the platform
 statically at build time, use `ibm-mq-static` (requires the IBM MQ SDK). IBM MQ has its own
 TLS shape (`IbmTlsConfig`): `tls.cert_file` (alias `key_repository`) is a CMS key repository
 path, not a PEM file. See the
-[IBM MQ setup guide](https://github.com/marcomq/mq-bridge/blob/main/apps/mq-bridge-app/dev/docs/IBM_MQ_SETUP.md).
+[IBM MQ setup guide](https://github.com/marcomq/mq-bridge/blob/main/docs/book/IBM_MQ_SETUP.md).
 
 ## Connection sharing
 

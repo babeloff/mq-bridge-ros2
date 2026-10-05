@@ -2,7 +2,7 @@
 
 Developer build instructions for `mq-bridge-app` — the CLI/server, the desktop
 (Tauri) app, and the Docker image. For prebuilt installs (`cargo binstall`,
-release bundles, Docker Hub images) see the [main README](../../README.md).
+release bundles, Docker Hub images) see the [main README](../../apps/mq-bridge-app/README.md).
 
 ## Prerequisites
 

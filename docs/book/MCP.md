@@ -360,7 +360,7 @@ late; the two tool calls bracketing the job cost ~0.05 ms each at p50. The gap i
 fixed, so it shrinks to nothing as a proportion as the dataset grows — and it is more
 visible than it used to be only because the job itself got ~2.6x faster.
 
-{{#include ../../benches/etl/README.md:mcp_results}}
+{{#include ../../apps/mq-bridge-app/benches/etl/README.md:mcp_results}}
 
 Agent token cost is **flat in the number of rows moved** — three tool calls
 (`start_route`, one `route_status`, `stop_route`) totalling ~1.5 KB of JSON-RPC

@@ -66,7 +66,7 @@ The second `docker run` example above passes `--init-config`, which is why it al
 `--ui`.
 
 To build the image from source, see
-[`BUILD.md`](https://github.com/marcomq/mq-bridge/blob/main/apps/mq-bridge-app/dev/docs/BUILD.md).
+[`BUILD.md`](https://github.com/marcomq/mq-bridge/blob/main/docs/book/BUILD.md).
 
 ## Configuration in containers / Kubernetes
 
@@ -120,7 +120,7 @@ the JSON logs to your aggregator. See [Observability & metrics](observability.md
 The book is published to GitHub Pages by
 [`.github/workflows/docs.yml`](https://github.com/marcomq/mq-bridge/blob/main/.github/workflows/docs.yml)
 on every push to `main` that touches the root engine docs or
-`apps/mq-bridge-app/dev/docs/**`. It runs the local
-`apps/mq-bridge-app/dev/docs/sync-engine-docs.sh` before building the book. To
+`docs/book/**`. It runs the local
+`docs/book/sync-engine-docs.sh` before building the book. To
 build it locally, run the same commands from the repository root. See
-[the book's README](https://github.com/marcomq/mq-bridge/blob/main/apps/mq-bridge-app/dev/docs/README.md).
+[the book's README](https://github.com/marcomq/mq-bridge/blob/main/docs/book/README.md).

@@ -15,7 +15,7 @@ categories = ["asynchronous", "network-programming", "database"]
 # Test-only proto; build.rs skips it when absent so downstream builds skip the codegen.
 # `apps/` is a sibling product, not part of the library: cargo only auto-excludes
 # the app's member crates, so the UI, book and benches would ship in the tarball.
-exclude = ["tests/fixtures/grpc_dynamic.proto", "apps/"]
+exclude = ["tests/fixtures/grpc_dynamic.proto", "apps/", "docs/book/"]
 
 [lints]
 workspace = true
@@ -31,7 +31,7 @@ members = [
     "tests/fixtures/grpc-config-compat",
 ]
 # apps/mq-bridge-app is its own workspace with its own Cargo.lock; see its manifest.
-exclude = ["apps", "examples/plugin-template"]
+exclude = ["apps", "examples/plugin-template", "examples/test-without-a-broker"]
 resolver = "2"
 
 # Lints that are off by default in rustc/clippy and mark code that was never meant to
