@@ -54,7 +54,7 @@ pixi run docs      # render the documentation
 pixi run package   # build one conda package per ROS distribution
 pixi run publish   # upload and index them in the program-forge registry
 pixi run release   # check everything, then tag a release
-pixi run bump-version patch   # raise the version across every manifest
+pixi run track-version        # follow the latest mq-bridge release
 pixi run sync-version         # make every manifest match Cargo.toml
 ```
 
@@ -238,8 +238,8 @@ pixi run package
 ```
 
 ```text
-build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
-build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_humble_hee40719_0.conda
+build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
 ```
 
 `humble` and `jazzy` are built and tested. The endpoint's source is
@@ -278,11 +278,11 @@ to build the plugin without one: `rclrs` vendors several message packages whose
 generated code links real ROS libraries, so producing the `cdylib` still
 requires them.
 
-`Cargo.toml` is the source of truth for the package version. Update every
+The package version tracks the latest `mq-bridge` release. Update every
 ecosystem manifest together before tagging a release:
 
 ```console
-pixi run bump-version minor    # choose a new version, write it everywhere
+pixi run track-version         # read the latest mq-bridge version
 pixi run sync-version --check  # verify they agree
 ```
 

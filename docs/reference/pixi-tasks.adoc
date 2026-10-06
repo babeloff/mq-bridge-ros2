@@ -76,9 +76,9 @@ Ten environment/platform pairs is why the lock file is a couple of megabytes; on
 | `release.py`
 | Checks everything a release depends on, then tags it.
 
-| `bump-version`
-| `bump_version.py`
-| Raises the version and propagates it to every manifest.
+| `track-version`
+| `track_version.py`
+| Reads the latest `mq-bridge` release and propagates it to every manifest.
 
 | `sync-version`
 | `sync_version.py`
@@ -230,8 +230,8 @@ This task establishes that the commit deserves that, and creates the tag.
 
 The push is a separate flag because it is the irreversible step: crates.io and PyPI allow a published version to be yanked but never replaced.
 
-The version is read from `Cargo.toml` and never chosen here — run `pixi run bump-version` first if it should be a new one.
-Keeping them apart means a release cannot change the version as a side effect.
+The version is read from `Cargo.toml` after `pixi run track-version` has aligned
+it with the latest `mq-bridge` release.
 
 The gates, all reported together:
 
@@ -249,47 +249,30 @@ The conda packages are not part of `release.yml`, so the task ends by naming the
 
 == Version tasks
 
-Two tasks, because choosing a new version and propagating the existing one are different jobs with different risks.
+Two tasks keep upstream tracking separate from propagating an already selected version.
 
-`Cargo.toml` is the source of truth. These manifests are kept in step with it:
+The tracked `mq-bridge` version is written to `Cargo.toml` and `pixi.toml`.
+These manifests are kept in step with it:
 
 * `node/package.json`
 * `node/package-lock.json` (two entries)
 * `python/pyproject.toml`
 * `recipes/recipe.yaml` — `context.version`, which the conda package version references
 
-Both delegate to `scripts/set_version.py`, which is also what CI runs, so there is one implementation of the rule.
+Both delegate to `scripts/set_version.py`, which is also what CI runs, so there is one implementation of the propagation rule.
 
-=== `bump-version`
+=== `track-version`
 
-Chooses a new version and writes it everywhere.
+Reads the latest stable `mq-bridge` version from crates.io and writes it everywhere.
 
 [source,console]
 ----
-pixi run bump-version patch              # 0.1.0 -> 0.1.1
-pixi run bump-version minor              # 0.1.0 -> 0.2.0
-pixi run bump-version major              # 0.1.0 -> 1.0.0
-pixi run bump-version 0.4.0-rc.1         # or say it outright
-pixi run bump-version patch --dry-run    # report the new version, write nothing
+pixi run track-version                    # follow the latest mq-bridge release
+pixi run track-version --dry-run          # report it, write nothing
 ----
 
-A pre-release is *released* rather than incremented, because that is what a pre-release is: `0.2.0-rc.1` is a candidate for `0.2.0`, so a patch bump from it gives `0.2.0`.
-
-[cols="2,1,1", options="header"]
-|===
-| From | Bump | To
-
-| `0.1.0` | `patch` | `0.1.1`
-| `0.1.0` | `minor` | `0.2.0`
-| `0.1.9` | `major` | `1.0.0`
-| `0.2.0-rc.1` | `patch` | `0.2.0`
-| `0.2.0-rc.1` | `minor` | `0.3.0`
-|===
-
-That arithmetic is the only non-trivial pure logic in the task scripts, so it is covered by doctests, which `pixi run check` runs.
-
-Bumping does not rebuild.
-Artifacts already in `build/conda` still carry the old version, and `pixi run publish` refuses to publish a version it has no packages for, so the reminder to rebuild is printed rather than acted on.
+The task does not rebuild.
+Artifacts already in `build/conda` still carry the old version, so the reminder to rebuild is printed rather than acted on.
 
 === `sync-version`
 
@@ -305,7 +288,7 @@ Use it after editing `Cargo.toml` by hand, or when a merge has left one manifest
 
 [source,text]
 ----
-versions do not match Cargo.toml '0.1.0': {'node/package.json': '0.1.1', ...}
+versions do not match Cargo.toml '0.4.19': {'node/package.json': '0.4.20', ...}
 ----
 
 `--check` is what CI and `pixi run check` use.

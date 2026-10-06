@@ -61,13 +61,13 @@ pixi run publish --dry-run
 
 [source,text]
 ----
-package:  mq-bridge-ros2 0.1.0
+package:  mq-bridge-ros2 0.4.19
 registry: http://127.0.0.1:19000
           from [s3-options.program-forge] in config.toml
 channel:  s3://program-forge
 publishing 2 package(s):
-  build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
-  build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+  build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_humble_hee40719_0.conda
+  build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
 
 dry run, nothing contacted. The commands would be:
 
@@ -88,8 +88,8 @@ The channel then holds, per platform subdirectory, the packages and a regenerate
 
 [source,text]
 ----
-linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
-linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+linux-64/mq-bridge-ros2-0.4.19-ros2_humble_hee40719_0.conda
+linux-64/mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
 linux-64/repodata.json
 linux-64/repodata.json.zst
 linux-64/repodata_shards.msgpack.zst
@@ -118,15 +118,15 @@ The upload refuses to overwrite:
 
 [source,text]
 ----
-Error: × Package s3://program-forge/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+Error: × Package s3://program-forge/linux-64/mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
   │ already exists. Use --force to overwrite.
 ----
 
-That is a feature — a published version should be immutable, and the usual right answer is to bump the version:
+That is a feature — a published version should be immutable, and the usual right answer is to track the next `mq-bridge` release:
 
 [source,console]
 ----
-pixi run bump-version patch && pixi run package && pixi run publish
+pixi run track-version && pixi run package && pixi run publish
 ----
 
 Use `--force` only when replacing a package nobody has installed yet:
@@ -288,9 +288,9 @@ Both packages should be listed, with their ROS dependencies distribution-specifi
 
 [source,text]
 ----
-mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
+mq-bridge-ros2-0.4.19-ros2_humble_hee40719_0.conda
   depends=['python', 'ros-humble-ros-base', 'ros-humble-std-msgs', ...]
-mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
   depends=['python', 'ros-jazzy-ros-base', 'ros-jazzy-std-msgs', ...]
 ----
 

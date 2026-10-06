@@ -14,8 +14,7 @@ The push is a separate flag because it is the irreversible step: crates.io and
 PyPI do not allow a published version to be replaced, only yanked.
 
 The version comes from `Cargo.toml` and is never chosen here — use
-`pixi run bump-version` first if this is meant to be a new one. Keeping the two
-apart means a release cannot quietly change the version as a side effect.
+`pixi run track-version` first to follow the latest `mq-bridge` release.
 """
 
 from __future__ import annotations

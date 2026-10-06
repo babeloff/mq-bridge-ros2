@@ -1,6 +1,6 @@
 {
   "name": "mq-bridge-ros2",
-  "version": "0.1.5",
+  "version": "0.4.19",
   "description": "ROS 2 endpoint for mq-bridge, shipped as a native plugin",
   "license": "MIT",
   "main": "index.js",

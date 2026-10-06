@@ -4,7 +4,8 @@
     pixi run sync-version            # write Cargo.toml's version to the rest
     pixi run sync-version --check    # only report whether they already agree
 
-`Cargo.toml` is the source of truth. The manifests kept in step with it are:
+The tracked `mq-bridge` version is written to `Cargo.toml`, and the manifests
+kept in step with it are:
 
 * `node/package.json`
 * `node/package-lock.json` (two entries)
@@ -13,8 +14,7 @@
   references)
 
 Use this after editing `Cargo.toml` by hand, or when a merge has left one
-manifest behind. To choose a new version rather than propagate the current one,
-use `pixi run bump-version`.
+manifest behind. To update from upstream, use `pixi run track-version`.
 
 The work is done by `scripts/set_version.py`, which is also what CI runs, so
 there is one implementation of the rule.

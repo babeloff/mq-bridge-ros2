@@ -36,16 +36,16 @@ def main(argv: list[str]) -> int:
     )
     steps.append(("clippy", status == 0))
 
-    # Cargo.toml is the source of truth; the npm, Python and conda manifests
-    # have to agree with it or a release ships mismatched versions.
+    # The tracked mq-bridge version is written to Cargo.toml and Pixi; the npm,
+    # Python and conda manifests have to agree or a release ships mismatched versions.
     status = run(["python", "scripts/set_version.py", "--check"], env=env, check=False)
     steps.append(("version sync", status == 0))
 
-    # The only non-trivial pure logic in the task scripts is version bumping,
-    # and it is covered by doctests. Run from the script directory so the
+    # The upstream version tracker is covered by a doctest invocation. Run from
+    # the script directory so the
     # modules can import their `_common` sibling.
     status = run(
-        ["python", "-m", "doctest", "bump_version.py"],
+        ["python", "-m", "doctest", "track_version.py"],
         env=env,
         cwd=ROOT / "pixi-scripts",
         check=False,

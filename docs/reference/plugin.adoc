@@ -176,8 +176,8 @@ The distributions built for are listed in `recipes/variants.yaml` as a variant a
 
 [source,text]
 ----
-mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
-mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+mq-bridge-ros2-0.4.19-ros2_humble_hee40719_0.conda
+mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
 ----
 
 Currently built and tested: `humble` and `jazzy`.

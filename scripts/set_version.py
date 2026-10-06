@@ -9,7 +9,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
-# The conda recipe declares its version once, as `context.version`, and the
+# Pixi and conda manifests declare their version once, and the other package
+# manifests mirror it. The conda recipe declares its version as `context.version`, and the
 # `package:` block references it. Matched by regex rather than parsed, because
 # this script runs on a bare `python3` in CI and must not need PyYAML. The
 # leading whitespace and the quotes together pin it to the context entry:
@@ -17,6 +18,7 @@ VERSION = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 RECIPE_VERSION = re.compile(r'^(\s+version:\s*)"([^"]+)"', re.MULTILINE)
 UPDATES = (
     ("Cargo.toml", r'^(version\s*=\s*)"[^"]+"', 1),
+    ("pixi.toml", r'^(version\s*=\s*)"[^"]+"', 1),
     ("node/package.json", r'^(\s*"version"\s*:\s*)"[^"]+"', 1),
     ("node/package-lock.json", r'^(\s*"version"\s*:\s*)"[^"]+"', 2),
     ("python/pyproject.toml", r'^(version\s*=\s*)"[^"]+"', 1),
@@ -35,6 +37,7 @@ def versions():
     lock = json.loads((ROOT / "node/package-lock.json").read_text())
     python = tomllib.loads((ROOT / "python/pyproject.toml").read_text())
     return cargo["package"]["version"], {
+        "pixi.toml": tomllib.loads((ROOT / "pixi.toml").read_text())["workspace"]["version"],
         "node/package.json": node["version"],
         "node/package-lock.json": lock["version"],
         'node/package-lock.json packages[""]': lock["packages"][""]["version"],

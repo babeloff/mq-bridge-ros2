@@ -40,8 +40,8 @@ pixi run package
 building for ROS 2: humble, jazzy
 
 conda package(s):
-  build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_humble_hee40719_0.conda
-  build/conda/linux-64/mq-bridge-ros2-0.1.0-ros2_jazzy_h2a6e838_0.conda
+  build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_humble_hee40719_0.conda
+  build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
 ----
 
 The distribution is in the build string, so the two cannot be installed over each other by accident.
@@ -122,12 +122,13 @@ See the `Build standalone plugin archive` step in `.github/workflows/release.yml
 
 == Keep the versions in step
 
-`Cargo.toml` is the source of truth.
+The package version tracks the latest `mq-bridge` release. `Cargo.toml` and
+`pixi.toml` carry that tracked version.
 Both npm manifests, `python/pyproject.toml` and the conda recipe's `context.version` must agree with it, or a release ships mismatched versions:
 
 [source,console]
 ----
-pixi run bump-version minor    # choose a new version, write it everywhere
+pixi run track-version         # follow the latest mq-bridge release
 pixi run sync-version --check  # verify they agree
 ----
 

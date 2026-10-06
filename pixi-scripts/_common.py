@@ -150,7 +150,7 @@ def pixi_environments() -> list[str]:
 
 
 def package_version() -> str:
-    """The version in Cargo.toml, which is the source of truth for all of them."""
+    """The tracked mq-bridge version in Cargo.toml."""
     import tomllib
 
     return tomllib.loads((ROOT / "Cargo.toml").read_text())["package"]["version"]
