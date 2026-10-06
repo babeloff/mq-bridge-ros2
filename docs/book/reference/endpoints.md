@@ -32,7 +32,7 @@ the core library carries none of their dependencies:
 | :--- | :--- | :--- |
 | **[Pulsar](../connectors/pulsar.md)** | Apache Pulsar input and output | Built in |
 | **[Meilisearch](../connectors/meilisearch.md)** | Document sink into a search index; index scan as input | Built in |
-| **[Connect](https://github.com/marcomq/mq-bridge-connect)** | Redpanda Connect's 51 inputs, 63 outputs (`connect+mqtt://…`) and 68 processors; per-message processors also run as middleware | Separate install (size) |
+| **[Connect](https://github.com/marcomq/mq-bridge-connect)** | Redpanda Connect's 56 inputs, 68 outputs (`connect+mqtt://…`) and 86 processors; per-message processors also run as middleware | Separate install (size) |
 
 The Connect plugin has its own [page](../connectors/connect.md), with every linked
 [input](../connectors/connect-inputs.md), [output](../connectors/connect-outputs.md) and

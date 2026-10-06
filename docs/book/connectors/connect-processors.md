@@ -5,11 +5,11 @@
 
 # Connect plugin: processors
 
-The 68 Redpanda Connect processors the [Connect plugin](connect.md) links, generated from the component specs of Redpanda Connect v4.110.0. Field descriptions are Redpanda Connect's own, shortened to one sentence; follow *Upstream documentation* for the rest. Install and configuration forms are on the [plugin page](connect.md).
+The 86 Redpanda Connect processors the [Connect plugin](connect.md) links, generated from the component specs of Redpanda Connect v4.110.0. Field descriptions are Redpanda Connect's own, shortened to one sentence; follow *Upstream documentation* for the rest. Install and configuration forms are on the [plugin page](connect.md).
 
-18 of them are also exported as their own `connect_<name>` middleware and run on any endpoint, native ones included. Every other processor that keeps, rewrites or drops each message runs inside a `connect` middleware; one that splits or merges messages belongs in a `connect` endpoint's `pipeline`. Middleware needs plugin 0.1.1 or newer.
+16 of them are also exported as their own `connect_<name>` middleware and run on any endpoint, native ones included. Every other processor that keeps, rewrites or drops each message runs inside a `connect` middleware; one that splits or merges messages belongs in a `connect` endpoint's `pipeline`. Middleware needs plugin 0.1.1 or newer.
 
-Own middleware: [`connect_avro`](#avro), [`connect_bloblang`](#bloblang), [`connect_branch`](#branch), [`connect_cached`](#cached), [`connect_dedupe`](#dedupe), [`connect_grok`](#grok), [`connect_http`](#http), [`connect_javascript`](#javascript), [`connect_jmespath`](#jmespath), [`connect_jq`](#jq), [`connect_json_schema`](#json_schema), [`connect_log`](#log), [`connect_mapping`](#mapping), [`connect_msgpack`](#msgpack), [`connect_mutation`](#mutation), [`connect_parse_log`](#parse_log), [`connect_schema_registry_decode`](#schema_registry_decode), [`connect_schema_registry_encode`](#schema_registry_encode).
+Own middleware: [`connect_avro`](#avro), [`connect_bloblang`](#bloblang), [`connect_branch`](#branch), [`connect_cached`](#cached), [`connect_dedupe`](#dedupe), [`connect_grok`](#grok), [`connect_http`](#http), [`connect_javascript`](#javascript), [`connect_jmespath`](#jmespath), [`connect_jq`](#jq), [`connect_json_schema`](#json_schema), [`connect_log`](#log), [`connect_mapping`](#mapping), [`connect_msgpack`](#msgpack), [`connect_mutation`](#mutation), [`connect_parse_log`](#parse_log).
 
 ```yaml
 input:
@@ -22,13 +22,13 @@ Processors in **bold** are also their own middleware.
 
 | Category | Components |
 |---|---|
-| AI | [`gcp_vertex_ai_chat`](#gcp_vertex_ai_chat), [`gcp_vertex_ai_embeddings`](#gcp_vertex_ai_embeddings), [`qdrant`](#qdrant), [`text_chunker`](#text_chunker) |
+| AI | [`aws_bedrock_chat`](#aws_bedrock_chat), [`aws_bedrock_embeddings`](#aws_bedrock_embeddings), [`cohere_chat`](#cohere_chat), [`cohere_embeddings`](#cohere_embeddings), [`cohere_rerank`](#cohere_rerank), [`gcp_vertex_ai_chat`](#gcp_vertex_ai_chat), [`gcp_vertex_ai_embeddings`](#gcp_vertex_ai_embeddings), [`ollama_chat`](#ollama_chat), [`ollama_embeddings`](#ollama_embeddings), [`ollama_moderation`](#ollama_moderation), [`openai_chat_completion`](#openai_chat_completion), [`openai_embeddings`](#openai_embeddings), [`openai_image_generation`](#openai_image_generation), [`openai_speech`](#openai_speech), [`openai_transcription`](#openai_transcription), [`openai_translation`](#openai_translation), [`qdrant`](#qdrant), [`text_chunker`](#text_chunker) |
 | Azure | [`azure_cosmosdb`](#azure_cosmosdb) |
 | Composition | **[`branch`](#branch)**, [`catch`](#catch), [`for_each`](#for_each), [`group_by`](#group_by), [`group_by_value`](#group_by_value), [`insert_part`](#insert_part), [`parallel`](#parallel), [`processors`](#processors), [`retry`](#retry), [`switch`](#switch), [`try`](#try), [`try_catch`](#try_catch), [`while`](#while), [`workflow`](#workflow) |
-| Integration | [`cache`](#cache), [`command`](#command), [`couchbase`](#couchbase), [`gcp_bigquery_select`](#gcp_bigquery_select), **[`http`](#http)**, [`redis`](#redis), [`redis_script`](#redis_script), **[`schema_registry_decode`](#schema_registry_decode)**, **[`schema_registry_encode`](#schema_registry_encode)**, [`sql`](#sql), [`sql_insert`](#sql_insert), [`sql_raw`](#sql_raw), [`sql_select`](#sql_select), [`subprocess`](#subprocess) |
-| Mapping | **[`bloblang`](#bloblang)**, **[`javascript`](#javascript)**, **[`jmespath`](#jmespath)**, **[`jq`](#jq)**, **[`json_schema`](#json_schema)**, **[`mapping`](#mapping)**, **[`mutation`](#mutation)** |
+| Integration | [`aws_lambda`](#aws_lambda), [`cache`](#cache), [`command`](#command), [`couchbase`](#couchbase), [`gcp_bigquery_select`](#gcp_bigquery_select), **[`http`](#http)**, [`redis`](#redis), [`redis_script`](#redis_script), [`sql`](#sql), [`sql_insert`](#sql_insert), [`sql_raw`](#sql_raw), [`sql_select`](#sql_select), [`subprocess`](#subprocess) |
+| Mapping | [`awk`](#awk), **[`bloblang`](#bloblang)**, **[`javascript`](#javascript)**, **[`jmespath`](#jmespath)**, **[`jq`](#jq)**, **[`json_schema`](#json_schema)**, **[`mapping`](#mapping)**, **[`mutation`](#mutation)** |
 | Other | [`noop`](#noop), [`sentry_capture`](#sentry_capture) |
-| Parsing | [`archive`](#archive), **[`avro`](#avro)**, **[`bloblang`](#bloblang)**, [`compress`](#compress), [`decompress`](#decompress), **[`grok`](#grok)**, **[`mapping`](#mapping)**, **[`msgpack`](#msgpack)**, **[`mutation`](#mutation)**, **[`parse_log`](#parse_log)**, **[`schema_registry_decode`](#schema_registry_decode)**, **[`schema_registry_encode`](#schema_registry_encode)**, [`string_split`](#string_split), [`unarchive`](#unarchive) |
+| Parsing | [`archive`](#archive), **[`avro`](#avro)**, **[`bloblang`](#bloblang)**, [`compress`](#compress), [`decompress`](#decompress), **[`grok`](#grok)**, **[`mapping`](#mapping)**, **[`msgpack`](#msgpack)**, **[`mutation`](#mutation)**, [`parquet`](#parquet), [`parquet_decode`](#parquet_decode), [`parquet_encode`](#parquet_encode), **[`parse_log`](#parse_log)**, [`string_split`](#string_split), [`unarchive`](#unarchive), [`xml`](#xml) |
 | Services | [`mongodb`](#mongodb), [`nats_kv`](#nats_kv), [`nats_request_reply`](#nats_request_reply) |
 | Utility | [`archive`](#archive), [`benchmark`](#benchmark), [`bounds_check`](#bounds_check), **[`cached`](#cached)**, [`crash`](#crash), **[`dedupe`](#dedupe)**, **[`log`](#log)**, [`metric`](#metric), [`rate_limit`](#rate_limit), [`resource`](#resource), [`select_parts`](#select_parts), [`sleep`](#sleep), [`split`](#split), [`sync_response`](#sync_response), [`unarchive`](#unarchive), [`wasm`](#wasm) |
 
@@ -59,6 +59,68 @@ Middleware: `connect_avro`, or inside a `connect` middleware.
 | `schema_path` | string | `""` | The path of a schema document to apply. |
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/avro/)
+
+## `awk`
+
+Executes an AWK program on messages. This processor is very powerful as it offers a range of custom functions for querying and mutating message contents and metadata.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `codec` | string | required | A codec defines how messages should be inserted into the AWK program as variables. |
+| `program` | string | required | An AWK program to execute |
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/awk/)
+
+## `aws_bedrock_chat`
+
+Generates responses to messages in a chat conversation, using the AWS Bedrock API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model` | string | required | The model ID to use. |
+| `prompt` | string |  | The prompt you want to generate a response for. |
+| `system_prompt` | string |  | The system prompt to submit to the AWS Bedrock LLM. |
+| `max_tokens` | int |  | The maximum number of tokens to allow in the generated response. |
+| `temperature` | float |  | The likelihood of the model selecting higher-probability options while generating a response. |
+
+Advanced: `region`, `endpoint`, `tcp`, `credentials`, `stop`, `top_p`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/aws_bedrock_chat/)
+
+## `aws_bedrock_embeddings`
+
+Computes vector embeddings on text, using the AWS Bedrock API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model` | string | required | The model ID to use. |
+| `text` | string |  | The prompt you want to generate a response for. |
+| `input_type` | string |  | Specifies the type of input passed to the model. |
+
+Advanced: `region`, `endpoint`, `tcp`, `credentials`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/aws_bedrock_embeddings/)
+
+## `aws_lambda`
+
+Invokes an AWS lambda for each message. The contents of the message is the payload of the request, and the result of the invocation will become the new contents of the message.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `parallel` | bool | `false` | Whether messages of a batch should be dispatched in parallel. |
+| `function` | string | required | The function to invoke. |
+
+Advanced: `rate_limit`, `region`, `endpoint`, `tcp`, `credentials`, `timeout`, `retries`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/aws_lambda/)
 
 ## `azure_cosmosdb`
 
@@ -175,6 +237,65 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 Takes a single list of processor value, not a map of fields.
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/catch/)
+
+## `cohere_chat`
+
+Generates responses to messages in a chat conversation, using the Cohere API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `base_url` | string | `"https://api.cohere.com"` | The base URL to use for API requests. |
+| `api_key` | string | required | The API key for the Cohere API. |
+| `model` | string | required | The name of the Cohere model to use. |
+| `prompt` | string |  | The user prompt you want to generate a response for. |
+| `system_prompt` | string |  | The system prompt to submit along with the user prompt. |
+| `max_tokens` | int |  | The maximum number of tokens that can be generated in the chat completion. |
+| `temperature` | float |  | What sampling temperature to use, between 0 and 2. |
+| `response_format` | string | `"text"` | Specify the model's output format. |
+| `json_schema` | string |  | The JSON schema to use when responding in `json_schema` format. |
+| `max_tool_calls` | int | `10` | Maximum number of tool calls the model can do. |
+| `tools` | list of object | `[]` | The tools to allow the LLM to invoke. |
+
+Advanced: `schema_registry`, `top_p`, `frequency_penalty`, `presence_penalty`, `seed`, `stop`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/cohere_chat/)
+
+## `cohere_embeddings`
+
+Generates vector embeddings to represent input text, using the Cohere API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `base_url` | string | `"https://api.cohere.com"` | The base URL to use for API requests. |
+| `api_key` | string | required | The API key for the Cohere API. |
+| `model` | string | required | The name of the Cohere model to use. |
+| `text_mapping` | string |  | The text you want to generate a vector embedding for. |
+| `input_type` | string | `"search_document"` | Specifies the type of input passed to the model. |
+| `dimensions` | int |  | The number of dimensions of the output embedding. |
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/cohere_embeddings/)
+
+## `cohere_rerank`
+
+Generates vector embeddings to represent input text, using the Cohere API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `base_url` | string | `"https://api.cohere.com"` | The base URL to use for API requests. |
+| `api_key` | string | required | The API key for the Cohere API. |
+| `model` | string | required | The name of the Cohere model to use. |
+| `query` | string | required | The search query |
+| `documents` | string | required | A list of texts that will be compared to the query. |
+| `top_n` | string | `"0"` | The number of documents to return, if 0 all documents are returned. |
+| `max_tokens_per_doc` | int | `4096` | Long documents will be automatically truncated to the specified number of tokens. |
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/cohere_rerank/)
 
 ## `command`
 
@@ -584,6 +705,176 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/noop/)
 
+## `ollama_chat`
+
+Generates responses to messages in a chat conversation, using the Ollama API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model` | string | required | The name of the Ollama LLM to use. |
+| `prompt` | string |  | The prompt you want to generate a response for. |
+| `image` | string |  | The image to submit along with the prompt to the model. |
+| `response_format` | string | `"text"` | The format of the response that the Ollama model generates. |
+| `max_tokens` | int |  | The maximum number of tokens to predict and output. |
+| `temperature` | int |  | The temperature of the model. |
+| `save_prompt_metadata` | bool | `false` | If enabled the prompt is saved as @prompt metadata on the output message. |
+| `history` | string |  | Historical messages to include in the chat request. |
+| `tools` | list of object | `[]` | The tools to allow the LLM to invoke. |
+| `runner` | object |  | Options for the model runner that are used when the model is first loaded into memory. |
+| `server_address` | string |  | The address of the Ollama server to use. |
+
+Advanced: `system_prompt`, `num_keep`, `seed`, `top_k`, `top_p`, `repeat_penalty`, `presence_penalty`, `frequency_penalty`, `stop`, `max_tool_calls`, `cache_directory`, `download_url`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/ollama_chat/)
+
+## `ollama_embeddings`
+
+Generates vector embeddings from text, using the Ollama API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model` | string | required | The name of the Ollama LLM to use. |
+| `text` | string |  | The text you want to create vector embeddings for. |
+| `runner` | object |  | Options for the model runner that are used when the model is first loaded into memory. |
+| `server_address` | string |  | The address of the Ollama server to use. |
+
+Advanced: `cache_directory`, `download_url`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/ollama_embeddings/)
+
+## `ollama_moderation`
+
+Generates responses to messages in a chat conversation, using the Ollama API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `model` | string | required | The name of the Ollama LLM to use. |
+| `prompt` | string | required | The input prompt that was used with the LLM. |
+| `response` | string | required | The LLM's response to classify if it contains safe or unsafe content. |
+| `runner` | object |  | Options for the model runner that are used when the model is first loaded into memory. |
+| `server_address` | string |  | The address of the Ollama server to use. |
+
+Advanced: `cache_directory`, `download_url`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/ollama_moderation/)
+
+## `openai_chat_completion`
+
+Generates responses to messages in a chat conversation, using the OpenAI API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `server_address` | string | `"https://api.openai.com/v1"` | The Open API endpoint that the processor sends requests to. |
+| `api_key` | string | required | The API key for OpenAI API. |
+| `model` | string | required | The name of the OpenAI model to use. |
+| `prompt` | string |  | The user prompt you want to generate a response for. |
+| `system_prompt` | string |  | The system prompt to submit along with the user prompt. |
+| `history` | string |  | The history of the prior conversation. |
+| `image` | string |  | An image to send along with the prompt. |
+| `max_tokens` | int |  | The maximum number of tokens that can be generated in the chat completion. |
+| `temperature` | float |  | What sampling temperature to use, between 0 and 2. |
+| `user` | string |  | A unique identifier representing your end-user, which can help OpenAI to monitor and detect abuse. |
+| `response_format` | string | `"text"` | Specify the model's output format. |
+| `json_schema` | object |  | The JSON schema to use when responding in `json_schema` format. |
+| `tools` | list of object |  | The tools to allow the LLM to invoke. |
+
+Advanced: `schema_registry`, `top_p`, `frequency_penalty`, `presence_penalty`, `seed`, `stop`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/openai_chat_completion/)
+
+## `openai_embeddings`
+
+Generates vector embeddings to represent input text, using the OpenAI API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `server_address` | string | `"https://api.openai.com/v1"` | The Open API endpoint that the processor sends requests to. |
+| `api_key` | string | required | The API key for OpenAI API. |
+| `model` | string | required | The name of the OpenAI model to use. |
+| `text_mapping` | string |  | The text you want to generate a vector embedding for. |
+| `dimensions` | int |  | The number of dimensions the resulting output embeddings should have. |
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/openai_embeddings/)
+
+## `openai_image_generation`
+
+Generates an image from a text description and other attributes, using OpenAI API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `server_address` | string | `"https://api.openai.com/v1"` | The Open API endpoint that the processor sends requests to. |
+| `api_key` | string | required | The API key for OpenAI API. |
+| `model` | string | required | The name of the OpenAI model to use. |
+| `prompt` | string |  | A text description of the image you want to generate. |
+
+Advanced: `quality`, `size`, `style`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/openai_image_generation/)
+
+## `openai_speech`
+
+Generates audio from a text description and other attributes, using OpenAI API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `server_address` | string | `"https://api.openai.com/v1"` | The Open API endpoint that the processor sends requests to. |
+| `api_key` | string | required | The API key for OpenAI API. |
+| `model` | string | required | The name of the OpenAI model to use. |
+| `input` | string |  | A text description of the audio you want to generate. |
+| `voice` | string | required | The type of voice to use when generating the audio. |
+
+Advanced: `response_format`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/openai_speech/)
+
+## `openai_transcription`
+
+Generates a transcription of spoken audio in the input language, using the OpenAI API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `server_address` | string | `"https://api.openai.com/v1"` | The Open API endpoint that the processor sends requests to. |
+| `api_key` | string | required | The API key for OpenAI API. |
+| `model` | string | required | The name of the OpenAI model to use. |
+| `file` | string | required | The audio file object (not file name) to transcribe, in one of the following formats: `flac`, `mp3`, `mp4`, `mpeg`, `mpga`, `m4a`, `ogg`, `wav`, or `webm`. |
+
+Advanced: `language`, `prompt`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/openai_transcription/)
+
+## `openai_translation`
+
+Translates spoken audio into English, using the OpenAI API.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `server_address` | string | `"https://api.openai.com/v1"` | The Open API endpoint that the processor sends requests to. |
+| `api_key` | string | required | The API key for OpenAI API. |
+| `model` | string | required | The name of the OpenAI model to use. |
+| `file` | string |  | The audio file object (not file name) to translate, in one of the following formats: `flac`, `mp3`, `mp4`, `mpeg`, `mpga`, `m4a`, `ogg`, `wav`, or `webm`. |
+
+Advanced: `prompt`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/openai_translation/)
+
 ## `parallel`
 
 A processor that applies a list of child processors to messages of a batch as though they were each a batch of one message (similar to the `for_each` processor), but where each message is processed in parallel.
@@ -596,6 +887,49 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 | `processors` | list of processor | required | A list of child processors to apply. |
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/parallel/)
+
+## `parquet`
+
+**Deprecated.** Converts batches of documents to or from Parquet files.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `operator` | string | required | Determines whether the processor converts messages into a parquet file or expands parquet files into messages. |
+| `compression` | string | `"snappy"` | The type of compression to use when writing parquet files, this field is ignored when consuming parquet files. |
+| `schema_file` | string |  | A file path containing a schema used to describe the parquet files being generated or consumed, the format of the schema is a JSON document detailing the tag and fields of documents. |
+| `schema` | string |  | A schema used to describe the parquet files being generated or consumed, the format of the schema is a JSON document detailing the tag and fields of documents. |
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/parquet/)
+
+## `parquet_decode`
+
+Decodes Parquet files into a batch of structured messages.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `handle_logical_types` | string | `"v1"` | Whether to be smart about decoding logical types. |
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/parquet_decode/)
+
+## `parquet_encode`
+
+Encodes Parquet files from a batch of structured messages.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `schema` | list of object |  | Parquet schema. |
+| `schema_metadata` | string | `""` | Optionally specify a metadata field containing a schema definition to use for encoding instead of a statically defined schema. |
+| `default_compression` | string | `"uncompressed"` | The default compression type to use for fields. |
+
+Advanced: `default_encoding`, `default_timestamp_unit`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/parquet_encode/)
 
 ## `parse_log`
 
@@ -711,44 +1045,6 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 | `max_retries` | int | `0` | The maximum number of retry attempts before the request is aborted. |
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/retry/)
-
-## `schema_registry_decode`
-
-Automatically decodes and validates messages with schemas from a Confluent Schema Registry service.
-
-Middleware: `connect_schema_registry_decode`, or inside a `connect` middleware.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `avro` | object |  | Configuration for how to decode schemas that are of type AVRO. |
-| `protobuf` | object |  | Configuration for how to decode schemas that are of type PROTOBUF. |
-| `json` | object |  | Configuration for how to decode schemas that are of type JSON. |
-| `cache_duration` | string | `"10m"` | The duration after which a schema is considered stale and will be removed from the cache. |
-| `url` | string | required | The base URL of the schema registry service. |
-| `default_schema_id` | int |  | If set, this schema ID will be used when a message's schema header cannot be read (ErrBadHeader). |
-
-Advanced: `oauth`, `basic_auth`, `jwt`, `tls`.
-
-[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/schema_registry_decode/)
-
-## `schema_registry_encode`
-
-Automatically encodes and validates messages with schemas from a Confluent Schema Registry service.
-
-Middleware: `connect_schema_registry_encode`, or inside a `connect` middleware.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `url` | string | required | The base URL of the schema registry service. |
-| `subject` | string | required | The schema subject to derive schemas from. |
-| `refresh_period` | string | `"10m"` | The period after which a schema is refreshed for each subject, this is done by polling the schema registry service. |
-| `schema_metadata` | string | `""` | When set, the processor reads a schema in benthos common schema format from this metadata key on each message, converts it to the format specified by `format`, registers it with the schema registry under the configured subject, and encodes the message. |
-| `format` | string |  | The encoding format to use when converting a common schema from metadata. |
-| `avro` | object |  | Configuration for Avro encoding. |
-
-Advanced: `normalize`, `oauth`, `basic_auth`, `jwt`, `tls`.
-
-[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/schema_registry_encode/)
 
 ## `select_parts`
 
@@ -1036,3 +1332,16 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 Advanced: `branch_resources`.
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/workflow/)
+
+## `xml`
+
+Parses messages as an XML document, performs a mutation on the data, and then overwrites the previous contents with the new value.
+
+Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `operator` | string | `""` | An XML operation to apply to messages. |
+| `cast` | bool | `false` | Whether to try to cast values that are numbers and booleans to the right type. |
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/processors/xml/)

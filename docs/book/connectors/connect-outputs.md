@@ -5,7 +5,7 @@
 
 # Connect plugin: outputs
 
-The 63 Redpanda Connect outputs the [Connect plugin](connect.md) links, generated from the component specs of Redpanda Connect v4.110.0. Field descriptions are Redpanda Connect's own, shortened to one sentence; follow *Upstream documentation* for the rest. Install and configuration forms are on the [plugin page](connect.md).
+The 68 Redpanda Connect outputs the [Connect plugin](connect.md) links, generated from the component specs of Redpanda Connect v4.110.0. Field descriptions are Redpanda Connect's own, shortened to one sentence; follow *Upstream documentation* for the rest. Install and configuration forms are on the [plugin page](connect.md).
 
 Use one as a route `output`:
 
@@ -22,13 +22,14 @@ output:
 | Category | Components |
 |---|---|
 | AI | [`cyborgdb`](#cyborgdb), [`pinecone`](#pinecone), [`qdrant`](#qdrant) |
+| AWS | [`aws_kinesis`](#aws_kinesis), [`aws_kinesis_firehose`](#aws_kinesis_firehose), [`aws_s3`](#aws_s3), [`aws_sns`](#aws_sns), [`aws_sqs`](#aws_sqs) |
 | Azure | [`azure_blob_storage`](#azure_blob_storage), [`azure_cosmosdb`](#azure_cosmosdb), [`azure_data_lake_gen2`](#azure_data_lake_gen2), [`azure_queue_storage`](#azure_queue_storage), [`azure_table_storage`](#azure_table_storage) |
 | GCP | [`gcp_bigquery`](#gcp_bigquery), [`gcp_cloud_storage`](#gcp_cloud_storage), [`gcp_pubsub`](#gcp_pubsub) |
 | Integration | [`couchbase`](#couchbase) |
 | Local | [`file`](#file), [`stdout`](#stdout) |
 | Network | [`http_client`](#http_client), [`http_server`](#http_server), [`nanomsg`](#nanomsg), [`sftp`](#sftp), [`socket`](#socket), [`websocket`](#websocket) |
 | Other | [`cassandra`](#cassandra) |
-| Services | [`amqp_0_9`](#amqp_0_9), [`amqp_1`](#amqp_1), [`arc`](#arc), [`azure_blob_storage`](#azure_blob_storage), [`azure_data_lake_gen2`](#azure_data_lake_gen2), [`azure_queue_storage`](#azure_queue_storage), [`azure_table_storage`](#azure_table_storage), [`beanstalkd`](#beanstalkd), [`cache`](#cache), [`cypher`](#cypher), [`discord`](#discord), [`doris_stream_load`](#doris_stream_load), [`elasticsearch_v8`](#elasticsearch_v8), [`elasticsearch_v9`](#elasticsearch_v9), [`gcp_bigquery`](#gcp_bigquery), [`gcp_cloud_storage`](#gcp_cloud_storage), [`gcp_pubsub`](#gcp_pubsub), [`hdfs`](#hdfs), [`mongodb`](#mongodb), [`mqtt`](#mqtt), [`nats`](#nats), [`nats_jetstream`](#nats_jetstream), [`nats_kv`](#nats_kv), [`nats_stream`](#nats_stream), [`nsq`](#nsq), [`opensearch`](#opensearch), [`pulsar`](#pulsar), [`pusher`](#pusher), [`questdb`](#questdb), [`redis_hash`](#redis_hash), [`redis_list`](#redis_list), [`redis_pubsub`](#redis_pubsub), [`redis_streams`](#redis_streams), [`sql`](#sql), [`sql_insert`](#sql_insert), [`sql_raw`](#sql_raw) |
+| Services | [`amqp_0_9`](#amqp_0_9), [`amqp_1`](#amqp_1), [`arc`](#arc), [`aws_kinesis`](#aws_kinesis), [`aws_kinesis_firehose`](#aws_kinesis_firehose), [`aws_s3`](#aws_s3), [`aws_sns`](#aws_sns), [`aws_sqs`](#aws_sqs), [`azure_blob_storage`](#azure_blob_storage), [`azure_data_lake_gen2`](#azure_data_lake_gen2), [`azure_queue_storage`](#azure_queue_storage), [`azure_table_storage`](#azure_table_storage), [`beanstalkd`](#beanstalkd), [`cache`](#cache), [`cypher`](#cypher), [`discord`](#discord), [`doris_stream_load`](#doris_stream_load), [`elasticsearch_v8`](#elasticsearch_v8), [`elasticsearch_v9`](#elasticsearch_v9), [`gcp_bigquery`](#gcp_bigquery), [`gcp_cloud_storage`](#gcp_cloud_storage), [`gcp_pubsub`](#gcp_pubsub), [`hdfs`](#hdfs), [`mongodb`](#mongodb), [`mqtt`](#mqtt), [`nats`](#nats), [`nats_jetstream`](#nats_jetstream), [`nats_kv`](#nats_kv), [`nats_stream`](#nats_stream), [`nsq`](#nsq), [`opensearch`](#opensearch), [`pulsar`](#pulsar), [`pusher`](#pusher), [`questdb`](#questdb), [`redis_hash`](#redis_hash), [`redis_list`](#redis_list), [`redis_pubsub`](#redis_pubsub), [`redis_streams`](#redis_streams), [`sql`](#sql), [`sql_insert`](#sql_insert), [`sql_raw`](#sql_raw) |
 | Social | [`discord`](#discord) |
 | Utility | [`broker`](#broker), [`drop`](#drop), [`drop_on`](#drop_on), [`dynamic`](#dynamic), [`fallback`](#fallback), [`inproc`](#inproc), [`reject`](#reject), [`reject_errored`](#reject_errored), [`resource`](#resource), [`retry`](#retry), [`subprocess`](#subprocess), [`switch`](#switch), [`sync_response`](#sync_response) |
 
@@ -90,6 +91,98 @@ Writes data to an Arc database via the msgpack ingestion endpoint.
 Advanced: `tls`, `proxy_url`, `disable_http2`, `tps_limit`, `tps_burst`, `backoff`, `tcp`, `http`, `access_log_level`, `access_log_body_limit`, `timestamp_field`, `timestamp_unit`.
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/outputs/arc/)
+
+## `aws_kinesis`
+
+Sends messages to a Kinesis stream.
+
+`connector: aws_kinesis` · URI `connect+aws-kinesis://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `stream` | string | required | The stream to publish messages to. |
+| `partition_key` | string | required | A required key for partitioning messages. |
+| `max_in_flight` | int | `64` | The maximum number of parallel message batches to have in flight at any given time. |
+| `batching` | object |  | Allows you to configure a batching policy. |
+
+Advanced: `hash_key`, `region`, `endpoint`, `tcp`, `credentials`, `max_retries`, `backoff`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/outputs/aws_kinesis/)
+
+## `aws_kinesis_firehose`
+
+Sends messages to a Kinesis Firehose delivery stream.
+
+`connector: aws_kinesis_firehose` · URI `connect+aws-kinesis-firehose://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `stream` | string | required | The stream to publish messages to. |
+| `max_in_flight` | int | `64` | The maximum number of messages to have in flight at a given time. |
+| `batching` | object |  | Allows you to configure a batching policy. |
+
+Advanced: `region`, `endpoint`, `tcp`, `credentials`, `max_retries`, `backoff`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/outputs/aws_kinesis_firehose/)
+
+## `aws_s3`
+
+Sends message parts as objects to an Amazon S3 bucket. Each object is uploaded with the path specified with the `path` field.
+
+`connector: aws_s3` · URI `connect+aws-s3://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `bucket` | string | required | The bucket to upload messages to. |
+| `path` | string | `"${!counter()}-${!timestamp_unix_nano…` | The path of each message to upload. |
+| `tags` | map of string | `{}` | Key/value pairs to store with the object as tags. |
+| `content_type` | string | `"application/octet-stream"` | The content type to set for each object. |
+| `metadata` | object |  | Specify criteria for which metadata values are attached to objects as headers. |
+| `max_in_flight` | int | `64` | The maximum number of messages to have in flight at a given time. |
+| `batching` | object |  | Allows you to configure a batching policy. |
+
+Advanced: `content_encoding`, `cache_control`, `content_disposition`, `content_language`, `website_redirect_location`, `storage_class`, `kms_key_id`, `checksum_algorithm`, `server_side_encryption`, `force_path_style_urls`, `timeout`, `object_canned_acl`, `region`, `endpoint`, `tcp`, `credentials`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/outputs/aws_s3/)
+
+## `aws_sns`
+
+Sends messages to an AWS SNS topic.
+
+`connector: aws_sns` · URI `connect+aws-sns://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `topic_arn` | string | required | The topic to publish to. |
+| `message_group_id` | string |  | An optional group ID to set for messages. |
+| `message_deduplication_id` | string |  | An optional deduplication ID to set for messages. |
+| `subject` | string |  | An optional subject to set for messages. |
+| `max_in_flight` | int | `64` | The maximum number of messages to have in flight at a given time. |
+| `metadata` | object |  | Specify criteria for which metadata values are sent as headers. |
+
+Advanced: `timeout`, `region`, `endpoint`, `tcp`, `credentials`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/outputs/aws_sns/)
+
+## `aws_sqs`
+
+Sends messages to an SQS queue.
+
+`connector: aws_sqs` · URI `connect+aws-sqs://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `url` | string | required | The URL of the target SQS queue. |
+| `message_group_id` | string |  | An optional group ID to set for messages. |
+| `message_deduplication_id` | string |  | An optional deduplication ID to set for messages. |
+| `delay_seconds` | string |  | An optional delay time in seconds for message. |
+| `max_in_flight` | int | `64` | The maximum number of parallel message batches to have in flight at any given time. |
+| `metadata` | object |  | Specify criteria for which metadata values are sent as headers. |
+| `batching` | object |  | Allows you to configure a batching policy. |
+
+Advanced: `max_records_per_request`, `region`, `endpoint`, `tcp`, `credentials`, `max_retries`, `backoff`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/outputs/aws_sqs/)
 
 ## `azure_blob_storage`
 
