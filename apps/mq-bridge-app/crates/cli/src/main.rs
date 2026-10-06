@@ -1480,7 +1480,11 @@ fn copy_status_lease(
             let now = std::time::Instant::now();
             let current = next_route_metric_sample(sample, messages as f64, now);
             sample = Some(current);
-            let elapsed = now.duration_since(started).as_secs_f64();
+            // Up to the last growth, so an idle route keeps its achieved rate.
+            let elapsed = current
+                .last_change_at
+                .saturating_duration_since(started)
+                .as_secs_f64();
             async move {
                 let status = handle.status();
                 let summary = StatusSummary {

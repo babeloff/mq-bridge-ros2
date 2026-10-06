@@ -1560,7 +1560,7 @@ impl UiApp {
 
     /// Start time and lifetime average from the counters `key` already has.
     async fn fill_timing(&self, key: &str, summary: &mut StatusSummary) {
-        if summary.running {
+        if summary.running || summary.outcome.is_some() {
             summary.started_at_ms = self.metrics.started_at_ms(key).await;
         }
         if let Some(timing) = self.metrics.timing(key).await {
@@ -1998,7 +1998,10 @@ impl UiApp {
             let topic = format!("ui_collector_{consumer_key}");
             let capture_enabled = consumer.message_capture.enabled;
             let capture = MessageCapture::with_capacity(&topic, consumer.message_capture.keep_last);
-            let sequence_counter = self.metrics.counter_for(&consumer_key).await;
+            // Published after a successful start, so a failed restart keeps the
+            // completed run's metrics.
+            let sequence_counter = Arc::new(AtomicU64::new(0));
+            let started_at = Instant::now();
 
             let resolved_output =
                 resolve_consumer_output(consumer, publishers).map_err(anyhow::Error::msg)?;
@@ -2021,7 +2024,7 @@ impl UiApp {
             let context = Arc::new(CollectorContext {
                 source_key: consumer_key.clone(),
                 capture,
-                counter: sequence_counter,
+                counter: Arc::clone(&sequence_counter),
                 output: resolved_output,
                 capture_enabled,
             });
@@ -2080,6 +2083,9 @@ impl UiApp {
                 });
             let internal_route_name = collector_route_name(&consumer_key);
             let handle = route.run(&internal_route_name).await?;
+            self.metrics
+                .replace(&consumer_key, sequence_counter, started_at)
+                .await;
             handles.insert(consumer_key, handle);
         }
         Ok(())

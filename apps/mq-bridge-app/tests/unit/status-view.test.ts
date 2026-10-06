@@ -101,6 +101,32 @@ describe("statusRows", () => {
       }),
     ]);
   });
+
+  test("keeps local consumers when this instance is not in the registry", () => {
+    const rows = statusRows(
+      {
+        current_instance_id: "",
+        instances: [instance("peer", "cli", { consumers: [entity("orders", "kafka")] })],
+      },
+      {
+        ...EMPTY_RUNTIME_STATUS,
+        consumers: {
+          inbox: {
+            running: true,
+            status: { healthy: true, target: "nats" },
+            throughput: 2,
+            message_sequence: 9,
+            capture_enabled: false,
+            capture_keep_last: 0,
+          },
+        },
+      },
+    );
+    expect(rows.map((row) => [row.name, row.current])).toEqual([
+      ["inbox", true],
+      ["orders", false],
+    ]);
+  });
 });
 
 test("state follows outcome, then health", () => {

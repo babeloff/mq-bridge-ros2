@@ -136,10 +136,14 @@ export function statusRows(peers: PeerStatus, runtime: RuntimeStatus): StatusRow
   if (peers.instances.length === 0) return localRows(runtime);
   const isCurrent = (instance: InstanceStatus) =>
     instance.instance_id === peers.current_instance_id;
-  return [
-    ...peers.instances.filter(isCurrent),
-    ...peers.instances.filter((instance) => !isCurrent(instance)),
-  ].flatMap((instance) => instanceRows(instance, isCurrent(instance)));
+  // This instance is not in the registry: its consumers still come first.
+  const local = peers.instances.some(isCurrent) ? [] : localRows(runtime);
+  return local.concat(
+    [
+      ...peers.instances.filter(isCurrent),
+      ...peers.instances.filter((instance) => !isCurrent(instance)),
+    ].flatMap((instance) => instanceRows(instance, isCurrent(instance))),
+  );
 }
 
 /** Appends one rate sample per row and forgets rows that are gone. */
