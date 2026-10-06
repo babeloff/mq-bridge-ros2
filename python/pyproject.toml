@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mq-bridge-ros2"
-version = "0.1.0"
+version = "0.1.5"
 description = "ROS 2 endpoint for mq-bridge"
 readme = "README.md"
 license = "MIT"
