@@ -100,7 +100,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `model` | string | required | The model ID to use. |
-| `text` | string |  | The prompt you want to generate a response for. |
+| `text` | string |  | The text you want to compute vector embeddings for. |
 | `input_type` | string |  | Specifies the type of input passed to the model. |
 
 Advanced: `region`, `endpoint`, `tcp`, `credentials`.
@@ -281,7 +281,7 @@ Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
 ## `cohere_rerank`
 
-Generates vector embeddings to represent input text, using the Cohere API.
+Ranks a list of documents by their relevance to a query, using the Cohere API.
 
 Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
@@ -748,7 +748,7 @@ Advanced: `cache_directory`, `download_url`.
 
 ## `ollama_moderation`
 
-Generates responses to messages in a chat conversation, using the Ollama API.
+Classifies an LLM response as safe or unsafe, using the Ollama API.
 
 Use it inside a `connect` middleware or a `connect` endpoint's `pipeline`.
 
