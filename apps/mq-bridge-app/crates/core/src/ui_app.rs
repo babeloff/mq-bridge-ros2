@@ -414,6 +414,8 @@ impl From<&ConsumerStatusSnapshot> for StatusSummary {
             error: snapshot.status.error.clone(),
             throughput: snapshot.throughput,
             message_sequence: snapshot.message_sequence,
+            outcome: snapshot.outcome,
+            ..Default::default()
         }
     }
 }
@@ -1107,6 +1109,39 @@ impl UiApp {
 
     /// Each started consumer by name, with how its route ended (`None` while it
     /// runs) and the error it last reported.
+    /// Registry summaries of the consumers this app holds a handle for, keyed by
+    /// runtime key. Reads handles and counters only; never probes an endpoint.
+    pub async fn tracked_consumer_summaries(&self) -> HashMap<String, StatusSummary> {
+        let states: Vec<_> = self
+            .ui_handles
+            .read()
+            .await
+            .iter()
+            .map(|(key, handle)| (key.clone(), handle.status(), handle.outcome()))
+            .collect();
+        let mut summaries = HashMap::with_capacity(states.len());
+        for (key, status, outcome) in states {
+            let summary = StatusSummary {
+                running: outcome.is_none(),
+                healthy: status.healthy,
+                pending: status.pending,
+                capacity: status.capacity,
+                error: status.error,
+                throughput: self.metrics.throughput(&key).await,
+                message_sequence: self.metrics.sequence(&key).await,
+                started_at_ms: self.metrics.started_at_ms(&key).await,
+                outcome: outcome.map(RouteOutcomeSnapshot::from),
+                average_throughput: self
+                    .metrics
+                    .timing(&key)
+                    .await
+                    .map_or(0.0, |timing| timing.average_throughput),
+            };
+            summaries.insert(key, summary);
+        }
+        summaries
+    }
+
     pub async fn consumer_outcomes(&self) -> Vec<(String, Option<RouteOutcome>, Option<String>)> {
         let config = self.config.read().await;
         let handles = self.ui_handles.read().await;
@@ -1444,7 +1479,7 @@ impl UiApp {
     async fn status_snapshot(&self) -> StatusSnapshot {
         let runtime = self.cached_runtime_status().await;
         let config = self.config.read().await;
-        StatusSnapshot {
+        let mut snapshot = StatusSnapshot {
             consumers: config
                 .consumers
                 .iter()
@@ -1509,6 +1544,27 @@ impl UiApp {
                     }
                 })
                 .collect(),
+        };
+        drop(config);
+        for consumer in &mut snapshot.consumers {
+            self.fill_timing(&consumer.id, &mut consumer.summary).await;
+        }
+        for route in &mut snapshot.routes {
+            route.summary.message_sequence = self.metrics.sequence(&route.id).await;
+            self.fill_timing(&route.id, &mut route.summary).await;
+            route.input.summary = route.summary.clone();
+            route.output.summary = route.summary.clone();
+        }
+        snapshot
+    }
+
+    /// Start time and lifetime average from the counters `key` already has.
+    async fn fill_timing(&self, key: &str, summary: &mut StatusSummary) {
+        if summary.running {
+            summary.started_at_ms = self.metrics.started_at_ms(key).await;
+        }
+        if let Some(timing) = self.metrics.timing(key).await {
+            summary.average_throughput = timing.average_throughput;
         }
     }
 

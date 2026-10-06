@@ -8,6 +8,14 @@ Kafka outputs publish faster with their default settings.
 
 ### Added
 
+- **Live status in the CLI, the UI and MCP.** `mqb status` lists every route and consumer that
+  any `mqb` process of your user is running on the machine, with state, current and average
+  rate, total, pending and uptime. On a terminal it redraws every second; `--no-watch` prints
+  once and `--json` prints the records. The
+  UI has a **Status** tab with the same rows and the last 60 seconds of each rate, and the MCP
+  server has a read-only `bridge_status` tool. `mqb copy` and headless config runs now report
+  rates and totals too. Error text stays out of these records unless
+  `MQB_STATUS_SHOW_ERRORS=1` is set for both the reporting and the reading process.
 - **`http_bulk` reads an open stream.** `read.stream: sse` or `ndjson` sends one request and
   turns every server-sent event or line of the response into a message, instead of asking
   for pages. An SSE source resumes with `Last-Event-ID` from the last acknowledged event, an

@@ -968,6 +968,9 @@ export interface StatusSummary {
   error?: string | null;
   throughput: number;
   message_sequence: number;
+  started_at_ms?: number | null;
+  outcome?: RouteOutcomeSnapshot | null;
+  average_throughput?: number;
 }
 
 export interface StatusRoute {

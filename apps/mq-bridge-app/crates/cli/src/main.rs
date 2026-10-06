@@ -6,9 +6,10 @@
 use mq_bridge_app::{
     config::{AppConfig, config_file_path, load_config},
     copy_pipeline, mq_bridge,
+    route_metrics::next_route_metric_sample,
     status_registry::{
         InstanceKind, StatusEntity, StatusLease, StatusRoute, StatusSnapshot, StatusSummary,
-        endpoint_type_label,
+        endpoint_type_label, now_ms,
     },
     ui_app::{UiApp, collector_route_name, consumer_runtime_key},
     web_ui,
@@ -27,6 +28,7 @@ use anyhow::Context;
 mod checkpoint_cmd;
 mod mcp;
 mod mcp_install;
+mod status_cmd;
 
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
@@ -214,6 +216,12 @@ enum Command {
     /// Show, reset, or set the resume checkpoint of a configured route or of a
     /// `copy --resume` job.
     Checkpoint(checkpoint_cmd::CheckpointArgs),
+
+    /// Show what every mq-bridge process of this user is running on this machine.
+    ///
+    /// Reads the local status registry that the CLI, MCP server, web UI and
+    /// desktop app publish to. Starts nothing and loads no config.
+    Status(status_cmd::StatusArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -563,6 +571,9 @@ async fn main() -> anyhow::Result<()> {
             load_cli_plugins(&args.plugins)?;
             return checkpoint_cmd::run(checkpoint_args, args.config, args.config_str).await;
         }
+        Some(Command::Status(status_args)) => {
+            return status_cmd::run(status_args, args.color).await;
+        }
         Some(Command::ToCli) => {
             let (config, _) = load_config(
                 args.config,
@@ -712,11 +723,8 @@ async fn main() -> anyhow::Result<()> {
     // Headless only: with a web UI running, its own `UiApp` owns the lease and
     // publishes richer state, so a second lease for the same process would just
     // duplicate every row.
-    let _cli_status = config
-        .ui_addr
-        .is_empty()
-        .then(|| cli_status_lease(config_file_path.clone(), config.clone()))
-        .flatten();
+    let mut cli_status = None;
+    let workspace_path = config_file_path.clone();
 
     // Start Web UI
     // Headless, this owns the consumers it started: dropping the app stops their
@@ -769,6 +777,7 @@ async fn main() -> anyhow::Result<()> {
             &args.plugins,
         )?
         .with_instance_kind(InstanceKind::Cli);
+        cli_status = cli_status_lease(workspace_path, config.clone(), app.clone());
         let enabled_consumers = config
             .consumers
             .iter()
@@ -825,7 +834,9 @@ async fn main() -> anyhow::Result<()> {
     info!("Shutdown signal received. Broadcasting to all tasks...");
 
     // Dropping the app releases its route handles without stopping the underlying
-    // routes; the `stop_route` loop below performs shutdown.
+    // routes; the `stop_route` loop below performs shutdown. The lease holds a
+    // clone of the app, so it goes first.
+    drop(cli_status);
     drop(headless_app);
 
     let shutdown_task = async {
@@ -905,7 +916,11 @@ fn drain_result(
 
 /// Advertises a headless run: the configured entities, with running state read
 /// from the live route registry rather than assumed.
-fn cli_status_lease(workspace_path: String, config: AppConfig) -> Option<StatusLease> {
+fn cli_status_lease(
+    workspace_path: String,
+    config: AppConfig,
+    app: UiApp,
+) -> Option<StatusLease> {
     let heartbeat_config = config.clone();
     StatusLease::spawn(
         InstanceKind::Cli,
@@ -913,25 +928,31 @@ fn cli_status_lease(workspace_path: String, config: AppConfig) -> Option<StatusL
         &workspace_path,
         move || {
             let config = heartbeat_config.clone();
+            let app = app.clone();
             async move {
                 let running = mq_bridge::list_routes();
                 let is_running = |name: &str| running.iter().any(|route| route == name);
+                let mut tracked = app.tracked_consumer_summaries().await;
                 StatusSnapshot {
                     consumers: config
                         .consumers
                         .iter()
                         .map(|consumer| {
                             let id = consumer_runtime_key(consumer);
-                            let running = is_running(&collector_route_name(&id));
+                            // No handle (not started here): the route registry decides.
+                            let summary = tracked.remove(&id).unwrap_or_else(|| {
+                                let running = is_running(&collector_route_name(&id));
+                                StatusSummary {
+                                    running,
+                                    healthy: running,
+                                    ..Default::default()
+                                }
+                            });
                             StatusEntity {
                                 label: consumer.name.clone(),
                                 endpoint: endpoint_type_label(&consumer.endpoint.endpoint_type)
                                     .to_string(),
-                                summary: StatusSummary {
-                                    running,
-                                    healthy: running,
-                                    ..Default::default()
-                                },
+                                summary,
                                 id,
                             }
                         })
@@ -949,6 +970,8 @@ fn cli_status_lease(workspace_path: String, config: AppConfig) -> Option<StatusL
                         .collect(),
                     routes: running
                         .iter()
+                        // Collector routes are already listed as consumers above.
+                        .filter(|name| !name.starts_with("ui_collector_route_"))
                         .map(|name| route_entity(name, &config))
                         .collect(),
                 }
@@ -1174,6 +1197,8 @@ async fn run_copy(args: CopyArgs, stop_when: StopWhen) -> anyhow::Result<()> {
             input_endpoint_label.to_string(),
             output_endpoint_label.to_string(),
             handle.clone(),
+            Arc::clone(&copied),
+            started,
         );
 
         if stop_when == StopWhen::FirstMessage {
@@ -1437,7 +1462,11 @@ fn copy_status_lease(
     input_endpoint: String,
     output_endpoint: String,
     handle: Arc<mq_bridge::route::RouteHandle>,
+    copied: Arc<std::sync::atomic::AtomicU64>,
+    started: std::time::Instant,
 ) -> Option<StatusLease> {
+    let started_at_ms = now_ms().saturating_sub(started.elapsed().as_millis() as u64);
+    let mut sample = None;
     StatusLease::spawn(
         InstanceKind::Cli,
         env!("CARGO_PKG_VERSION"),
@@ -1447,12 +1476,26 @@ fn copy_status_lease(
             let run_id = run_id.clone();
             let input_endpoint = input_endpoint.clone();
             let output_endpoint = output_endpoint.clone();
+            let messages = copied.load(std::sync::atomic::Ordering::Relaxed);
+            let now = std::time::Instant::now();
+            let current = next_route_metric_sample(sample, messages as f64, now);
+            sample = Some(current);
+            let elapsed = now.duration_since(started).as_secs_f64();
             async move {
                 let status = handle.status();
                 let summary = StatusSummary {
                     running: handle.outcome().is_none(),
                     healthy: status.healthy,
                     error: status.error.clone(),
+                    throughput: current.smoothed_throughput,
+                    message_sequence: messages,
+                    started_at_ms: Some(started_at_ms),
+                    outcome: handle.outcome().map(Into::into),
+                    average_throughput: if elapsed > 0.0 {
+                        messages as f64 / elapsed
+                    } else {
+                        0.0
+                    },
                     ..Default::default()
                 };
                 StatusSnapshot {

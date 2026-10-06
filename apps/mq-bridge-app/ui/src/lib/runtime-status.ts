@@ -4,7 +4,7 @@ import type {
   RuntimeStatusResponse,
 } from "./generated/ui-types";
 
-export type MainTab = "publishers" | "consumers" | "config";
+export type MainTab = "publishers" | "consumers" | "config" | "status";
 
 export type RuntimeConsumerState = ConsumerStatusSnapshot;
 export type RuntimeStatus = RuntimeStatusResponse;

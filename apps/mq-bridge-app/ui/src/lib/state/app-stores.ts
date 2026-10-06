@@ -9,6 +9,7 @@ function initialMainTab(): MainTab {
   if (typeof window === "undefined") return "publishers";
   const hash = window.location.hash || "";
   if (hash === "#config") return "config";
+  if (hash === "#status") return "status";
   if (hash === "#consumers" || hash.startsWith("#consumers:")) return "consumers";
   return "publishers";
 }

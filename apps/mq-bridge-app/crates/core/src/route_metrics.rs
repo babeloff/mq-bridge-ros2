@@ -209,6 +209,12 @@ impl RouteMetrics {
         })
     }
 
+    /// Wall-clock start of `key`'s route in epoch milliseconds.
+    pub async fn started_at_ms(&self, key: &str) -> Option<u64> {
+        let started_at = *self.starts.read().await.get(key)?;
+        Some(crate::status_registry::now_ms().saturating_sub(started_at.elapsed().as_millis() as u64))
+    }
+
     /// Smoothed messages per second for every sampled key.
     pub async fn throughputs(&self) -> HashMap<String, f64> {
         self.samples

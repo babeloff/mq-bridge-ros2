@@ -75,6 +75,7 @@ transport owns stdout for the protocol itself.
 | `wait_route` | `name`, `timeout_ms` | Block until a route finishes, then report how it ended. One call instead of a polling loop. |
 | `route_messages` | `name` | The most recent messages captured on a route. Requires `capture_last`; reads drain the buffer. |
 | `stop_route` | `name` | Stop a route; returns total messages and the rate it achieved. |
+| `bridge_status` | — | Every mq-bridge process of this user on this machine (CLI copies, web UI, desktop app, other MCP servers) with the state, rates and totals of its routes. Read-only; the same records as `mqb status --json`. |
 | `server_info` | — | Crate version, git hash, build profile and build time, plus the agent bus when it is on. |
 | `agent_listen` | `name`, `input`, `capture_last` | **`--agent-bus` only.** Open this server's agent inbox so other agents can reach it. Off until called. |
 | `agent_send` | `to`, `message`, `output` | **`--agent-bus` only.** Send a message to another agent's inbox. |

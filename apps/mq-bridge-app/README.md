@@ -89,7 +89,7 @@ mqb mcp install          # register with Claude Code / Claude Desktop / Cursor
 - **Middleware chains** — retries, dead-letter queues, deduplication, rate limiting, buffering, transforms, weak-join correlation, and more, wrapping any endpoint.
 - **Built-in web UI** — Svelte-based management for publishers, consumers, routes, runtime status, presets, and imports; the same UI the CLI serves in a browser.
 - **Native plugins** — load an endpoint or middleware this binary never compiled (Pulsar, an in-house transport) from a shared library, via `plugins:` in the config or `--plugin <path>`, and use it by name in routes. No special build needed; plugin paths are read only at startup, so adding one means editing the trusted startup configuration and restarting: [Native plugins](https://marcomq.github.io/mq-bridge/extending/plugins.html).
-- **Observability** — structured JSON logging and a Prometheus metrics endpoint.
+- **Observability** — structured JSON logging, a Prometheus metrics endpoint, and `mqb status` for a live table of everything running on the machine.
 - **Flexible configuration** — hierarchical files (YAML/JSON/TOML) plus environment variables, suited to Container/Kubernetes.
 - **Security & storage** — config security modes (plain / extracted secrets / encrypted config / persistent encrypted history), encryption at rest, and local-first operation.
 - **High performance** — Rust + Tokio: low latency, high concurrency, small memory footprint.
