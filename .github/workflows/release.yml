@@ -116,12 +116,12 @@ jobs:
           cache: true
           activate-environment: true
 
-      - name: Install official mq-bridge 0.4.5 packagers
+      - name: Install official mq-bridge 0.4.13 packagers
         shell: bash
         working-directory: node
         run: |
           npm install --no-package-lock
-          python -m pip install "mq-bridge-py[plugin-packaging]==0.4.5"
+          python -m pip install "mq-bridge-py[plugin-packaging]==0.4.13"
 
       - name: Stage npm native library
         shell: bash
