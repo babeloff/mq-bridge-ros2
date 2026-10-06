@@ -251,7 +251,8 @@ An event's `id` and `event` fields are the `sse_id` and `sse_event` metadata of
 its message. The payload is the `data` as sent; it need not be JSON. For `sse`,
 `cursor.item` takes the position from a field of the data instead of the id.
 
-An export that is one response is read once with `--drain`:
+An export that is one response is read once by a draining route (`--drain` on
+the `mqb` command line):
 
 ```yaml
 input:

@@ -429,20 +429,20 @@ class RssSampler(threading.Thread):
     def __init__(self, job, interval: float = 0.25):
         super().__init__(daemon=True)
         self.job, self.interval = job, interval
-        self.peak, self._stop = 0.0, threading.Event()
+        self.peak, self._stop_event = 0.0, threading.Event()
 
     def run(self):
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             if isinstance(self.job, (MqbJob, SeaStreamerJob)):
                 if self.job.proc and self.job.proc.poll() is None:
                     self.peak = max(self.peak, process_rss_mib(self.job.proc.pid))
             else:
                 name = getattr(self.job, "container", ARROYO_CONTAINER)
                 self.peak = max(self.peak, container_rss_mib(name))
-            self._stop.wait(self.interval)
+            self._stop_event.wait(self.interval)
 
     def finish(self) -> float:
-        self._stop.set()
+        self._stop_event.set()
         self.join(timeout=10)
         return self.peak
 
