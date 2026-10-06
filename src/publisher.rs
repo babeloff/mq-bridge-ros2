@@ -58,7 +58,10 @@ pub(crate) async fn create(
 
 impl Ros2Publisher {
     /// Publishing is synchronous and produces no receipt, so this is the whole
-    /// of sending one message. Note that no `.await` may appear here: a
+    /// of sending one message. A successful `publish` still does not confirm
+    /// that a reader processed the message; the count check only prevents a
+    /// volatile sample from being accepted when no compatible reader has
+    /// matched yet. Note that no `.await` may appear here: a
     /// `DynamicMessage` owns raw type-support memory and is not `Send`.
     fn publish(&self, message: &CanonicalMessage) -> Result<(), PublisherError> {
         let mut outgoing = self
@@ -69,6 +72,17 @@ impl Ros2Publisher {
         // a bounded one, will not become valid by being sent again.
         message::set_payload(&mut outgoing, &self.payload_field, &message.payload)
             .map_err(PublisherError::NonRetryable)?;
+
+        let readers = self
+            .publisher
+            .get_subscription_count()
+            .map_err(publisher_error)?;
+        if readers == 0 {
+            return Err(PublisherError::Retryable(anyhow::anyhow!(
+                "no compatible ROS 2 reader has matched the publisher yet"
+            )));
+        }
+
         self.publisher.publish(outgoing).map_err(publisher_error)
     }
 }
@@ -110,7 +124,9 @@ impl MessagePublisher for Ros2Publisher {
 
     /// Nothing to do: `publish` hands the sample straight to the middleware, and
     /// there is no producer-side batch to force out. Getting the sample to a
-    /// reader is the `reliability` policy's job, not a flush's.
+    /// reader is the `reliability` policy's job, not a flush's. The route may
+    /// commit after this publisher returns, but that commit only records that
+    /// the route accepted the send attempt; ROS output remains fire-and-forget.
     async fn flush(&self) -> anyhow::Result<()> {
         Ok(())
     }

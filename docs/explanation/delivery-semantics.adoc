@@ -28,6 +28,12 @@ but that is DDS making sure the sample arrives at a matched reader —
 it has nothing to do with whether the application succeeded in handling it,
 and it is finished long before a route's downstream sees the message.
 
+The publisher checks the matched-reader count before calling `publish`.
+With no compatible reader, the send is returned as retryable so a route does not commit its source offset for a volatile sample that had nowhere to go.
+Once at least one reader is matched, `publish` returning successfully allows the route to commit.
+That commit records the completed send attempt; it is not a reader acknowledgement,
+and ROS output remains fire-and-forget after the commit.
+
 mq-bridge's consumer contract still asks for a disposition per message,
 and this endpoint still enforces the count.
 But the dispositions themselves cannot be acted on: by the time a route reports `Nack`,
@@ -129,6 +135,8 @@ It is worth being clear about what did *not* change, since the list above is all
 * `exit_on_empty` works: an idle topic yields an empty batch, which ends a draining route.
 * Publishing a batch attempts every message, and failures come back attached to the messages the route must retry,
   so one rejected message does not hide the fate of the rest.
+* A publish with no matched reader is retryable and does not commit its source offset;
+  a successful send still provides no application-level delivery acknowledgement.
 * The error classification a route depends on is intact —
   configuration and type errors stop the route, transient failures are retried.
 
