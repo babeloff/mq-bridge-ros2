@@ -55,7 +55,7 @@ pub(crate) const DEFAULT_CONCURRENCY: usize = 4;
 
 /// How often `copy --drain` checks whether the route task has ended. The engine
 /// exposes completion as a poll, not a notification; see [`run_copy`].
-const COPY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const COPY_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// How long `copy --wait` pauses between drain attempts. An empty source drains
 /// instantly, so without this the wait would spin.

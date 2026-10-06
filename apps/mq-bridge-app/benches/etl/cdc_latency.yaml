@@ -1,23 +1,17 @@
-# Scenario 2 — CDC event-to-sink latency, zero-code config path.
+# Scenario 2 — CDC end-to-end latency, zero-code config path.
 #
-# A single consumer route: postgres_cdc (logical replication) -> discard (null).
-# The `metrics` middleware on the input endpoint makes the engine record
-# `queue_message_processing_duration_seconds{route="collector_cdc_lat",endpoint="input"}`
-# per event, exposed as Prometheus summary quantiles on metrics_addr. Those
-# quantiles are the latency proxy (in-engine per-event processing/decode time on
-# the consumer side — see METHODOLOGY.md for exactly what this does and does not
-# measure vs. Debezium end-to-end).
+# A single consumer route: postgres_cdc (logical replication) -> file. The runner
+# (run_cdc_latency.sh) starts it with POST /consumer-start, commits rows at a fixed
+# rate and tails the sink file; cdc_latency.py turns that into commit-to-sink
+# latency percentiles.
 #
-# Apply it (starts the route) with:  POST /config  to the UI address — the runner
-# (run_cdc_latency.sh) does this. concurrency/batch_size are the swept knobs.
+# No `metrics` middleware: on an input endpoint its duration is the wait for the
+# next event, i.e. the inter-arrival time, not a latency.
 log_level: info
-metrics_addr: 127.0.0.1:9090
 ui_addr: 127.0.0.1:9091
 consumers:
   - name: cdc_lat
     endpoint:
-      middlewares:
-        - metrics: {}
       postgres_cdc:
         url: postgres://testuser:testpass@localhost:5432/testdb
         publication: mqb_pub
@@ -28,8 +22,16 @@ consumers:
         # The runner drops the slot before each run so it starts clean.
         temporary_slot: false
         status_interval_ms: 1000
+    output:
+      mode: publisher
+      publisher: cdc_out
     message_capture:
       enabled: false
     concurrency: 1
     batch_size: 1
-publishers: []
+publishers:
+  - name: cdc_out
+    endpoint:
+      file:
+        path: /tmp/mqb_cdc_out.jsonl
+        format: raw

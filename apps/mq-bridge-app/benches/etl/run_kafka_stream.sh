@@ -60,12 +60,15 @@ seed_topic() {
   docker exec "$KAFKA_CONTAINER" kafka-topics --bootstrap-server localhost:9092 \
     --create --topic "$TOPIC" --partitions "$PARTITIONS" --replication-factor 1 \
     --config retention.ms=-1 >/dev/null
+  # linger.ms=1 (the default from 0.4.20 on), URL-encoded [["linger.ms","1"]].
+  # Concurrency 1: on 0.4.19 this linger at concurrency 4 left the topic short.
+  local LINGER_OPTS='%5B%5B%22linger.ms%22%2C%221%22%5D%5D'
   # Filled from the same `bench` table every other scenario reads, so the row
   # shape here is identical to the Postgres and CSV scenarios.
   "$BIN" copy \
     --from "${PG_URL}?table=bench&cursor_column=id&sslmode=disable" \
-    --to "kafka://${KAFKA_HOST_BROKERS}?topic=${TOPIC}" \
-    --drain --batch-size 32768 --concurrency 4
+    --to "kafka://${KAFKA_HOST_BROKERS}?topic=${TOPIC}&producer_options=${LINGER_OPTS}" \
+    --drain --batch-size 32768 --concurrency 1
   docker exec "$KAFKA_CONTAINER" kafka-get-offsets --bootstrap-server localhost:9092 --topic "$TOPIC"
 }
 

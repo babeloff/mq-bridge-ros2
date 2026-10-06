@@ -117,6 +117,12 @@ def api(method: str, path: str, body: dict | None = None):
         raise SystemExit(f"{method} {path} -> {e.code}: {e.read().decode()[:500]}")
 
 
+def docker_inspect(name: str, fmt: str) -> str:
+    return subprocess.run(
+        ["docker", "inspect", "--format", fmt, name], capture_output=True, text=True,
+    ).stdout.strip()
+
+
 def dexec(cmd: str) -> str:
     return subprocess.run(
         ["docker", "exec", ARROYO_CONTAINER, "sh", "-c", cmd],
@@ -215,8 +221,10 @@ def mqb_source_uri(args, tag: str) -> str:
     `group_id`, because a reused group resumes at its committed offset and does
     the same.
     """
-    opts = urllib.parse.quote(json.dumps([["auto.offset.reset", "earliest"]]))
-    uri = (f"kafka://{args.brokers_host}?topic={args.topic}"
+    extra = json.loads(os.environ.get("MQB_CONSUMER_OPTIONS", "[]"))
+    opts = urllib.parse.quote(json.dumps([["auto.offset.reset", "earliest"], *extra]))
+    brokers = args.brokers if args.tool == "mqb-docker" else args.brokers_host
+    uri = (f"kafka://{brokers}?topic={args.topic}"
            f"&group_id=mqb_{tag}&consumer_options={opts}")
     if args.variant in ("projection", "projection-dedup"):
         mapping = urllib.parse.quote(json.dumps({c: f"$.{c}" for c in PROJECTION}))
@@ -276,6 +284,68 @@ class MqbJob:
     def cleanup(self):
         if self.log_file:
             self.log_file.close()
+
+
+class MqbDockerJob:
+    """The published mq-bridge-app image, as a container next to Arroyo's.
+
+    Used when the other side is itself a container, so both tools sit in the same
+    Docker VM, reach the broker over the compose network, and write to the same
+    named volume. The sink is read through the Arroyo container, exactly as
+    Arroyo's own is, because the mq-bridge-app image has no shell.
+    """
+
+    def __init__(self, args, tag: str):
+        self.args = args
+        self.tag = tag
+        self.container = f"mqb-etl-bench-{tag}"
+        self.out_dir = f"{OUT_ROOT}/mqb_{tag}"
+        self.log = f"docker logs {self.container}"
+        self.startup = 0.0
+
+    def start(self):
+        # The image runs as an unprivileged user; the volume root is root-owned.
+        dexec(f"rm -rf {self.out_dir} && mkdir -p {self.out_dir} && chmod 777 {self.out_dir}")
+        fmt = "{{range .Mounts}}{{if eq .Destination \"%s\"}}{{.Name}}{{end}}{{end}}" % OUT_ROOT
+        volume = docker_inspect(ARROYO_CONTAINER, fmt)
+        network = docker_inspect(
+            ARROYO_CONTAINER, "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}")
+        if not volume or not network:
+            raise SystemExit(f"cannot resolve the volume/network of {ARROYO_CONTAINER}")
+        created = time.time()
+        subprocess.run([
+            "docker", "run", "-d", "--name", self.container,
+            "--network", network, "-v", f"{volume}:{OUT_ROOT}",
+            self.args.mqb_image, "copy",
+            "--from", mqb_source_uri(self.args, self.tag),
+            "--to", f"file://{self.out_dir}/out.jsonl?format={self.args.mqb_file_format}",
+            "--batch-size", str(self.args.batch_size),
+            "--concurrency", str(self.args.parallelism),
+        ], check=True, capture_output=True)
+        self.startup = time.time() - created
+
+    def is_alive(self) -> bool:
+        return docker_inspect(self.container, "{{.State.Running}}") == "true"
+
+    def sink_bytes(self) -> int:
+        out = dexec(
+            f"find {self.out_dir} -type f -printf '%s\\n' 2>/dev/null "
+            f"| awk '{{s+=$1}} END{{print s+0}}'"
+        )
+        return int(out or 0)
+
+    def sink_lines(self) -> int:
+        return int(dexec(f"find {self.out_dir} -type f -exec cat {{}} + 2>/dev/null | wc -l") or 0)
+
+    def stop(self):
+        subprocess.run(["docker", "kill", self.container], capture_output=True)
+
+    def cleanup(self):
+        subprocess.run(["docker", "rm", "-f", self.container], capture_output=True)
+        if self.args.keep_output:
+            print(f"KEPT_OUTPUT_DIR={self.out_dir}", flush=True)
+        else:
+            dexec(f"rm -rf {self.out_dir}")
 
 
 class SeaStreamerJob:
@@ -367,7 +437,8 @@ class RssSampler(threading.Thread):
                 if self.job.proc and self.job.proc.poll() is None:
                     self.peak = max(self.peak, process_rss_mib(self.job.proc.pid))
             else:
-                self.peak = max(self.peak, container_rss_mib(ARROYO_CONTAINER))
+                name = getattr(self.job, "container", ARROYO_CONTAINER)
+                self.peak = max(self.peak, container_rss_mib(name))
             self._stop.wait(self.interval)
 
     def finish(self) -> float:
@@ -387,6 +458,8 @@ def one_run(args, expect_bytes: int | None):
         job = ArroyoJob(args, tag)
     elif args.tool == "sea-streamer":
         job = SeaStreamerJob(args, tag)
+    elif args.tool == "mqb-docker":
+        job = MqbDockerJob(args, tag)
     else:
         job = MqbJob(args, tag)
     sampler = RssSampler(job)
@@ -441,7 +514,7 @@ def one_run(args, expect_bytes: int | None):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--tool", choices=["mqb", "arroyo", "sea-streamer"], required=True)
+    p.add_argument("--tool", choices=["mqb", "mqb-docker", "arroyo", "sea-streamer"], required=True)
     p.add_argument("--variant", choices=["passthrough", "projection", "projection-dedup"],
                    default="projection")
     p.add_argument("--label", required=True)
@@ -449,6 +522,8 @@ def main():
     p.add_argument("--brokers", default="kafka:29092", help="brokers as seen from Arroyo")
     p.add_argument("--brokers-host", default="localhost:9092", help="brokers as seen from the host")
     p.add_argument("--bin", default=os.environ.get("BIN", "target/release/mq-bridge-app"))
+    p.add_argument("--mqb-image", default=os.environ.get("MQB_IMAGE", "ghcr.io/marcomq/mq-bridge-app:latest"),
+                   help="image for --tool mqb-docker")
     p.add_argument("--mqb-file-format", choices=["normal", "raw"], default="raw")
     p.add_argument("--sea-relay", default=os.environ.get("SEA_STREAMER_RELAY", "target/release/sea-streamer-relay"))
     p.add_argument("--sea-count", default=os.environ.get("SEA_STREAMER_COUNT", "target/release/sea-streamer-count"))

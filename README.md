@@ -20,9 +20,8 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
 <p align="center">
-📖 <a href="https://marcomq.github.io/mq-bridge/">Book</a> ·
 🖥️ <a href="apps/mq-bridge-app">mq-bridge-app</a> ·
-📊 <a href="https://marcomq.github.io/mq-bridge/dev/bench/">Benchmarks</a> ·
+📊 <a href="apps/mq-bridge-app/benches/etl/README.md">ETL benchmarks</a> ·
 🏗️ <a href="docs/ARCHITECTURE.md">Architecture</a> ·
 ⚙️ <a href="docs/CONFIGURATION.md">Config</a> ·
 📚 <a href="docs/REFERENCE.md">Middleware &amp; endpoint reference</a>
@@ -117,16 +116,16 @@ For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation.
 
 ## Benchmarks
 
-Throughput is tracked continuously on the public [benchmark dashboard](https://marcomq.github.io/mq-bridge/dev/bench/). Like-for-like ETL comparisons, measured through the zero-code [`mq-bridge-app`](apps/mq-bridge-app):
+Like-for-like ETL comparisons, measured through the zero-code [`mq-bridge-app`](apps/mq-bridge-app); every number, baseline and command is in the [ETL benchmark harness](apps/mq-bridge-app/benches/etl/README.md):
 
 | Scenario | mq-bridge | Compared with |
 | :--- | :--- | :--- |
-| CSV → JSONL, 1M mixed-type rows (~116 MiB) | **2,824,858 rows/s**, ~28 MiB RAM | Meltano (`tap-csv` → `target-jsonl`): ~19,500 rows/s, ~444 MiB RAM — **~145x slower**<br>DuckDB, all cores: 2,036,659 rows/s — mq-bridge **~1.4x faster**, ~17x less memory |
-| Kafka → file, 1M rows, no transform | **~65% faster** than Sea Streamer | Sea Streamer, both on mimalloc (~80% faster vs. its default-allocator build) |
+| CSV → JSONL, 1M mixed-type rows (~116 MiB) | **3,134,796 rows/s**, ~29 MiB RAM | Meltano (`tap-csv` → `target-jsonl`): 9,771 rows/s, ~444 MiB RAM — mq-bridge **~321x faster**<br>DuckDB, all cores: 2,109,704 rows/s — mq-bridge **~1.5x faster**, ~18x less memory |
+| Kafka → file, 1M rows, no transform | **878,105 rows/s**, ~160 MiB RAM | Sea Streamer, mimalloc build: 492,465 rows/s, ~894 MiB RAM — mq-bridge **~1.8x faster** (also ~1.8x vs. its default-allocator build) |
 
-The CSV row reuses an existing, independently published 1M-row CSV → JSONL workload, on a byte-identical fixture: 7 mixed-type columns, seed 42, 121,981,421 bytes, SHA-256 `a84894e0…0c45b221` ([full definition](apps/mq-bridge-app/benches/etl/README.md#6--csv--jsonl-vs-meltano)). Whole-process wall-clock, no transformation, Meltano run on the same machine and file.
+The CSV row reuses an existing, independently published 1M-row CSV → JSONL workload, on a byte-identical fixture: 7 mixed-type columns, seed 42, 121,981,421 bytes, SHA-256 `a84894e0…0c45b221` ([full definition](apps/mq-bridge-app/benches/etl/README.md#workload-definition)). Whole-process wall-clock, no transformation, Meltano run on the same machine and file.
 
-CSV figures: mq-bridge 0.4.12. DuckDB is a throughput ceiling for the conversion itself, not an ETL tool. Methodology and reporting rules are in [`benches/ETL_BENCHMARKS.md`](benches/ETL_BENCHMARKS.md); the raw numbers, baselines and reproducible helpers are in the [ETL benchmark harness](apps/mq-bridge-app/benches/etl/README.md).
+All figures: mq-bridge 0.4.20. DuckDB is a throughput ceiling for the conversion itself, not an ETL tool.
 
 
 **External benchmark:** both the Rust library ([`mq-bridge`](https://www.http-arena.com/#sort=rps:-1&q=rust)) and the Python binding ([`mq-bridge-py`](https://www.http-arena.com/#sort=rps:-1&q=python)) are entries on the third-party [http-arena.com](https://www.http-arena.com/) leaderboard, which compares HTTP frameworks by requests per second (live, so rankings shift over time). It measures mq-bridge's HTTP (and WebSocket) serving path, which is one endpoint among many, not broker or ETL throughput; those are covered under [Benchmarks](#benchmarks). See [the Python analysis notes](python/mq-bridge-py/README.md#analysis) for the local comparison harness.
@@ -199,7 +198,7 @@ To run the criterion benchmarks:
 ```sh
 cargo bench --features "full"
 ```
-Criterion numbers vary with the machine they run on; for comparable throughput figures use the integration performance test above, or see the [benchmark dashboard](https://marcomq.github.io/mq-bridge/dev/bench/).
+Criterion numbers vary with the machine they run on; for comparable throughput figures use the integration performance test above, or see the [ETL benchmarks](apps/mq-bridge-app/benches/etl/README.md).
 
 ## Contributing
 

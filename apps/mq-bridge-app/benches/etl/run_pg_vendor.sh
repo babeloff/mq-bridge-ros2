@@ -88,7 +88,7 @@ mqb_once() {
   rm -f "$OUT_MQB"
   "$BIN" copy \
     --from "${PG_URL}?table=bench&cursor_column=id&sslmode=disable" \
-    --to "file://${OUT_MQB}?format=csv" \
+    --to "file://${OUT_MQB}?format=csv&csv=%7B%22nested%22%3A%22json%22%7D" \
     --drain --batch-size "$BATCH" --concurrency "$CONC"
 }
 
@@ -183,15 +183,14 @@ lz4_rows() {
 # --- psql \copy: the same table, the same CSV ---------------------------------
 # The projection looks fussy, and each part of it is load-bearing for the parity
 # check. mq-bridge-app's CSV sink serializes each row from a JSON object, so it
-# emits columns in **alphabetical** order and renders booleans as `true`/`false`;
-# Postgres emits declared column order and `t`/`f`. So the columns are listed
-# alphabetically and `active` is cast to text, which makes the two outputs
+# emits columns in source order and renders booleans as `true`/`false`;
+# Postgres renders them as `t`/`f`. So `active` is cast to text, which makes the two outputs
 # byte-identical without changing the work either side does — only how the
 # baseline presents it. `ORDER BY id` gives both a deterministic row order
 # (mq-bridge-app reads via `cursor_column=id`), and HEADER matches its header line.
 psql_once() {
   rm -f "$OUT_PSQL"
-  psql_q -c "\\copy (SELECT active::text AS active, amount, attributes, country, created_at, first_name, id FROM bench ORDER BY id) TO '${OUT_PSQL}' WITH (FORMAT csv, HEADER true)"
+  psql_q -c "\\copy (SELECT id, first_name, country, amount, created_at, active::text AS active, attributes FROM bench ORDER BY id) TO '${OUT_PSQL}' WITH (FORMAT csv, HEADER true)"
 }
 
 # --- pg_dump: reference floor -------------------------------------------------

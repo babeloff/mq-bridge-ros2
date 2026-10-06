@@ -58,10 +58,12 @@ check_no_reconnect_churn() {
 rm -f "$SOCK_DIR"/*.sock
 RECV_PID="$(start_app "$RECV_CONFIG" "$RECV_LOG")"
 wait_health "$RECV_UI" "$RECV_LOG"
+# The receiver must be listening before the sender boots, or the sender's first
+# connect finds no socket and its start is rejected.
+start_consumer "$RECV_UI" ipc_recv
 SEND_PID="$(start_app "$SEND_CONFIG" "$SEND_LOG")"
 wait_health "$SEND_UI" "$SEND_LOG"
 
-start_consumer "$RECV_UI" ipc_recv
 start_consumer "$SEND_UI" ipc_send
 sleep 2   # let both routes reach steady state before sampling
 

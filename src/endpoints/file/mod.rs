@@ -89,12 +89,13 @@ fn csv_append_field(
         ));
     }
     buf.push(quote);
-    for &b in bytes {
-        if b == quote {
-            buf.push(quote);
-        }
-        buf.push(b);
+    let mut rest = bytes;
+    while let Some(at) = next_quote(quote, rest) {
+        buf.extend_from_slice(&rest[..=at]);
+        buf.push(quote);
+        rest = &rest[at + 1..];
     }
+    buf.extend_from_slice(rest);
     buf.push(quote);
     Ok(())
 }
@@ -306,6 +307,126 @@ fn invalid_data(message: String) -> serde_json::Error {
     ))
 }
 
+/// What [`csv_encode_ordered`] writes a row with.
+#[derive(Clone, Copy)]
+struct CsvRowShape<'a> {
+    cols: &'a [String],
+    delimiter: &'a [u8],
+    syntax: CsvSyntax,
+    flatten: bool,
+}
+
+/// Writes `payload` as a CSV row when its keys spell exactly the header's columns, in
+/// that order: the shape every row after the first usually has, read without building a
+/// key map. `false` means the row is not that shape or failed; `row_buf` is then garbage.
+fn csv_encode_ordered(payload: &[u8], shape: CsvRowShape, row_buf: &mut Vec<u8>) -> bool {
+    let mut next = 0;
+    !shape.cols.is_empty()
+        && csv_encode_ordered_object(payload, "", shape, &mut next, row_buf)
+        && next == shape.cols.len()
+}
+
+/// One object of [`csv_encode_ordered`]: `prefix` is the flattened path leading to it and
+/// `next` the column its next key has to name.
+fn csv_encode_ordered_object(
+    object: &[u8],
+    prefix: &str,
+    shape: CsvRowShape,
+    next: &mut usize,
+    row_buf: &mut Vec<u8>,
+) -> bool {
+    use serde::de::{DeserializeSeed, Deserializer, Error, MapAccess, Visitor};
+
+    enum KeyMatch {
+        Cell,
+        /// The key is the parent of the column; holds the length of the nested prefix.
+        Parent(usize),
+        Other,
+    }
+    struct Key<'a> {
+        col: Option<&'a str>,
+        prefix: &'a str,
+    }
+    impl<'de> DeserializeSeed<'de> for Key<'_> {
+        type Value = KeyMatch;
+        fn deserialize<D: Deserializer<'de>>(self, de: D) -> Result<KeyMatch, D::Error> {
+            de.deserialize_str(self)
+        }
+    }
+    impl Visitor<'_> for Key<'_> {
+        type Value = KeyMatch;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an object key")
+        }
+        fn visit_str<E>(self, key: &str) -> Result<KeyMatch, E> {
+            let rest = self.col.and_then(|col| col.strip_prefix(self.prefix));
+            Ok(match rest.and_then(|rest| rest.strip_prefix(key)) {
+                Some("") => KeyMatch::Cell,
+                Some(tail) if tail.starts_with('.') => {
+                    KeyMatch::Parent(self.prefix.len() + key.len() + 1)
+                }
+                _ => KeyMatch::Other,
+            })
+        }
+    }
+
+    struct Row<'a> {
+        prefix: &'a str,
+        shape: CsvRowShape<'a>,
+        next: &'a mut usize,
+        row_buf: &'a mut Vec<u8>,
+    }
+    impl<'de> Visitor<'de> for Row<'_> {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON object")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let Row {
+                prefix,
+                shape,
+                next,
+                row_buf,
+            } = self;
+            loop {
+                let col = shape.cols.get(*next).map(String::as_str);
+                let Some(found) = map.next_key_seed(Key { col, prefix })? else {
+                    return Ok(true);
+                };
+                let value: &serde_json::value::RawValue = map.next_value()?;
+                match (found, col) {
+                    (KeyMatch::Cell, _) => {
+                        if *next > 0 {
+                            row_buf.push(shape.syntax.separator);
+                        }
+                        csv_append_raw(row_buf, value, shape.delimiter, shape.syntax)
+                            .map_err(A::Error::custom)?;
+                        *next += 1;
+                    }
+                    (KeyMatch::Parent(len), Some(col))
+                        if shape.flatten && is_filled_object(value) =>
+                    {
+                        let nested = value.get().as_bytes();
+                        if !csv_encode_ordered_object(nested, &col[..len], shape, next, row_buf) {
+                            return Ok(false);
+                        }
+                    }
+                    _ => return Ok(false),
+                }
+            }
+        }
+    }
+
+    let mut de = serde_json::Deserializer::from_slice(object);
+    let row = Row {
+        prefix,
+        shape,
+        next,
+        row_buf,
+    };
+    matches!(de.deserialize_map(row), Ok(true)) && de.end().is_ok()
+}
+
 /// Encodes `msg`'s JSON-object payload as a CSV row into `row_buf` (cleared first),
 /// establishing the column order from its keys as written when `hdr` is still unset. Returns
 /// `true` when this call established the header, so the caller can emit the header
@@ -319,6 +440,20 @@ fn csv_encode_message(
     csv: &CsvDialect,
 ) -> Result<bool, serde_json::Error> {
     let syntax = csv.syntax();
+    if let Some(cols) = hdr.as_deref() {
+        row_buf.clear();
+        row_buf.reserve(msg.payload.len());
+        let shape = CsvRowShape {
+            cols,
+            delimiter,
+            syntax,
+            flatten: csv.flatten,
+        };
+        if csv_encode_ordered(&msg.payload, shape, row_buf) {
+            quote_blank_record(row_buf, cols.len(), syntax);
+            return Ok(false);
+        }
+    }
     // An object with no fields is rejected too: it carries no columns, so letting it
     // establish the header would fix an empty column set for the rest of the file.
     let Some(row) = CsvPayloadRow::parse(&msg.payload).filter(|row| row.len() > 0) else {
@@ -768,23 +903,38 @@ impl CsvQuoteState {
             self.started = true;
             bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes)
         };
-        for &b in bytes {
+        let separator = self.syntax.separator;
+        // Only quotes change the state, so jump from one to the next.
+        let mut i = 0;
+        while i < bytes.len() {
             if self.pending_quote {
                 self.pending_quote = false;
-                if b == quote {
+                if bytes[i] == quote {
+                    i += 1;
                     continue;
                 }
                 self.in_quotes = false;
             }
-            if self.in_quotes {
-                if b == quote {
-                    self.pending_quote = true;
+            let Some(offset) = next_quote(quote, &bytes[i..]) else {
+                if !self.in_quotes {
+                    self.field_is_empty = bytes[bytes.len() - 1] == separator;
                 }
-            } else if b == quote && self.field_is_empty {
-                self.in_quotes = true;
+                return;
+            };
+            let at = i + offset;
+            if self.in_quotes {
+                self.pending_quote = true;
             } else {
-                self.field_is_empty = b == self.syntax.separator;
+                if offset > 0 {
+                    self.field_is_empty = bytes[at - 1] == separator;
+                }
+                if self.field_is_empty {
+                    self.in_quotes = true;
+                } else {
+                    self.field_is_empty = quote == separator;
+                }
             }
+            i = at + 1;
         }
     }
 
@@ -792,6 +942,17 @@ impl CsvQuoteState {
     pub(crate) fn in_quotes(&self) -> bool {
         self.in_quotes && !self.pending_quote
     }
+}
+
+/// Offset of the next `quote`. Embedded JSON puts one every few bytes, where a short
+/// scalar probe beats a `memchr` call; long quote-free runs still get the fast search.
+#[inline]
+fn next_quote(quote: u8, bytes: &[u8]) -> Option<usize> {
+    const PROBE: usize = 16;
+    let (head, tail) = bytes.split_at(bytes.len().min(PROBE));
+    head.iter()
+        .position(|&b| b == quote)
+        .or_else(|| memchr::memchr(quote, tail).map(|at| at + PROBE))
 }
 
 /// Reads one *record*, which for CSV may span several delimiters. Every read loop and

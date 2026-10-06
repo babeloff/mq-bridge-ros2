@@ -24,6 +24,18 @@ Kafka outputs publish faster with their default settings.
 
 ### Changed
 
+- **CSV files read at their 0.4.15 speed again.** The quote scan that decides where a CSV
+  record ends had become about 15% slower in 0.4.16, when it learned to handle a record
+  read in pieces. It now jumps from quote to quote instead of visiting every byte, with the
+  same result. A 1,000,000-row CSV → JSONL copy on an Apple M1 takes 0.35 s, against 0.41 s
+  with 0.4.19.
+- **CSV files and objects are written faster.** A row whose keys follow the header's
+  columns, as every row after the first usually does, is written without building a key
+  map first, nested objects under `nested: flatten` included. A 1,000,000-row JSONL → CSV
+  copy on an Apple M1 takes 1.12 s instead of 1.45 s, and 0.96 s instead of 2.03 s when
+  each row flattens a nested object. The output is byte-identical.
+- **`mqb copy --drain` exits within 5 ms of the last row.** It noticed the end of a route by
+  polling every 50 ms, which added up to 50 ms to every copy, noticeable on short ones.
 - **Kafka publishing no longer waits 5 ms per batch.** A Kafka output awaits the delivery of
   every batch, and the producer's `linger.ms` of 5 held each batch back for that long before
   sending it. The default is now 1 ms, which still sends a batch as one request per partition.
