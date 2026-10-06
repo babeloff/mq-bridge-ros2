@@ -57,6 +57,23 @@ pub fn register_preset(name: &str) -> anyhow::Result<()> {
     crate::extensions::register_endpoint_factory(name, Arc::new(preset))
 }
 
+/// Registers a named endpoint of your own as a custom endpoint factory.
+///
+/// `schema` describes its fields; `resolve` takes the route name and the
+/// endpoint's config and returns the `http_bulk` configuration it stands for.
+pub fn register_preset_with(
+    name: &'static str,
+    schema: fn() -> Value,
+    resolve: fn(&str, &Value) -> anyhow::Result<Value>,
+) -> anyhow::Result<()> {
+    let preset = Preset {
+        name,
+        schema,
+        resolve,
+    };
+    crate::extensions::register_endpoint_factory(name, Arc::new(preset))
+}
+
 /// The `http_bulk` configuration a named endpoint stands for.
 #[cfg(test)]
 pub(super) fn resolve(name: &str, config: &Value) -> anyhow::Result<HttpBulkConfig> {
@@ -108,7 +125,7 @@ impl CustomEndpointFactory for Preset {
 }
 
 /// `name://host` is plain HTTP, `name+https://` and `names://` are HTTPS; `http(s)://` passes.
-fn base_url(name: &str, url: &str) -> anyhow::Result<String> {
+pub fn base_url(name: &str, url: &str) -> anyhow::Result<String> {
     let url = url.trim_end_matches('/');
     let rest = url.strip_prefix(name).unwrap_or(url);
     let rest = rest.strip_prefix('+').unwrap_or(rest);
@@ -121,7 +138,7 @@ fn base_url(name: &str, url: &str) -> anyhow::Result<String> {
 }
 
 /// A collection or index name as one path segment.
-fn segment<'a>(field: &str, name: &'a str) -> anyhow::Result<&'a str> {
+pub fn segment<'a>(field: &str, name: &'a str) -> anyhow::Result<&'a str> {
     let reserved = ['/', '?', '#', '&', '%', '{', '}', ' '];
     if name.is_empty() || name == "." || name == ".." || name.contains(reserved) {
         bail!("'{field}' must be one name without '/', '?', '#', '&', '%', braces or spaces, got '{name}'");
@@ -167,7 +184,8 @@ fn common_properties(example: &str) -> serde_json::Map<String, Value> {
     }
 }
 
-fn schema(title: &str, example: &str, own: Value, required: &[&str]) -> Value {
+/// A preset's schema: the shared fields plus `own`; `example` is the URI shown for `url`.
+pub fn schema(title: &str, example: &str, own: Value, required: &[&str]) -> Value {
     let mut properties = common_properties(example);
     if let Value::Object(own) = own {
         properties.extend(own);
@@ -689,6 +707,38 @@ mod tests {
             let error = preset(name).config("route", &bad).expect_err("refused");
             assert!(error.is::<InvalidConfig>(), "{name}: {error:#}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_preset_of_your_own_registers_as_a_custom_endpoint() {
+        fn acme_schema() -> Value {
+            let own = json!({"table": {"type": "string", "x-mqb-uri": "path"}});
+            schema("Acme", "acme://localhost:1", own, &["url", "table"])
+        }
+        fn acme(_route: &str, value: &Value) -> anyhow::Result<Value> {
+            let url = value["url"].as_str().context("'url' is required")?;
+            let table = segment("table", value["table"].as_str().unwrap_or_default())?;
+            Ok(json!({
+                "url": base_url("acme", url)?,
+                "upsert": {"path": format!("/{table}/_bulk")}
+            }))
+        }
+        register_preset_with("acme", acme_schema, acme).expect("registered");
+        let factory = crate::extensions::get_endpoint_factory("acme").expect("factory");
+        assert_eq!(factory.config_schema().unwrap()["title"], "Acme");
+        let good = json!({"url": "acme://localhost:1", "table": "a"});
+        factory
+            .create_publisher("route", &good)
+            .await
+            .expect("publisher");
+        let bad = json!({"url": "acme://localhost:1", "table": "a/b"});
+        let error = factory
+            .create_publisher("route", &bad)
+            .await
+            .err()
+            .expect("refused");
+        assert!(error.is::<InvalidConfig>(), "{error:#}");
+        crate::extensions::unregister_endpoint_factory("acme");
     }
 
     #[tokio::test]

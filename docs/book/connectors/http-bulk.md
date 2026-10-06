@@ -10,7 +10,9 @@ you describe three things, and a new target is a few lines of configuration:
 - **result**: how the target reports what happened.
 
 As an input you describe one: **read**, the request that lists a page of
-documents and where the next page starts. See [Reading](#reading).
+documents and where the next page starts. See [Reading](#reading). With
+`read.stream` it reads one response that stays open instead: server-sent events
+or NDJSON lines. See [An open stream](#an-open-stream-sse-and-ndjson).
 
 For a [`lookup`](../cookbook/lookup.md) you describe **query**: the request that
 answers a whole batch of lookups at once. See [Lookups](#lookups).
@@ -221,6 +223,70 @@ input:
 With direct access to the database, the [Postgres connector](./postgres.md) is
 the better source: its change stream sees updates and deletes.
 
+### An open stream: SSE and NDJSON
+
+With `read.stream` the endpoint sends one request and reads the response while
+it arrives, instead of asking for pages. Every event or line is one message, and
+a batch is whatever has arrived, up to the route's `batch_size`.
+
+| `stream` | A message is | Read position |
+| --- | --- | --- |
+| `sse` | the `data` of one server-sent event | the event's `id`, sent back as `Last-Event-ID` |
+| `ndjson` | one line | `cursor.item`, a field of the line, put where `{cursor}` stands; none without it |
+
+```yaml
+input:
+  http_bulk:
+    url: https://stream.wikimedia.org
+    headers:
+      User-Agent: my-bridge/1.0 (ops@example.com)
+    read:
+      path: /v2/stream/recentchange
+      stream: sse
+      cursor_id: recentchange
+      checkpoint_store: file:///var/lib/mqb/cursors.json
+```
+
+An event's `id` and `event` fields are the `sse_id` and `sse_event` metadata of
+its message. The payload is the `data` as sent; it need not be JSON. For `sse`,
+`cursor.item` takes the position from a field of the data instead of the id.
+
+An export that is one response is read once by a draining route (`--drain` on
+the `mqb` command line):
+
+```yaml
+input:
+  http_bulk:
+    url: http://localhost:8108
+    headers:
+      X-TYPESENSE-API-KEY: ${TYPESENSE_API_KEY}
+    read:
+      path: /collections/books/documents/export
+      stream: ndjson
+```
+
+What differs from reading pages:
+
+- **The connection is opened again.** When the response ends or is cut, the
+  input waits `polling_interval_ms` and connects from the read position. Without
+  a position that reads the same response again, so read a finite export with
+  `--drain`, or give it `cursor.item` and `{cursor}`.
+- **A draining route ends with the response**, or when nothing arrives for
+  `polling_interval_ms`. A response that is cut fails the route instead of
+  passing for a complete one.
+- **A failed message is asked for again** by connecting from the last
+  acknowledged position. An `ndjson` line without `cursor.item` has no position
+  and is not read again.
+- **`request_timeout_ms` is the longest silence**, not the length of the
+  response. A server that sends keep-alive comments stays connected.
+- **`{limit}`, `items` and `cursor.response` are refused**: the server decides
+  what it sends, and there is no response around the documents.
+- **An event or line is held in memory until it is complete.** One above 64 MiB
+  stops the route.
+
+The Wikimedia stream above was read with this configuration, restart included.
+The export was run against a stub server, not against Typesense.
+
 ## Lookups
 
 With `query` the endpoint writes nothing: it answers the
@@ -276,13 +342,13 @@ Elasticsearch or Qdrant.
 | `auth` | none | `oauth2` or `aws_sigv4` credentials for every request; see below |
 | `upsert` | an output needs it or `query` | The request that writes documents |
 | `query` | none | The request that answers lookups; excludes `upsert`, `delete` and `operation` |
-| `read` | required for an input | The request that reads a page of documents |
+| `read` | required for an input | The request that reads a page of documents, or opens a stream |
 | `delete` | none | The request that removes documents |
 | `operation` | none | Template for a message's operation; without it every message is an upsert |
 | `delete_values` | `delete`, `d` | Operation values that mean delete, ignoring case |
 | `max_request_bytes` | 10 MiB | A larger batch is split into several requests |
 | `compression` | `none` | `gzip`, `zstd` or `lz4` for request bodies, named in `Content-Encoding` |
-| `request_timeout_ms` | none | Timeout of one request |
+| `request_timeout_ms` | none | Timeout of one request; with `read.stream`, the longest silence on the open response |
 | `connect_timeout_ms` | 10000 | Connection timeout |
 | `tls` | none | `ca_file` and `accept_invalid_certs` for `https://`; `required: true` refuses a `url` or OAuth2 `token_url` that is not `https://` |
 
@@ -336,8 +402,9 @@ Elasticsearch or Qdrant.
 | `checkpoint_store` | none | Where the position is saved: `file://`, `postgres://`, `mongodb://` or `s3://` |
 | `polling_interval_ms` | 1000 | Wait after an empty page |
 | `max_polling_interval_ms` | none | The wait doubles up to this while pages stay empty |
+| `stream` | none | `sse` or `ndjson`: read one open response instead of pages; see [An open stream](#an-open-stream-sse-and-ndjson) |
 
-`{cursor}` must occur in the path or the body.
+`{cursor}` must occur in the path or the body, except with `stream`.
 
 `delete`:
 
@@ -435,4 +502,47 @@ what the bulk write request looks like, how documents are removed by id, and
 whether the response says anything per document. To read from it, it needs one
 more: how a request names the page after the last one. If no combination of the
 fields above fits, the endpoint cannot be used with it. An export that streams
-everything in one response (Typesense) is not a paged listing and cannot be read.
+everything in one response (Typesense) is not a paged listing; read it with
+[`stream: ndjson`](#an-open-stream-sse-and-ndjson).
+
+## A named endpoint of your own
+
+`typesense` and `elasticsearch` are this endpoint with the requests filled in. A
+Rust crate can add one the same way: a function that turns a few fields into an
+`http_bulk` configuration, registered under a name.
+
+```rust
+use mq_bridge::endpoints::http_bulk::{
+    preset_base_url, preset_schema, preset_segment, register_preset_with,
+};
+use serde_json::{json, Value};
+
+fn acme_schema() -> Value {
+    let own = json!({
+        "table": {"type": "string", "description": "Table written to.", "x-mqb-uri": "path"}
+    });
+    preset_schema("Acme", "acme://localhost:9000", own, &["url", "table"])
+}
+
+fn acme(_route: &str, config: &Value) -> anyhow::Result<Value> {
+    let url = config["url"].as_str().unwrap_or_default();
+    let table = preset_segment("table", config["table"].as_str().unwrap_or_default())?;
+    Ok(json!({
+        "url": preset_base_url("acme", url)?,
+        "upsert": {"path": format!("/{table}/_bulk")}
+    }))
+}
+
+register_preset_with("acme", acme_schema, acme)?;
+```
+
+Call it before any route starts and address the endpoint as
+`custom: { name: acme, config: { url: ..., table: ... } }`. The value `acme`
+returns is checked as an `http_bulk` configuration, so every field under
+[Fields](#fields) is available. `preset_schema` adds `url`, `api_key`,
+`operation`, `compression` and `request_timeout_ms` to the fields you list;
+`acme` decides what to do with them. A unit test registers the same endpoint;
+it was not run against a server.
+
+This registers the endpoint in your own program. `mqb` only knows the endpoints
+compiled into it or installed as plugins.

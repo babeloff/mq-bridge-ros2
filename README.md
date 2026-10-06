@@ -20,9 +20,8 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
 <p align="center">
-📖 <a href="https://marcomq.github.io/mq-bridge/">Book</a> ·
 🖥️ <a href="apps/mq-bridge-app">mq-bridge-app</a> ·
-📊 <a href="https://marcomq.github.io/mq-bridge/dev/bench/">Benchmarks</a> ·
+📊 <a href="apps/mq-bridge-app/benches/etl/README.md">ETL benchmarks</a> ·
 🏗️ <a href="docs/ARCHITECTURE.md">Architecture</a> ·
 ⚙️ <a href="docs/CONFIGURATION.md">Config</a> ·
 📚 <a href="docs/REFERENCE.md">Middleware &amp; endpoint reference</a>
@@ -35,6 +34,14 @@
 A **route** connects one input to one output. In between, it can transform, filter, fan out, retry, rate-limit, deduplicate, or answer a request, all by configuration. Where configuration isn't enough, you add a handler in Rust, Python or Node.js. Batching, ack/nack, commit ordering and broker I/O stay in the Tokio-based core, so your code works with plain `CanonicalMessage`s and doesn't handle Kafka offsets or AMQP nacks.
 
 It is a **library you embed in your own service**, not a daemon or platform you operate. If you'd rather not write code, [`mq-bridge-app`](apps/mq-bridge-app) runs the same engine and config as a CLI, server, desktop app, and MCP server.
+
+## Use cases
+
+| Problem | Guide with a runnable example |
+| :--- | :--- |
+| A RAG or semantic-search index drifts from its Postgres source | [Keep a vector index in sync with Postgres: CDC → embeddings → Qdrant](https://marcomq.github.io/mq-bridge/use-cases/sync-postgres-to-qdrant.html) |
+| A service must update its database and publish an event atomically | [Transactional outbox with Postgres and Kafka](https://marcomq.github.io/mq-bridge/use-cases/transactional-outbox-postgres-kafka.html) |
+| Tests for Kafka, NATS or RabbitMQ consumers need a running broker | [Test message handlers without a broker](https://marcomq.github.io/mq-bridge/use-cases/test-without-a-broker.html) |
 
 ## Quick Start
 
@@ -109,16 +116,16 @@ For AI agents: [`llms.txt`](llms.txt) is a curated index of the documentation.
 
 ## Benchmarks
 
-Throughput is tracked continuously on the public [benchmark dashboard](https://marcomq.github.io/mq-bridge/dev/bench/). Like-for-like ETL comparisons, measured through the zero-code [`mq-bridge-app`](apps/mq-bridge-app):
+Like-for-like ETL comparisons, measured through the zero-code [`mq-bridge-app`](apps/mq-bridge-app); every number, baseline and command is in the [ETL benchmark harness](apps/mq-bridge-app/benches/etl/README.md):
 
 | Scenario | mq-bridge | Compared with |
 | :--- | :--- | :--- |
-| CSV → JSONL, 1M mixed-type rows (~116 MiB) | **2,824,858 rows/s**, ~28 MiB RAM | Meltano (`tap-csv` → `target-jsonl`): ~19,500 rows/s, ~444 MiB RAM — **~145x slower**<br>DuckDB, all cores: 2,036,659 rows/s — mq-bridge **~1.4x faster**, ~17x less memory |
-| Kafka → file, 1M rows, no transform | **~65% faster** than Sea Streamer | Sea Streamer, both on mimalloc (~80% faster vs. its default-allocator build) |
+| CSV → JSONL, 1M mixed-type rows (~116 MiB) | **3,134,796 rows/s**, ~29 MiB RAM | Meltano (`tap-csv` → `target-jsonl`): 9,771 rows/s, ~444 MiB RAM — mq-bridge **~321x faster**<br>DuckDB, all cores: 2,109,704 rows/s — mq-bridge **~1.5x faster**, ~18x less memory |
+| Kafka → file, 1M rows, no transform | **878,105 rows/s**, ~160 MiB RAM | Sea Streamer, mimalloc build: 492,465 rows/s, ~894 MiB RAM — mq-bridge **~1.8x faster** (also ~1.8x vs. its default-allocator build) |
 
-The CSV row reuses an existing, independently published 1M-row CSV → JSONL workload, on a byte-identical fixture: 7 mixed-type columns, seed 42, 121,981,421 bytes, SHA-256 `a84894e0…0c45b221` ([full definition](apps/mq-bridge-app/benches/etl/README.md#6--csv--jsonl-vs-meltano)). Whole-process wall-clock, no transformation, Meltano run on the same machine and file.
+The CSV row reuses an existing, independently published 1M-row CSV → JSONL workload, on a byte-identical fixture: 7 mixed-type columns, seed 42, 121,981,421 bytes, SHA-256 `a84894e0…0c45b221` ([full definition](apps/mq-bridge-app/benches/etl/README.md#workload-definition)). Whole-process wall-clock, no transformation, Meltano run on the same machine and file.
 
-CSV figures: mq-bridge 0.4.12. DuckDB is a throughput ceiling for the conversion itself, not an ETL tool. Methodology and reporting rules are in [`benches/ETL_BENCHMARKS.md`](benches/ETL_BENCHMARKS.md); the raw numbers, baselines and reproducible helpers are in the [ETL benchmark harness](apps/mq-bridge-app/benches/etl/README.md).
+All figures: mq-bridge 0.4.20. DuckDB is a throughput ceiling for the conversion itself, not an ETL tool.
 
 
 **External benchmark:** both the Rust library ([`mq-bridge`](https://www.http-arena.com/#sort=rps:-1&q=rust)) and the Python binding ([`mq-bridge-py`](https://www.http-arena.com/#sort=rps:-1&q=python)) are entries on the third-party [http-arena.com](https://www.http-arena.com/) leaderboard, which compares HTTP frameworks by requests per second (live, so rankings shift over time). It measures mq-bridge's HTTP (and WebSocket) serving path, which is one endpoint among many, not broker or ETL throughput; those are covered under [Benchmarks](#benchmarks). See [the Python analysis notes](python/mq-bridge-py/README.md#analysis) for the local comparison harness.
@@ -129,7 +136,7 @@ CSV figures: mq-bridge 0.4.12. DuckDB is a throughput ceiling for the conversion
 What you get from one engine, whichever language you call it from:
 
 *   **16+ native transports, 100+ more via plugin, one API**: every connector listed above, plus `dir_spool` (a crash-safe directory FIFO queue), behind the same `receive_batch` / `send_batch` shape.
-*   **Redpanda Connect reach**: the [Connect plugin](https://github.com/marcomq/mq-bridge-connect) adds Redpanda Connect's production-proven components — **51 inputs and 63 outputs as endpoints, plus 68 processors**, most of which also run as middleware on any endpoint — while mq-bridge keeps routing, batching, retries, DLQ and deduplication.
+*   **Redpanda Connect reach**: the [Connect plugin](https://github.com/marcomq/mq-bridge-connect) adds Redpanda Connect's production-proven components — **56 inputs and 68 outputs as endpoints, plus 86 processors**, most of which also run as middleware on any endpoint — while mq-bridge keeps routing, batching, retries, DLQ and deduplication.
 *   **Change Data Capture**: stream row-level changes from **Postgres** (logical replication / `pgoutput`) and **MongoDB** (change streams) as flat rows with an operation marker.
 *   **Restart-safe delivery**: batch-aware ack/nack with commit sequencing for cumulative-ack brokers; the integration suite shows **no data loss during in-flight broker restarts**, including a Postgres CDC restart-safety test.
 *   **Reliability middleware, not a framework**: retries, dead-letter queues, deduplication, rate limiting, and cookie/session persistence wrap any endpoint.
@@ -191,7 +198,7 @@ To run the criterion benchmarks:
 ```sh
 cargo bench --features "full"
 ```
-Criterion numbers vary with the machine they run on; for comparable throughput figures use the integration performance test above, or see the [benchmark dashboard](https://marcomq.github.io/mq-bridge/dev/bench/).
+Criterion numbers vary with the machine they run on; for comparable throughput figures use the integration performance test above, or see the [ETL benchmarks](apps/mq-bridge-app/benches/etl/README.md).
 
 ## Contributing
 

@@ -2,6 +2,56 @@
 
 All notable changes to `mq-bridge`. Newest first.
 
+## 0.4.20
+
+Kafka outputs publish faster with their default settings.
+
+### Added
+
+- **Live status in the CLI, the UI and MCP.** `mqb status` lists every route and consumer that
+  any `mqb` process of your user is running on the machine, with state, current and average
+  rate, total, pending and uptime. On a terminal it redraws every second; `--no-watch` prints
+  once and `--json` prints the records. The
+  UI has a **Status** tab with the same rows and the last 60 seconds of each rate, and the MCP
+  server has a read-only `bridge_status` tool. `mqb copy` and headless config runs now report
+  rates and totals too. Error text stays out of these records unless
+  `MQB_STATUS_SHOW_ERRORS=1` is set for both the reporting and the reading process.
+- **`http_bulk` reads an open stream.** `read.stream: sse` or `ndjson` sends one request and
+  turns every server-sent event or line of the response into a message, instead of asking
+  for pages. An SSE source resumes with `Last-Event-ID` from the last acknowledged event, an
+  NDJSON source from a field named by `cursor.item`; both save the position in
+  `checkpoint_store` and connect again when the response ends. With a stream,
+  `request_timeout_ms` is the longest silence, not the length of the response. This is the
+  way to consume a remote SSE feed or a one-response export; the `http` endpoint's
+  `receive_streamable` and `stream_response_to` are unchanged.
+- **Named `http_bulk` endpoints from your own crate.** `typesense` and `elasticsearch` are
+  `http_bulk` configurations behind a name, and that table was closed.
+  `endpoints::http_bulk::register_preset_with(name, schema, resolve)` registers one of your
+  own as a `custom` endpoint; `preset_schema`, `preset_base_url` and `preset_segment` are the
+  helpers the built-in ones use.
+
+### Changed
+
+- **CSV files read at their 0.4.15 speed again.** The quote scan that decides where a CSV
+  record ends had become about 15% slower in 0.4.16, when it learned to handle a record
+  read in pieces. It now jumps from quote to quote instead of visiting every byte, with the
+  same result. A 1,000,000-row CSV → JSONL copy on an Apple M1 takes 0.35 s, against 0.41 s
+  with 0.4.19.
+- **CSV files and objects are written faster.** A row whose keys follow the header's
+  columns, as every row after the first usually does, is written without building a key
+  map first, nested objects under `nested: flatten` included. A 1,000,000-row JSONL → CSV
+  copy on an Apple M1 takes 1.12 s instead of 1.45 s, and 0.96 s instead of 2.03 s when
+  each row flattens a nested object. The output is byte-identical.
+- **`mqb copy --drain` exits within 5 ms of the last row.** It noticed the end of a route by
+  polling every 50 ms, which added up to 50 ms to every copy, noticeable on short ones.
+- **Kafka publishing no longer waits 5 ms per batch.** A Kafka output awaits the delivery of
+  every batch, and the producer's `linger.ms` of 5 held each batch back for that long before
+  sending it. The default is now 1 ms, which still sends a batch as one request per partition.
+  With the defaults (`batch_size: 512`, `concurrency: 1`) a local broker took about 71,000
+  messages per second instead of 29,000. `delayed_ack: true`, which awaits nothing, keeps
+  5 ms; the producer a Kafka input uses for replies also moves to 1 ms. A
+  `linger.ms` in `producer_options` overrides the default as before.
+
 ## 0.4.19
 
 CSV in more shapes: the reader takes other separators and quoting, and a CSV sink no longer

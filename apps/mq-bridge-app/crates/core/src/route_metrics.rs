@@ -163,6 +163,15 @@ impl RouteMetrics {
         counter
     }
 
+    /// Replaces `key`'s metrics with those of a new run that began at `started_at`.
+    pub async fn replace(&self, key: &str, counter: Arc<AtomicU64>, started_at: Instant) {
+        // Same lock order as `forget`, so the sampler cannot keep the old sample.
+        let mut counters = self.counters.write().await;
+        counters.insert(key.to_string(), counter);
+        self.samples.write().await.remove(key);
+        self.starts.write().await.insert(key.to_string(), started_at);
+    }
+
     /// Total messages counted for `key` since its counter was created.
     pub async fn sequence(&self, key: &str) -> u64 {
         self.counters
@@ -207,6 +216,12 @@ impl RouteMetrics {
                 0.0
             },
         })
+    }
+
+    /// Wall-clock start of `key`'s route in epoch milliseconds.
+    pub async fn started_at_ms(&self, key: &str) -> Option<u64> {
+        let started_at = *self.starts.read().await.get(key)?;
+        Some(crate::status_registry::now_ms().saturating_sub(started_at.elapsed().as_millis() as u64))
     }
 
     /// Smoothed messages per second for every sampled key.
@@ -447,6 +462,31 @@ mod tests {
             metrics.throughput("route-a").await < idle.average_throughput,
             "the instantaneous rate should have decayed below the achieved average"
         );
+    }
+
+    #[tokio::test]
+    async fn replace_starts_a_new_run_from_zero() {
+        let metrics = RouteMetrics::new();
+        metrics.ensure_updater();
+        metrics
+            .counter_for("route-a")
+            .await
+            .fetch_add(5, Ordering::Relaxed);
+        tokio::time::sleep(THROUGHPUT_UPDATE_INTERVAL * 2).await;
+        let first_start = metrics.started_at_ms("route-a").await.expect("started");
+
+        let restarted_at = Instant::now();
+        metrics
+            .replace("route-a", Arc::new(AtomicU64::new(0)), restarted_at)
+            .await;
+
+        assert_eq!(metrics.sequence("route-a").await, 0);
+        assert!(metrics.started_at_ms("route-a").await.expect("started") >= first_start);
+        assert_eq!(*metrics.starts.read().await.get("route-a").unwrap(), restarted_at);
+        tokio::time::sleep(THROUGHPUT_UPDATE_INTERVAL * 2).await;
+        let timing = metrics.timing("route-a").await.expect("sampled");
+        assert_eq!(timing.messages, 0);
+        assert_eq!(timing.average_throughput, 0.0);
     }
 
     #[tokio::test]

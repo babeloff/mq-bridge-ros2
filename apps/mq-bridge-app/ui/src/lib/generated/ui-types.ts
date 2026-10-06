@@ -809,6 +809,7 @@ export interface HttpBulkRead {
   checkpoint_store?: string | null;
   polling_interval_ms?: number | null;
   max_polling_interval_ms?: number | null;
+  stream?: HttpBulkStream | null;
 }
 
 export interface HttpBulkCursor {
@@ -816,6 +817,8 @@ export interface HttpBulkCursor {
   item?: string | null;
   start?: unknown;
 }
+
+export type HttpBulkStream = "sse" | "ndjson";
 
 export interface HttpBulkDelete {
   path: string;
@@ -965,6 +968,9 @@ export interface StatusSummary {
   error?: string | null;
   throughput: number;
   message_sequence: number;
+  started_at_ms?: number | null;
+  outcome?: RouteOutcomeSnapshot | null;
+  average_throughput?: number;
 }
 
 export interface StatusRoute {

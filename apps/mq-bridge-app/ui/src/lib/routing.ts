@@ -5,14 +5,15 @@ export function resolveTabFromHash(hash: string): MainTab | null {
   if (hash === "#publishers" || hash.startsWith("#publishers:")) return "publishers";
   if (hash === "#consumers" || hash.startsWith("#consumers:")) return "consumers";
   if (hash === "#config") return "config";
+  if (hash === "#status") return "status";
   return null;
 }
 
 export function nextHashForTab(currentHash: string, tab: MainTab, rememberedIndex?: number): string {
   return currentHash === `#${tab}` || currentHash.startsWith(`#${tab}:`)
     ? currentHash
-    : tab === "config"
-      ? "#config"
+    : tab === "config" || tab === "status"
+      ? `#${tab}`
       : typeof rememberedIndex === "number" && Number.isInteger(rememberedIndex) && rememberedIndex >= 0
         ? `#${tab}:${rememberedIndex}`
         : `#${tab}`;

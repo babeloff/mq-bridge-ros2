@@ -18,7 +18,10 @@ mod publisher;
 mod query;
 pub(crate) use consumer::cursor_checkpoint;
 pub use consumer::HttpBulkConsumer;
-pub use presets::{preset_names, register_preset};
+pub use presets::{
+    base_url as preset_base_url, preset_names, register_preset, register_preset_with,
+    schema as preset_schema, segment as preset_segment,
+};
 pub use publisher::HttpBulkPublisher;
 
 use crate::models::HttpBulkConfig;
@@ -67,7 +70,12 @@ impl Connection {
                 config.connect_timeout_ms.unwrap_or(10_000),
             ));
         if let Some(ms) = config.request_timeout_ms {
-            builder = builder.timeout(Duration::from_millis(ms));
+            let timeout = Duration::from_millis(ms);
+            // An open stream has no total duration: the timeout bounds each silence.
+            builder = match config.read.as_ref().and_then(|read| read.stream) {
+                Some(_) => builder.read_timeout(timeout),
+                None => builder.timeout(timeout),
+            };
         }
         if config.tls.accept_invalid_certs {
             builder = builder.danger_accept_invalid_certs(true);
@@ -184,12 +192,9 @@ mod tests {
 
     #[test]
     fn the_recipes_in_the_book_are_valid_configurations() {
-        let book = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/docs/book/connectors/"
-        );
+        let book = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/book/connectors/");
         for (name, recipes) in [
-            ("http-bulk.md", 8),
+            ("http-bulk.md", 10),
             ("typesense.md", 2),
             ("elasticsearch.md", 2),
             ("postgrest.md", 2),

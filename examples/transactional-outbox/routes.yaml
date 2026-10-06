@@ -1,0 +1,17 @@
+outbox_to_kafka:
+  input:
+    postgres_cdc:
+      # Local demo credentials. In a deployment, take the URL from a secret.
+      url: "postgres://app:app@postgres:5432/app"
+      publication: "outbox_pub"   # publishes inserts on the outbox table only
+      slot_name: "outbox_relay"
+    middlewares:
+      # Copies the aggregate id into the `mqb.id` metadata key ...
+      - id: "${payload:aggregate_id}"
+  output:
+    middlewares:
+      - retry: { max_attempts: 10 }
+    kafka:
+      url: "kafka:9092"
+      topic: "order-events"
+      partition_key: "mqb.id"     # ... so events of one aggregate share a partition, in order

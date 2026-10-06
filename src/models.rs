@@ -3170,6 +3170,20 @@ pub struct HttpBulkRead {
     /// If set, the wait doubles after each empty page up to this value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_polling_interval_ms: Option<u64>,
+    /// Read one open response as `sse` events or `ndjson` lines instead of pages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<HttpBulkStream>,
+}
+
+/// How an `http_bulk` input that reads one open response is cut into messages.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum HttpBulkStream {
+    /// Server-sent events; the event id is the read position.
+    Sse,
+    /// One JSON document per line.
+    Ndjson,
 }
 
 /// Where an `http_bulk` input takes its next read position from. Set at most one of

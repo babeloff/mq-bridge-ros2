@@ -68,6 +68,14 @@ PAGES = {
     "processors": ("connect-processors.md", "Connect plugin: processors", "", ""),
 }
 
+# Upstream texts copied from a sibling component, keyed by (kind, component, field);
+# a `None` field replaces the component summary.
+CORRECTIONS = {
+    ("processors", "aws_bedrock_embeddings", "text"): "The text you want to compute vector embeddings for.",
+    ("processors", "cohere_rerank", None): "Ranks a list of documents by their relevance to a query, using the Cohere API.",
+    ("processors", "ollama_moderation", None): "Classifies an LLM response as safe or unsafe, using the Ollama API.",
+}
+
 
 def dump_specs(repo):
     bridge = os.path.join(repo, "go-bridge")
@@ -146,7 +154,11 @@ def field_default(field):
 def render_component(kind, spec, middlewares):
     name = spec["name"]
     lines = [f"## `{name}`", ""]
-    summary = clean_summary(spec.get("summary")) or first_sentence(spec.get("description"))
+    summary = (
+        CORRECTIONS.get((kind, name, None))
+        or clean_summary(spec.get("summary"))
+        or first_sentence(spec.get("description"))
+    )
     status = spec.get("status", "stable")
     if status != "stable":
         summary = f"**{status.capitalize()}.** {summary}"
@@ -166,9 +178,9 @@ def render_component(kind, spec, middlewares):
     if common:
         lines += ["| Field | Type | Default | Description |", "|---|---|---|---|"]
         for f in common:
+            description = CORRECTIONS.get((kind, name, f["name"])) or first_sentence(f.get("description"))
             lines.append(
-                f"| `{f['name']}` | {field_type(f)} | {field_default(f)} "
-                f"| {first_sentence(f.get('description'))} |"
+                f"| `{f['name']}` | {field_type(f)} | {field_default(f)} | {description} |"
             )
         lines.append("")
     elif not fields:

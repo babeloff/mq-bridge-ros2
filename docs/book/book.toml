@@ -11,6 +11,7 @@ site-url           = "/mq-bridge/"
 git-repository-url = "https://github.com/marcomq/mq-bridge"
 edit-url-template  = "https://github.com/marcomq/mq-bridge/edit/main/docs/book/{path}"
 additional-css     = ["theme/custom.css"]
+additional-js      = ["theme/mermaid-init.js"]
 
 [output.html.fold]
 enable = true

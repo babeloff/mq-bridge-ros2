@@ -7,6 +7,7 @@ describe("routing", () => {
     expect(resolveTabFromHash("#publishers:2")).toBe("publishers");
     expect(resolveTabFromHash("#consumers:1")).toBe("consumers");
     expect(resolveTabFromHash("#config")).toBe("config");
+    expect(resolveTabFromHash("#status")).toBe("status");
     expect(resolveTabFromHash("#else")).toBeNull();
   });
 
@@ -14,6 +15,7 @@ describe("routing", () => {
     expect(nextHashForTab("#publishers:5", "publishers")).toBe("#publishers:5");
     expect(nextHashForTab("#publishers:1", "consumers", 3)).toBe("#consumers:3");
     expect(nextHashForTab("#publishers:1", "consumers")).toBe("#consumers");
+    expect(nextHashForTab("#publishers:1", "status", 2)).toBe("#status");
   });
 
   test("picks default tab in priority order", () => {

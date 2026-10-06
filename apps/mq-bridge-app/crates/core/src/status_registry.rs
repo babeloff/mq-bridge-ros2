@@ -4,6 +4,7 @@
 //! atomically and are ignored after a short TTL, so a crashed process cannot
 //! leave a permanent peer row behind.
 
+use crate::ui_app::RouteOutcomeSnapshot;
 use anyhow::{Result, anyhow};
 use mq_bridge::models::EndpointType;
 use schemars::JsonSchema;
@@ -43,6 +44,15 @@ pub struct StatusSummary {
     pub error: Option<String>,
     pub throughput: f64,
     pub message_sequence: u64,
+    /// When the route started, if the publishing process tracks it.
+    #[serde(default)]
+    pub started_at_ms: Option<u64>,
+    /// How the route ended, or `None` while it is still running.
+    #[serde(default)]
+    pub outcome: Option<RouteOutcomeSnapshot>,
+    /// Rate achieved over the whole run; stays put once the route goes idle.
+    #[serde(default)]
+    pub average_throughput: f64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -156,13 +166,32 @@ fn sanitize_entity(entity: &mut StatusEntity) {
     sanitize_summary(&mut entity.summary);
 }
 
+/// Opt-in: keep error text in leases. Publisher and reader must both set it.
+pub const SHOW_ERRORS_ENV: &str = "MQB_STATUS_SHOW_ERRORS";
+
+fn show_errors() -> bool {
+    std::env::var_os(SHOW_ERRORS_ENV).is_some_and(|value| value == "1")
+}
+
 fn sanitize_summary(summary: &mut StatusSummary) {
+    sanitize_summary_with(summary, show_errors());
+}
+
+fn sanitize_summary_with(summary: &mut StatusSummary, show_errors: bool) {
     // Endpoint and route errors are free-form and may contain payloads,
     // headers, URLs, or credentials. Presence is useful for a status dot, but
-    // the diagnostic text is never safe to advertise across processes.
-    summary.error = summary.error.as_ref().map(|_| "error".to_string());
-    if !summary.throughput.is_finite() || summary.throughput < 0.0 {
-        summary.throughput = 0.0;
+    // the diagnostic text only crosses processes when the user opts in.
+    summary.error = summary.error.as_ref().map(|error| {
+        if show_errors {
+            sanitize_text(error)
+        } else {
+            "error".to_string()
+        }
+    });
+    for rate in [&mut summary.throughput, &mut summary.average_throughput] {
+        if !rate.is_finite() || *rate < 0.0 {
+            *rate = 0.0;
+        }
     }
 }
 
@@ -630,6 +659,36 @@ mod tests {
         assert!(!raw.contains("payload body"));
         assert!(raw.contains("\"error\":\"error\""));
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn error_text_survives_only_when_opted_in() {
+        let summary = || StatusSummary {
+            error: Some("connect to kafka://user:pw@host failed\n".to_string()),
+            ..Default::default()
+        };
+        let mut redacted = summary();
+        sanitize_summary_with(&mut redacted, false);
+        assert_eq!(redacted.error.as_deref(), Some("error"));
+
+        let mut shown = summary();
+        sanitize_summary_with(&mut shown, true);
+        assert_eq!(
+            shown.error.as_deref(),
+            Some("connect to kafka://user:pw@host failed")
+        );
+    }
+
+    #[test]
+    fn a_summary_from_an_older_process_still_parses() {
+        let summary: StatusSummary = serde_json::from_str(
+            r#"{"running":true,"healthy":true,"pending":null,"capacity":null,"error":null,"throughput":1.5,"message_sequence":3}"#,
+        )
+        .unwrap();
+        assert_eq!(summary.message_sequence, 3);
+        assert_eq!(summary.started_at_ms, None);
+        assert_eq!(summary.outcome, None);
+        assert_eq!(summary.average_throughput, 0.0);
     }
 
     #[test]

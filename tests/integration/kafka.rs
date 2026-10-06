@@ -137,8 +137,17 @@ pub async fn test_kafka_produce_only_bench() {
         let batch_size = env("PO_BATCH", "128");
         let linger = env("PO_LINGER_MS", "1");
         let batch_num_messages = env("PO_BATCH_NUM_MESSAGES", "10000"); // librdkafka default
+        // PO_LIB_DEFAULTS=1 measures the publisher's own producer settings.
+        let lib_defaults = std::env::var("PO_LIB_DEFAULTS").is_ok();
+        let producer_options = match (lib_defaults, std::env::var("PO_LINGER_MS")) {
+            (true, Ok(l)) => format!(r#"[["linger.ms", "{l}"]]"#),
+            (true, Err(_)) => "[]".to_string(),
+            (false, _) => format!(
+                r#"[["queue.buffering.max.ms", "{linger}"], ["batch.num.messages", "{batch_num_messages}"], ["acks", "1"], ["compression.type", "snappy"]]"#
+            ),
+        };
         println!(
-            "--- PRODUCE-ONLY params: concurrency={concurrency} batch_size={batch_size} linger_ms={linger} batch.num.messages={batch_num_messages}"
+            "--- PRODUCE-ONLY params: concurrency={concurrency} batch_size={batch_size} producer_options={producer_options}"
         );
         // Mirrors the committed coupled produce route (CONFIG_YAML memory_to_kafka):
         // retry middleware, delayed_ack default (false = await delivery).
@@ -159,11 +168,7 @@ routes:
       kafka:
         url: "localhost:9092"
         topic: "po-topic-{s}"
-        producer_options:
-          - ["queue.buffering.max.ms", "{linger}"]
-          - ["batch.num.messages", "{batch_num_messages}"]
-          - ["acks", "1"]
-          - ["compression.type", "snappy"]
+        producer_options: {producer_options}
 "#,
             s = s,
             cap = cap

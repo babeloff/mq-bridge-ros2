@@ -363,6 +363,7 @@ class HttpBulkRead(TypedDict, total=False):
     method: Optional[str]
     path: Required[str]
     polling_interval_ms: Optional[int]
+    stream: Optional[HttpBulkStream]
 
 
 class HttpBulkResult(TypedDict, total=False):
@@ -860,6 +861,7 @@ DeliveryGuarantee = Literal["at_most_once", "at_least_once", "effectively_once"]
 FaultMode = Literal["panic", "disconnect", "timeout", "json_format_error", "nack"]
 FileFormat = Literal["normal", "json", "text", "raw", "csv", "parquet"]
 HttpBulkFormat = Literal["ndjson", "json_array"]
+HttpBulkStream = Literal["sse", "ndjson"]
 HttpServerProtocol = Literal["auto", "http1_only", "http2_only"]
 IdHash = Literal["fnv1a", "sha256"]
 MappingRule = Union[str, DetailedMappingRule]

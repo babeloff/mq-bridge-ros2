@@ -7,18 +7,23 @@
 //!
 //! One request reads one page. Where the next page starts is configuration: a
 //! value in the response, a field of the last document, or the documents read.
+//! With `read.stream` one response stays open and is read event by event.
 
 use super::{quoted, Connection, JSON};
 use crate::checkpoint::{self, CheckpointBackend, CheckpointStore, VersionedCheckpoint};
 use crate::endpoints::poll::PollBackoff;
-use crate::models::{HttpBulkConfig, HttpBulkRead};
+use crate::models::{HttpBulkConfig, HttpBulkRead, HttpBulkStream};
 use crate::support::http_status;
-use crate::traits::{BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch};
+use crate::support::sse::{find_sse_event_end, parse_sse_event, ParsedSseEvent};
+use crate::traits::{
+    BatchCommitFunc, BoxFuture, ConsumerError, MessageConsumer, MessageDisposition, ReceivedBatch,
+};
 use crate::CanonicalMessage;
 use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
+use bytes::Bytes;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
-use reqwest::header::CONTENT_TYPE;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -27,6 +32,8 @@ use tracing::{info, trace, warn};
 
 const CURSOR: &str = "{cursor}";
 const LIMIT: &str = "{limit}";
+/// Most bytes of a stream held while one event or line is incomplete.
+const MAX_ITEM_BYTES: usize = 64 * 1024 * 1024;
 
 /// Where the next page starts. `End` is stored too, so a finished scan stays finished.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +51,24 @@ enum CursorSource {
     Response(String),
     /// A JSON pointer into the last document of the page.
     Item(String),
+    /// The id of a server-sent event, sent back as `Last-Event-ID`.
+    EventId,
+    /// A stream of lines without a position: it cannot be resumed.
+    Untracked,
+}
+
+/// The response a stream is read from.
+struct Open {
+    response: reqwest::Response,
+    buffer: Vec<u8>,
+    /// Bytes of `buffer` already searched for the end of an item.
+    searched: usize,
+    /// `Progress::rollbacks` when the request was sent.
+    rollbacks: u64,
+    /// The id of the last event, which later events without one keep.
+    last_id: Option<Position>,
+    /// The server closed the response.
+    ended: bool,
 }
 
 pub struct HttpBulkConsumer {
@@ -58,6 +83,10 @@ pub struct HttpBulkConsumer {
     progress: Arc<Mutex<Progress>>,
     /// A draining route ends on the first empty page, so it does not wait for it.
     exit_on_empty: bool,
+    stream: Option<HttpBulkStream>,
+    open: Option<Open>,
+    /// How long a draining route waits for a silent stream.
+    silence: Duration,
 }
 
 /// The read position, and how often a nack has moved it back.
@@ -113,10 +142,16 @@ impl HttpBulkConsumer {
             bail!("http_bulk read.path must start with '/'");
         }
         let in_body = read.body.as_deref().is_some_and(|b| b.contains(CURSOR));
-        if !read.path.contains(CURSOR) && !in_body {
+        if read.stream.is_none() && !read.path.contains(CURSOR) && !in_body {
             bail!(
                 "http_bulk read needs '{CURSOR}' in its path or body, or every page is the first"
             );
+        }
+        if read.stream.is_some() && (read.path.contains(LIMIT) || in_limit(&read.body)) {
+            bail!("http_bulk read has no '{LIMIT}' in a stream: the server decides what it sends");
+        }
+        if read.stream.is_some() && !read.items.is_empty() {
+            bail!("http_bulk read.items does not apply to a stream: every event or line is a document");
         }
         let default_method = if read.body.is_some() { "POST" } else { "GET" };
         let method = read
@@ -124,11 +159,16 @@ impl HttpBulkConsumer {
             .as_deref()
             .unwrap_or(default_method)
             .to_ascii_uppercase();
-        let (source, start) = match (&read.cursor.response, &read.cursor.item) {
-            (Some(_), Some(_)) => bail!("http_bulk read.cursor sets both 'response' and 'item'"),
-            (Some(pointer), None) => (CursorSource::Response(pointer.clone()), Value::Null),
-            (None, Some(pointer)) => (CursorSource::Item(pointer.clone()), Value::Null),
-            (None, None) => (CursorSource::Count, Value::from(0u64)),
+        let (source, start) = match (&read.cursor.response, &read.cursor.item, read.stream) {
+            (Some(_), Some(_), _) => bail!("http_bulk read.cursor sets both 'response' and 'item'"),
+            (Some(_), None, Some(_)) => {
+                bail!("http_bulk read.cursor.response does not apply to a stream; use 'item'")
+            }
+            (Some(pointer), None, None) => (CursorSource::Response(pointer.clone()), Value::Null),
+            (None, Some(pointer), _) => (CursorSource::Item(pointer.clone()), Value::Null),
+            (None, None, Some(HttpBulkStream::Sse)) => (CursorSource::EventId, Value::Null),
+            (None, None, Some(HttpBulkStream::Ndjson)) => (CursorSource::Untracked, Value::Null),
+            (None, None, None) => (CursorSource::Count, Value::from(0u64)),
         };
         let start = read.cursor.start.clone().unwrap_or(start);
         if matches!(source, CursorSource::Count) && !start.is_u64() {
@@ -180,18 +220,16 @@ impl HttpBulkConsumer {
                 outstanding: 0,
             })),
             exit_on_empty: false,
+            stream: read.stream,
+            open: None,
+            silence: Duration::from_millis(read.polling_interval_ms.unwrap_or(1000)),
         })
     }
 
-    /// Requests the page at `cursor` and returns the parsed response.
-    async fn page(&self, cursor: &Value, limit: usize) -> Result<Value, ConsumerError> {
-        let label = format!("{} {}", self.method, self.path);
+    /// The read request at `cursor`.
+    fn request(&self, cursor: &Value, limit: usize) -> reqwest::RequestBuilder {
         let limit = limit.to_string();
-        let in_url = match cursor {
-            Value::Null => String::new(),
-            Value::String(text) => text.clone(),
-            other => other.to_string(),
-        };
+        let in_url = cursor_text(cursor);
         let url = format!(
             "{}{}",
             self.connection.base,
@@ -209,26 +247,25 @@ impl HttpBulkConsumer {
                     .replace(LIMIT, &limit),
             );
         }
-        let response = self.connection.send(request).await.map_err(|e| {
-            let error = anyhow!("{label} failed: {e}");
-            if e.retryable {
-                ConsumerError::Connection(error)
-            } else {
-                ConsumerError::Permanent(error)
-            }
-        })?;
+        request
+    }
+
+    /// Requests the page at `cursor` and returns the parsed response.
+    async fn page(&self, cursor: &Value, limit: usize) -> Result<Value, ConsumerError> {
+        let label = format!("{} {}", self.method, self.path);
+        let request = self.request(cursor, limit);
+        let response = self
+            .connection
+            .send(request)
+            .await
+            .map_err(|e| send_error(&label, e))?;
         let status = response.status();
         let text = response
             .text()
             .await
             .map_err(|e| ConsumerError::Connection(anyhow!("{label} response was cut off: {e}")))?;
         if !status.is_success() {
-            let error = anyhow!("{label} answered {status}: {}", quoted(&text));
-            return Err(if http_status::is_retryable(status.as_u16()) {
-                ConsumerError::Connection(error)
-            } else {
-                ConsumerError::Permanent(error)
-            });
+            return Err(status_error(&label, status, &text));
         }
         serde_json::from_str(&text).map_err(|e| {
             ConsumerError::Permanent(anyhow!(
@@ -279,7 +316,205 @@ impl HttpBulkConsumer {
                 }
                 Ok(positions)
             }
+            // Only a stream has these, and it does not read pages.
+            CursorSource::EventId | CursorSource::Untracked => Ok(vec![None; items.len()]),
         }
+    }
+
+    /// Opens the stream at `cursor`.
+    async fn connect(
+        &self,
+        cursor: &Value,
+        format: HttpBulkStream,
+    ) -> Result<reqwest::Response, ConsumerError> {
+        let label = format!("{} {}", self.method, self.path);
+        let mut request = self.request(cursor, 0);
+        if !self.connection.headers.contains_key(ACCEPT) {
+            let accept = match format {
+                HttpBulkStream::Sse => "text/event-stream",
+                HttpBulkStream::Ndjson => "application/x-ndjson",
+            };
+            request = request.header(ACCEPT, accept);
+        }
+        if matches!(self.source, CursorSource::EventId) && !cursor.is_null() {
+            request = request.header("Last-Event-ID", cursor_text(cursor));
+        }
+        let response = self
+            .connection
+            .send(request)
+            .await
+            .map_err(|e| send_error(&label, e))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let text = response.text().await.unwrap_or_default();
+        Err(status_error(&label, status, &text))
+    }
+
+    /// Reads the events or lines that have arrived on the open response.
+    async fn receive_stream(
+        &mut self,
+        format: HttpBulkStream,
+        max_messages: usize,
+    ) -> Result<ReceivedBatch, ConsumerError> {
+        loop {
+            let (before, rollbacks) = {
+                let progress = self.progress.lock().unwrap();
+                (progress.position.clone(), progress.rollbacks)
+            };
+            let Position::At(cursor) = &before else {
+                return Ok(self.idle().await);
+            };
+            // A nack moved the position back: the response in hand is past it.
+            if self.open.as_ref().is_some_and(|o| o.rollbacks != rollbacks) {
+                self.open = None;
+            }
+            if self.open.is_none() {
+                let response = self.connect(cursor, format).await?;
+                let resumed = matches!(self.source, CursorSource::EventId) && !cursor.is_null();
+                self.open = Some(Open {
+                    response,
+                    buffer: Vec::new(),
+                    searched: 0,
+                    rollbacks,
+                    last_id: resumed.then(|| before.clone()),
+                    ended: false,
+                });
+            }
+            let Some(open) = self.open.as_mut() else {
+                continue;
+            };
+            let items = take_items(format, &mut open.buffer, &mut open.searched, max_messages);
+            if items.is_empty() {
+                if open.ended {
+                    // A draining route is done; connecting again would read it twice.
+                    if self.exit_on_empty {
+                        return Ok(ReceivedBatch::empty());
+                    }
+                    self.open = None;
+                    return Ok(self.idle().await);
+                }
+                if open.buffer.len() > MAX_ITEM_BYTES {
+                    self.open = None;
+                    return Err(ConsumerError::Permanent(anyhow!(
+                        "http_bulk stream sent {MAX_ITEM_BYTES} bytes without the end of an event or line"
+                    )));
+                }
+                let chunk = if self.exit_on_empty {
+                    match tokio::time::timeout(self.silence, open.response.chunk()).await {
+                        Ok(chunk) => chunk,
+                        Err(_) => return Ok(ReceivedBatch::empty()),
+                    }
+                } else {
+                    open.response.chunk().await
+                };
+                match chunk {
+                    Ok(Some(bytes)) => open.buffer.extend_from_slice(&bytes),
+                    Ok(None) => {
+                        // The last line may come without a line break.
+                        if format == HttpBulkStream::Ndjson {
+                            open.buffer.push(b'\n');
+                        }
+                        open.ended = true;
+                    }
+                    // A draining route must not pass a cut stream off as a complete one.
+                    Err(error) if self.exit_on_empty => {
+                        self.open = None;
+                        return Err(ConsumerError::Connection(anyhow!(
+                            "{} {} was cut off: {error}",
+                            self.method,
+                            self.path
+                        )));
+                    }
+                    Err(error) => {
+                        warn!(%error, path = %self.path, "http_bulk stream was cut off; connecting again");
+                        self.open = None;
+                        tokio::time::sleep(self.backoff.idle_delay()).await;
+                    }
+                }
+                continue;
+            }
+
+            let mut positions = Vec::with_capacity(items.len());
+            let mut messages = Vec::with_capacity(items.len());
+            for item in items {
+                positions.push(match &self.source {
+                    CursorSource::Item(pointer) => Some(item_position(pointer, &item.payload)?),
+                    CursorSource::EventId => {
+                        if let Some(id) = &item.event_id {
+                            open.last_id = Some(Position::At(Value::from(id.as_str())));
+                        }
+                        open.last_id.clone()
+                    }
+                    _ => None,
+                });
+                let mut message = CanonicalMessage::new_bytes(item.payload, None);
+                if let Some(id) = item.event_id {
+                    message = message.with_metadata_kv("sse_id", id);
+                }
+                if let Some(name) = item.event_name {
+                    message = message.with_metadata_kv("sse_event", name);
+                }
+                messages.push(message);
+            }
+            {
+                let mut progress = self.progress.lock().unwrap();
+                if progress.rollbacks != rollbacks {
+                    continue;
+                }
+                if let Some(last) = positions.iter().flatten().last() {
+                    progress.position = last.clone();
+                }
+                progress.outstanding += 1;
+            }
+            self.backoff.reset();
+            trace!(count = messages.len(), path = %self.path, "Read stream items");
+            let commit = self.commit(positions, before, rollbacks);
+            return Ok(ReceivedBatch { messages, commit });
+        }
+    }
+
+    /// The commit of a batch: a nack moves the read back behind the last acked document.
+    fn commit(
+        &self,
+        positions: Vec<Option<Position>>,
+        before: Position,
+        rollbacks: u64,
+    ) -> BatchCommitFunc {
+        let checkpoint = self.checkpoint.clone();
+        let progress = self.progress.clone();
+        let resumable = !matches!(self.source, CursorSource::Untracked);
+        Box::new(move |dispositions: Vec<MessageDisposition>| {
+            Box::pin(async move {
+                let acked = dispositions
+                    .iter()
+                    .take(positions.len())
+                    .take_while(|d| {
+                        matches!(d, MessageDisposition::Ack | MessageDisposition::Reply(_))
+                    })
+                    .count();
+                let boundary = positions[..acked].last().cloned().flatten();
+                {
+                    let mut progress = progress.lock().unwrap();
+                    progress.outstanding = progress.outstanding.saturating_sub(1);
+                    // An earlier nack rewound past this page: it is read again.
+                    if progress.rollbacks != rollbacks {
+                        return Ok(());
+                    }
+                    if acked < positions.len() && resumable {
+                        progress.position = boundary.clone().unwrap_or(before);
+                        progress.rollbacks += 1;
+                    } else if acked < positions.len() {
+                        warn!("A line of an http_bulk stream without read.cursor.item was not acknowledged and is not read again");
+                    }
+                }
+                if let Some(boundary) = boundary {
+                    save(&checkpoint, &boundary).await;
+                }
+                Ok(())
+            }) as BoxFuture<'static, anyhow::Result<()>>
+        })
     }
 
     async fn idle(&mut self) -> ReceivedBatch {
@@ -288,6 +523,103 @@ impl HttpBulkConsumer {
         }
         ReceivedBatch::empty()
     }
+}
+
+/// The position as it stands in a URL or a header.
+fn cursor_text(cursor: &Value) -> String {
+    match cursor {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn in_limit(body: &Option<String>) -> bool {
+    body.as_deref().is_some_and(|body| body.contains(LIMIT))
+}
+
+fn send_error(label: &str, e: super::auth::SendError) -> ConsumerError {
+    let error = anyhow!("{label} failed: {e}");
+    if e.retryable {
+        ConsumerError::Connection(error)
+    } else {
+        ConsumerError::Permanent(error)
+    }
+}
+
+fn status_error(label: &str, status: reqwest::StatusCode, text: &str) -> ConsumerError {
+    let error = anyhow!("{label} answered {status}: {}", quoted(text));
+    if http_status::is_retryable(status.as_u16()) {
+        ConsumerError::Connection(error)
+    } else {
+        ConsumerError::Permanent(error)
+    }
+}
+
+/// The position of a streamed document, from the field `pointer` names.
+fn item_position(pointer: &str, payload: &[u8]) -> Result<Position, ConsumerError> {
+    let document = serde_json::from_slice::<Value>(payload).ok();
+    match document
+        .as_ref()
+        .and_then(|document| document.pointer(pointer))
+    {
+        Some(value) if !value.is_null() => Ok(Position::At(value.clone())),
+        _ => Err(ConsumerError::Permanent(anyhow!(
+            "http_bulk read.cursor.item '{pointer}' is missing in a document"
+        ))),
+    }
+}
+
+/// Takes up to `max` complete events or lines off the front of `buffer`.
+fn take_items(
+    format: HttpBulkStream,
+    buffer: &mut Vec<u8>,
+    searched: &mut usize,
+    max: usize,
+) -> Vec<ParsedSseEvent> {
+    let mut items = Vec::new();
+    let mut taken = 0;
+    // The end of an event may straddle the part searched before.
+    let mut from = searched.saturating_sub(3);
+    *searched = 0;
+    while items.len() < max {
+        let rest = &buffer[taken..];
+        let found = match format {
+            HttpBulkStream::Ndjson => {
+                let end = rest[from..].iter().position(|byte| *byte == b'\n');
+                end.map(|end| (from + end, 1))
+            }
+            HttpBulkStream::Sse => find_sse_event_end(&rest[from..]).map(|end| {
+                let end = from + end;
+                let crlf = rest[end..].starts_with(b"\r\n\r\n");
+                (end, if crlf { 4 } else { 2 })
+            }),
+        };
+        let Some((end, terminator)) = found else {
+            *searched = rest.len();
+            break;
+        };
+        match format {
+            HttpBulkStream::Ndjson => {
+                let line = rest[..end].trim_ascii();
+                if !line.is_empty() {
+                    items.push(ParsedSseEvent {
+                        payload: Bytes::copy_from_slice(line),
+                        event_id: None,
+                        event_name: None,
+                    });
+                }
+            }
+            // The event is complete, so decoding cannot split a character.
+            HttpBulkStream::Sse => {
+                items.extend(parse_sse_event(&String::from_utf8_lossy(&rest[..end])))
+            }
+        }
+        taken += end + terminator;
+        from = 0;
+    }
+    buffer.drain(..taken);
+    items
 }
 
 async fn save(checkpoint: &Option<Arc<dyn CheckpointStore>>, position: &Position) {
@@ -304,6 +636,9 @@ impl MessageConsumer for HttpBulkConsumer {
     async fn receive_batch(&mut self, max_messages: usize) -> Result<ReceivedBatch, ConsumerError> {
         if max_messages == 0 {
             return Ok(ReceivedBatch::empty());
+        }
+        if let Some(format) = self.stream {
+            return self.receive_stream(format, max_messages).await;
         }
         loop {
             let (before, rollbacks) = {
@@ -363,36 +698,7 @@ impl MessageConsumer for HttpBulkConsumer {
                 .collect();
             trace!(count = messages.len(), path = %self.path, "Read documents");
 
-            let checkpoint = self.checkpoint.clone();
-            let progress = self.progress.clone();
-            let commit = Box::new(move |dispositions: Vec<MessageDisposition>| {
-                Box::pin(async move {
-                    let acked = dispositions
-                        .iter()
-                        .take(positions.len())
-                        .take_while(|d| {
-                            matches!(d, MessageDisposition::Ack | MessageDisposition::Reply(_))
-                        })
-                        .count();
-                    let boundary = positions[..acked].last().cloned().flatten();
-                    {
-                        let mut progress = progress.lock().unwrap();
-                        progress.outstanding = progress.outstanding.saturating_sub(1);
-                        // An earlier nack rewound past this page: it is read again.
-                        if progress.rollbacks != rollbacks {
-                            return Ok(());
-                        }
-                        if acked < positions.len() {
-                            progress.position = boundary.clone().unwrap_or(before);
-                            progress.rollbacks += 1;
-                        }
-                    }
-                    if let Some(boundary) = boundary {
-                        save(&checkpoint, &boundary).await;
-                    }
-                    Ok(())
-                }) as BoxFuture<'static, anyhow::Result<()>>
-            });
+            let commit = self.commit(positions, before, rollbacks);
             return Ok(ReceivedBatch { messages, commit });
         }
     }
@@ -706,5 +1012,180 @@ mod tests {
                 .expect("refused");
             assert!(error.to_string().contains(text), "{error}");
         }
+    }
+
+    fn item_texts(
+        format: HttpBulkStream,
+        buffer: &mut Vec<u8>,
+        searched: &mut usize,
+    ) -> Vec<String> {
+        take_items(format, buffer, searched, 10)
+            .into_iter()
+            .map(|item| String::from_utf8(item.payload.to_vec()).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn an_event_or_line_is_taken_once_it_is_complete() {
+        let (mut buffer, mut searched) = (Vec::new(), 0);
+        for (chunk, lines) in [
+            ("{\"a\":1}\r\n\n{\"b\"", vec![r#"{"a":1}"#]),
+            (":2", vec![]),
+            ("}\n{\"c\":3}\n", vec![r#"{"b":2}"#, r#"{"c":3}"#]),
+        ] {
+            buffer.extend_from_slice(chunk.as_bytes());
+            let taken = item_texts(HttpBulkStream::Ndjson, &mut buffer, &mut searched);
+            assert_eq!(taken, lines, "{chunk:?}");
+        }
+        assert!(buffer.is_empty());
+
+        // The blank line that ends an event arrives in two chunks.
+        for (chunk, events) in [
+            (": ping\n\ndata: one\r\n\r", vec![]),
+            ("\ndata: two\n", vec!["one"]),
+            ("\n", vec!["two"]),
+        ] {
+            buffer.extend_from_slice(chunk.as_bytes());
+            let taken = item_texts(HttpBulkStream::Sse, &mut buffer, &mut searched);
+            assert_eq!(taken, events, "{chunk:?}");
+        }
+        assert!(buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_sse_stream_resumes_after_the_last_acked_event_id() {
+        let server = server(|request| {
+            let events = match request.header("last-event-id") {
+                None => "id: 1\nevent: added\ndata: {\"n\":1}\n\nid: 2\ndata: two\n\n",
+                Some("1") => "id: 2\ndata: two\n\n",
+                Some("2") => "data: three\n\n",
+                _ => "",
+            };
+            (200, events.to_string())
+        })
+        .await;
+        let config = json!({"read": {"path": "/events", "stream": "sse"}});
+        let mut consumer = consumer(&server, config).await;
+
+        let batch = consumer.receive_batch(2).await.expect("events");
+        assert_eq!(payload_texts(&batch.messages), [r#"{"n":1}"#, "two"]);
+        let metadata = &batch.messages[0].metadata;
+        assert_eq!(metadata["sse_id"], "1");
+        assert_eq!(metadata["sse_event"], "added");
+        let nacked = vec![MessageDisposition::Ack, MessageDisposition::Nack];
+        (batch.commit)(nacked).await.expect("commit");
+
+        // The nacked event is asked for again, and the stream goes on behind it.
+        assert_eq!(read(&mut consumer, 1).await, ["two"]);
+        assert!(read(&mut consumer, 0).await.is_empty());
+        assert_eq!(read(&mut consumer, 1).await, ["three"]);
+        let requests = server.requests();
+        assert_eq!(requests[0].header("accept"), Some("text/event-stream"));
+        let resumed: Vec<_> = requests.iter().map(|r| r.header("last-event-id")).collect();
+        assert_eq!(resumed, [None, Some("1"), Some("2")]);
+    }
+
+    #[tokio::test]
+    async fn an_ndjson_stream_saves_the_field_it_resumes_from() {
+        let server = server(|request| {
+            let lines = match request.target.as_str() {
+                "/export?since=" => "{\"seq\":1}\n{\"seq\":2}",
+                "/export?since=2" => "{\"seq\":3}\n",
+                _ => "",
+            };
+            (200, lines.to_string())
+        })
+        .await;
+        let (path, url) = store();
+        let config = json!({
+            "read": {
+                "path": "/export?since={cursor}",
+                "stream": "ndjson",
+                "cursor": {"item": "/seq"},
+                "cursor_id": "copy",
+                "checkpoint_store": url,
+            },
+        });
+        let mut first = consumer(&server, config.clone()).await;
+        assert_eq!(read(&mut first, 2).await, [r#"{"seq":1}"#]);
+        // The last line has no line break: it is complete when the response ends.
+        assert_eq!(read(&mut first, 2).await, [r#"{"seq":2}"#]);
+
+        let mut second = consumer(&server, config).await;
+        assert_eq!(read(&mut second, 1).await, [r#"{"seq":3}"#]);
+        assert_eq!(targets(&server), ["/export?since=", "/export?since=2"]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn an_event_is_delivered_while_the_response_stays_open() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let held = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = socket.read(&mut [0u8; 1024]).await;
+            let event = "data: live\n\n";
+            let head = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+            let answer = format!("{head}{:x}\r\n{event}\r\n", event.len());
+            socket.write_all(answer.as_bytes()).await.unwrap();
+            // The response does not end while the socket is held.
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            drop(socket);
+        });
+        let read = json!({"path": "/events", "stream": "sse", "polling_interval_ms": 1});
+        let config = json!({"url": url, "read": read, "request_timeout_ms": 30_000});
+        let config: HttpBulkConfig = serde_json::from_value(config).expect("config");
+        let mut consumer = HttpBulkConsumer::new(&config, true).await.unwrap();
+        consumer.set_exit_on_empty(true);
+
+        let batch = tokio::time::timeout(Duration::from_secs(5), consumer.receive_batch(10))
+            .await
+            .expect("delivered before the response ends")
+            .expect("event");
+        assert_eq!(payload_texts(&batch.messages), ["live"]);
+        // A draining route ends on a silent stream.
+        let silent = consumer.receive_batch(10).await.expect("silence");
+        assert!(silent.messages.is_empty());
+        held.abort();
+    }
+
+    #[tokio::test]
+    async fn a_draining_route_reads_an_export_once() {
+        let server = server(|_| (200, "{\"id\":1}\n{\"id\":2}\n{\"id\":3}\n".to_string())).await;
+        let config = json!({"read": {"path": "/export", "stream": "ndjson"}});
+        let mut consumer = consumer(&server, config).await;
+        consumer.set_exit_on_empty(true);
+
+        assert_eq!(read(&mut consumer, 2).await.len(), 2);
+        // A line without a position is not read again after a nack.
+        assert_eq!(read(&mut consumer, 0).await, [r#"{"id":3}"#]);
+        assert!(read(&mut consumer, 0).await.is_empty());
+        assert!(read(&mut consumer, 0).await.is_empty());
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_stream_refuses_what_only_a_page_has() {
+        for read in [
+            json!({"path": "/e", "stream": "sse", "items": "/results"}),
+            json!({"path": "/e?limit={limit}", "stream": "ndjson"}),
+            json!({"path": "/e", "stream": "sse", "cursor": {"response": "/next"}}),
+        ] {
+            let config = json!({"url": "http://localhost:1", "read": read});
+            let config: HttpBulkConfig = serde_json::from_value(config).expect("config");
+            assert!(
+                HttpBulkConsumer::new(&config, true).await.is_err(),
+                "{:?}",
+                config.read
+            );
+        }
+        let failed = server(|_| (404, "no such feed".to_string())).await;
+        let mut consumer =
+            consumer(&failed, json!({"read": {"path": "/e", "stream": "sse"}})).await;
+        let Err(error) = consumer.receive_batch(1).await else {
+            panic!("a 404 opens no stream");
+        };
+        assert!(matches!(error, ConsumerError::Permanent(_)), "{error:#}");
     }
 }

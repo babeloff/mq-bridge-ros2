@@ -5,33 +5,34 @@
 //  endpoint as JSON, so the model can publish to, and run routes between, any of
 //  the supported connectors ad hoc.
 //
-//  Tools: `publish`, `start_route`, `list_routes`, `route_status`, `stop_route`.
+//  Tools: `publish`, `start_route`, `list_routes`, `route_status`, `stop_route`,
+//  `bridge_status`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use mq_bridge_app::mq_bridge::{
-    CanonicalMessage, Handled, Publisher, Sent, SentBatch,
     models::{Endpoint, EndpointType, Route},
     route::{RouteHandle, RouteOutcome},
+    CanonicalMessage, Handled, Publisher, Sent, SentBatch,
 };
 use mq_bridge_app::route_metrics::{
-    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY, MessageCapture, RouteMetrics, RouteTiming,
-    format_capture_time, is_redelivery,
+    format_capture_time, is_redelivery, MessageCapture, RouteMetrics, RouteTiming,
+    CAPTURE_SOURCE_KEY, CAPTURE_TIME_KEY,
 };
 use mq_bridge_app::status_registry::{
-    InstanceKind, StatusEntity, StatusLease, StatusRoute, StatusSnapshot, StatusSummary,
+    list_off_thread, InstanceKind, LocalStatusRegistry, StatusEntity, StatusLease, StatusRoute,
+    StatusSnapshot, StatusSummary,
 };
 use mq_bridge_app::ui_app::{ConsumerStatusSnapshot, EndpointStatusSnapshot, RouteOutcomeSnapshot};
 use rmcp::schemars;
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -291,6 +292,14 @@ fn err_json(value: serde_json::Value) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(pretty(&value))])
 }
 
+/// Every fresh lease in `registry`, for the `bridge_status` tool.
+async fn bridge_status_json(registry: &LocalStatusRegistry) -> serde_json::Value {
+    serde_json::json!({
+        "current_pid": std::process::id(),
+        "instances": list_off_thread(registry).await,
+    })
+}
+
 /// Whether a route's task has ended, or `None` when that cannot be determined.
 ///
 /// `RouteHandle::outcome` is `Some` exactly when the task is done, so its
@@ -454,6 +463,18 @@ struct McpRouteStatus {
     snapshot: ConsumerStatusSnapshot,
     input: String,
     output: String,
+    started_at_ms: Option<u64>,
+    average_throughput: f64,
+}
+
+impl McpRouteStatus {
+    fn summary(&self) -> StatusSummary {
+        StatusSummary {
+            started_at_ms: self.started_at_ms,
+            average_throughput: self.average_throughput,
+            ..StatusSummary::from(&self.snapshot)
+        }
+    }
 }
 
 /// The connector type of an endpoint, e.g. `"kafka"`, with no config attached.
@@ -567,6 +588,8 @@ impl BridgeMcp {
         for (name, route) in self.routes.lock().await.iter() {
             let handle = &route.handle;
             let status = handle.status();
+            let messages = self.metrics.sequence(name).await;
+            let (_, average) = elapsed_and_average(messages, self.metrics.timing(name).await);
             routes.insert(
                 name.clone(),
                 McpRouteStatus {
@@ -578,11 +601,13 @@ impl BridgeMcp {
                         // still hold a handle for was never stopped from here.
                         !route_finished(handle).unwrap_or(false),
                         route_outcome(handle).map(RouteOutcomeSnapshot::from),
-                        self.metrics.sequence(name).await,
+                        messages,
                         self.metrics.throughput(name).await,
                     ),
                     input: route.input.clone(),
                     output: route.output.clone(),
+                    started_at_ms: self.metrics.started_at_ms(name).await,
+                    average_throughput: average.unwrap_or(0.0),
                 },
             );
         }
@@ -616,7 +641,10 @@ impl BridgeMcp {
         let mut consumers: Vec<StatusEntity> = report
             .routes
             .iter()
-            .map(|(name, route)| status_entity(name, &route.input, &route.snapshot))
+            .map(|(name, route)| StatusEntity {
+                summary: route.summary(),
+                ..status_entity(name, &route.input, &route.snapshot)
+            })
             .collect();
         let mut publishers: Vec<StatusEntity> = report
             .publishers
@@ -635,7 +663,7 @@ impl BridgeMcp {
                 label: name.clone(),
                 input: status_entity(&format!("{name}:input"), &route.input, &route.snapshot),
                 output: status_entity(&format!("{name}:output"), &route.output, &route.snapshot),
-                summary: StatusSummary::from(&route.snapshot),
+                summary: route.summary(),
             })
             .collect();
         // The maps above iterate in hash order, so sort: a peer's rows must not
@@ -924,6 +952,22 @@ impl BridgeMcp {
         Ok(ok_json(serde_json::Value::Array(
             self.all_routes_json().await,
         )))
+    }
+
+    #[tool(
+        description = "Report every mq-bridge process this user is running on this machine — CLI \
+            jobs (`mqb copy`, headless configs), other MCP servers, the web UI and the desktop app — \
+            with their routes and consumers: connector types, running/healthy, `outcome`, current \
+            rate (`throughput`), `average_throughput`, total messages (`message_sequence`), \
+            `pending` and `started_at_ms`. Read-only; routes of other processes cannot be stopped \
+            from here. The entry whose `pid` equals `current_pid` is this server. Error text of \
+            other processes is redacted to `error`.",
+        annotations(read_only_hint = true)
+    )]
+    async fn bridge_status(&self) -> Result<CallToolResult, McpError> {
+        let registry = LocalStatusRegistry::new()
+            .map_err(|error| invalid(format!("local status registry unavailable: {error}")))?;
+        Ok(ok_json(bridge_status_json(&registry).await))
     }
 
     #[tool(
@@ -1305,7 +1349,8 @@ const INSTRUCTIONS: &str = "mq-bridge: a universal, protocol-agnostic message an
      a sink (`output`), optionally setting `exit_on_empty` to drain-then-exit; and \
      `list_routes` / `route_status` / `stop_route` to manage running routes. Prefer \
      `wait_route` over polling `route_status` for a drain-then-exit job: it is one call \
-     however long the job runs. Either endpoint may carry a `middlewares` array (retry, \
+     however long the job runs. `bridge_status` shows what every mq-bridge process on \
+     this machine is running, not only this server. Either endpoint may carry a `middlewares` array (retry, \
      dlq, deduplication, limiter, transform, compression, encryption, ...) to add delivery \
      behaviour without changing the route. Apache Pulsar is available too, but is not one \
      of the endpoint variants in the tool schema: address it as {\"custom\": {\"name\": \
@@ -1315,7 +1360,8 @@ const INSTRUCTIONS: &str = "mq-bridge: a universal, protocol-agnostic message an
      (`latest`) only sees messages published after the subscription is created.";
 
 /// Appended to the instructions above only when `--agent-bus` is on.
-const AGENT_BUS_INSTRUCTIONS: &str = " Agents on one machine can also message each other: `agent_send` delivers to a named \
+const AGENT_BUS_INSTRUCTIONS: &str =
+    " Agents on one machine can also message each other: `agent_send` delivers to a named \
      peer and is always available, while `agent_listen` opens this server's own inbox and \
      is off until called — so nothing reaches this agent unless it opts in. Once \
      listening, collect mail with `route_messages` on route `agent-inbox`. `server_info` \
@@ -1544,7 +1590,7 @@ async fn run_http(server: BridgeMcp, bind: String) -> anyhow::Result<()> {
         service::TowerToHyperService,
     };
     use rmcp::transport::streamable_http_server::{
-        StreamableHttpService, session::local::LocalSessionManager,
+        session::local::LocalSessionManager, StreamableHttpService,
     };
 
     // One shared server across all sessions, so routes, publishers and metrics
@@ -1621,6 +1667,35 @@ mod tests {
             );
         }
         assert!(on.get_info().instructions.unwrap().contains("agent_send"));
+    }
+
+    #[tokio::test]
+    async fn bridge_status_lists_the_leases_in_the_registry() {
+        let dir = std::env::temp_dir().join(format!("mqb-status-test-{}", uuid::Uuid::new_v4()));
+        let registry = LocalStatusRegistry::new_in(dir.join("instances")).expect("registry");
+        let mut peer = mq_bridge_app::status_registry::InstanceStatus::new(
+            InstanceKind::Cli,
+            "1",
+            "/tmp/work.yml",
+        );
+        peer.consumers.push(StatusEntity {
+            id: "orders".into(),
+            label: "orders".into(),
+            endpoint: "kafka".into(),
+            summary: StatusSummary {
+                running: true,
+                message_sequence: 7,
+                ..Default::default()
+            },
+        });
+        mq_bridge_app::status_registry::StatusRegistry::publish(&registry, &peer).expect("publish");
+
+        let status = bridge_status_json(&registry).await;
+        assert_eq!(status["current_pid"], std::process::id());
+        let consumer = &status["instances"][0]["consumers"][0];
+        assert_eq!(consumer["endpoint"], "kafka");
+        assert_eq!(consumer["summary"]["message_sequence"], 7);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     // `server_info` reaches the filesystem for its peer list, so the bus block has
@@ -1903,12 +1978,10 @@ mod tool_tests {
         assert_eq!(stopped["discarded_captured_messages"], 0, "{stopped}");
 
         // A stopped route is gone from every reporting surface.
-        assert!(
-            server
-                .route_status(params(json!({ "name": "drain-lifecycle" })))
-                .await
-                .is_err()
-        );
+        assert!(server
+            .route_status(params(json!({ "name": "drain-lifecycle" })))
+            .await
+            .is_err());
         let listed = result_json(&server.list_routes().await.expect("list_routes succeeds"));
         assert_eq!(listed.as_array().expect("an array").len(), 0, "{listed}");
     }
@@ -2026,12 +2099,10 @@ mod tool_tests {
         assert!(server.route_status(params(name.clone())).await.is_err());
         assert!(server.stop_route(params(name.clone())).await.is_err());
         assert!(server.route_messages(params(name.clone())).await.is_err());
-        assert!(
-            server
-                .wait_route(params(json!({ "name": "never-started" })))
-                .await
-                .is_err()
-        );
+        assert!(server
+            .wait_route(params(json!({ "name": "never-started" })))
+            .await
+            .is_err());
     }
 
     /// A route that discarded messages explains itself in `wait_route`, not only

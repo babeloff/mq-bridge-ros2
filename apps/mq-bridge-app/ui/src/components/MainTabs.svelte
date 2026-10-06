@@ -55,6 +55,15 @@
   >
     <span class="tab-icon">⚙</span> App Config
   </button>
+  <button
+    class:active={$activeMainTab === "status"}
+    class="main-tab"
+    id="mtab-status"
+    type="button"
+    onclick={() => switchMain("status")}
+  >
+    <span class="tab-icon">◉</span> Status
+  </button>
 
 
   <div class="topbar">

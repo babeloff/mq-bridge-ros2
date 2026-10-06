@@ -5,7 +5,7 @@
 
 # Connect plugin: inputs
 
-The 51 Redpanda Connect inputs the [Connect plugin](connect.md) links, generated from the component specs of Redpanda Connect v4.110.0. Field descriptions are Redpanda Connect's own, shortened to one sentence; follow *Upstream documentation* for the rest. Install and configuration forms are on the [plugin page](connect.md).
+The 56 Redpanda Connect inputs the [Connect plugin](connect.md) links, generated from the component specs of Redpanda Connect v4.110.0. Field descriptions are Redpanda Connect's own, shortened to one sentence; follow *Upstream documentation* for the rest. Install and configuration forms are on the [plugin page](connect.md).
 
 Use one as a route `input`:
 
@@ -21,11 +21,12 @@ input:
 
 | Category | Components |
 |---|---|
+| AWS | [`aws_cloudwatch_logs`](#aws_cloudwatch_logs), [`aws_kinesis`](#aws_kinesis), [`aws_s3`](#aws_s3), [`aws_sqs`](#aws_sqs) |
 | Azure | [`azure_blob_storage`](#azure_blob_storage), [`azure_cosmosdb`](#azure_cosmosdb), [`azure_queue_storage`](#azure_queue_storage), [`azure_table_storage`](#azure_table_storage) |
 | GCP | [`gcp_bigquery_select`](#gcp_bigquery_select), [`gcp_cloud_storage`](#gcp_cloud_storage), [`gcp_pubsub`](#gcp_pubsub) |
-| Local | [`csv`](#csv), [`file`](#file), [`stdin`](#stdin) |
+| Local | [`csv`](#csv), [`file`](#file), [`parquet`](#parquet), [`stdin`](#stdin) |
 | Network | [`http_client`](#http_client), [`http_server`](#http_server), [`nanomsg`](#nanomsg), [`sftp`](#sftp), [`socket`](#socket), [`socket_server`](#socket_server), [`websocket`](#websocket) |
-| Services | [`amqp_0_9`](#amqp_0_9), [`amqp_1`](#amqp_1), [`azure_blob_storage`](#azure_blob_storage), [`azure_queue_storage`](#azure_queue_storage), [`azure_table_storage`](#azure_table_storage), [`beanstalkd`](#beanstalkd), [`cassandra`](#cassandra), [`cockroachdb_changefeed`](#cockroachdb_changefeed), [`discord`](#discord), [`gcp_bigquery_select`](#gcp_bigquery_select), [`gcp_cloud_storage`](#gcp_cloud_storage), [`gcp_pubsub`](#gcp_pubsub), [`git`](#git), [`hdfs`](#hdfs), [`mongodb`](#mongodb), [`mqtt`](#mqtt), [`nats`](#nats), [`nats_jetstream`](#nats_jetstream), [`nats_kv`](#nats_kv), [`nats_stream`](#nats_stream), [`nsq`](#nsq), [`pulsar`](#pulsar), [`redis_list`](#redis_list), [`redis_pubsub`](#redis_pubsub), [`redis_scan`](#redis_scan), [`redis_streams`](#redis_streams), [`spicedb_watch`](#spicedb_watch), [`sql_raw`](#sql_raw), [`sql_select`](#sql_select), [`timeplus`](#timeplus), [`twitter_search`](#twitter_search) |
+| Services | [`amqp_0_9`](#amqp_0_9), [`amqp_1`](#amqp_1), [`aws_cloudwatch_logs`](#aws_cloudwatch_logs), [`aws_kinesis`](#aws_kinesis), [`aws_s3`](#aws_s3), [`aws_sqs`](#aws_sqs), [`azure_blob_storage`](#azure_blob_storage), [`azure_queue_storage`](#azure_queue_storage), [`azure_table_storage`](#azure_table_storage), [`beanstalkd`](#beanstalkd), [`cassandra`](#cassandra), [`cockroachdb_changefeed`](#cockroachdb_changefeed), [`discord`](#discord), [`gcp_bigquery_select`](#gcp_bigquery_select), [`gcp_cloud_storage`](#gcp_cloud_storage), [`gcp_pubsub`](#gcp_pubsub), [`git`](#git), [`hdfs`](#hdfs), [`mongodb`](#mongodb), [`mqtt`](#mqtt), [`nats`](#nats), [`nats_jetstream`](#nats_jetstream), [`nats_kv`](#nats_kv), [`nats_stream`](#nats_stream), [`nsq`](#nsq), [`pulsar`](#pulsar), [`redis_list`](#redis_list), [`redis_pubsub`](#redis_pubsub), [`redis_scan`](#redis_scan), [`redis_streams`](#redis_streams), [`spicedb_watch`](#spicedb_watch), [`sql_raw`](#sql_raw), [`sql_select`](#sql_select), [`timeplus`](#timeplus), [`twitter_search`](#twitter_search) |
 | Social | [`discord`](#discord), [`twitter_search`](#twitter_search) |
 | SpiceDB | [`spicedb_watch`](#spicedb_watch) |
 | Utility | [`batched`](#batched), [`broker`](#broker), [`dynamic`](#dynamic), [`generate`](#generate), [`inproc`](#inproc), [`read_until`](#read_until), [`resource`](#resource), [`sequence`](#sequence), [`subprocess`](#subprocess) |
@@ -61,6 +62,79 @@ Reads messages from an AMQP (1.0) server.
 Advanced: `azure_renew_lock`, `read_header`, `credit`, `tls`, `sasl`.
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/inputs/amqp_1/)
+
+## `aws_cloudwatch_logs`
+
+Consumes log events from AWS CloudWatch Logs.
+
+`connector: aws_cloudwatch_logs` · URI `connect+aws-cloudwatch-logs://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `log_group_name` | string | required | The name of the CloudWatch Log Group to consume from. |
+| `log_stream_names` | list of string |  | An optional list of log stream names to consume from. |
+| `log_stream_prefix` | string |  | An optional log stream name prefix to filter streams. |
+| `filter_pattern` | string |  | An optional CloudWatch Logs filter pattern to apply when querying log events. |
+| `start_time` | string |  | The time to start consuming log events from. |
+| `poll_interval` | string | `"5s"` | The interval at which to poll for new log events. |
+| `auto_replay_nacks` | bool | `true` | Whether messages that are rejected (nacked) at the output level should be automatically replayed indefinitely, eventually resulting in back pressure if the cause of the rejections is persistent. |
+
+Advanced: `limit`, `structured_log`, `api_timeout`, `region`, `endpoint`, `tcp`, `credentials`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/inputs/aws_cloudwatch_logs/)
+
+## `aws_kinesis`
+
+Receive messages from one or more Kinesis streams.
+
+`connector: aws_kinesis` · URI `connect+aws-kinesis://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `streams` | list of string | required | One or more Kinesis data streams to consume from. |
+| `dynamodb` | object |  | Determines the table used for storing and accessing the latest consumed sequence for shards, and for coordinating balanced consumers of streams. |
+| `checkpoint_limit` | int | `1024` | The maximum gap between the in flight sequence versus the latest acknowledged sequence at a given time. |
+| `auto_replay_nacks` | bool | `true` | Whether messages that are rejected (nacked) at the output level should be automatically replayed indefinitely, eventually resulting in back pressure if the cause of the rejections is persistent. |
+| `commit_period` | string | `"5s"` | The period of time between each update to the checkpoint table. |
+| `steal_grace_period` | string | `"2s"` | Determines how long beyond the next commit period a client will wait when stealing a shard for the current owner to store a checkpoint. |
+| `start_from_oldest` | bool | `true` | Whether to consume from the oldest message when a sequence does not yet exist for the stream. |
+| `batching` | object |  | Allows you to configure a batching policy. |
+
+Advanced: `poll_period`, `enhanced_fan_out`, `rebalance_period`, `lease_period`, `region`, `endpoint`, `tcp`, `credentials`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/inputs/aws_kinesis/)
+
+## `aws_s3`
+
+Downloads objects within an Amazon S3 bucket, optionally filtered by a prefix, either by walking the items in the bucket or by streaming upload notifications in realtime.
+
+`connector: aws_s3` · URI `connect+aws-s3://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `bucket` | string | `""` | The bucket to consume from. |
+| `prefix` | string | `""` | An optional path prefix, if set only objects with the prefix are consumed when walking a bucket. |
+| `scanner` | scanner | `{"to_the_end": {}}` | The scanner by which the stream of bytes consumed will be broken out into individual messages. |
+| `sqs` | object |  | Consume SQS messages in order to trigger key downloads. |
+
+Advanced: `region`, `endpoint`, `tcp`, `credentials`, `force_path_style_urls`, `delete_objects`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/inputs/aws_s3/)
+
+## `aws_sqs`
+
+Consume messages from an AWS SQS URL.
+
+`connector: aws_sqs` · URI `connect+aws-sqs://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `url` | string | required | The SQS URL to consume from. |
+| `max_outstanding_messages` | int | `1000` | The maximum number of outstanding pending messages to be consumed at a given time. |
+
+Advanced: `delete_message`, `reset_visibility`, `max_number_of_messages`, `wait_time_seconds`, `message_timeout`, `region`, `endpoint`, `tcp`, `credentials`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/inputs/aws_sqs/)
 
 ## `azure_blob_storage`
 
@@ -592,6 +666,21 @@ Subscribe to an NSQ instance topic and channel.
 Advanced: `tls`.
 
 [Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/inputs/nsq/)
+
+## `parquet`
+
+Reads and decodes Parquet files into a stream of structured messages.
+
+`connector: parquet` · URI `connect+parquet://`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `paths` | list of string | required | A list of file paths to read from. |
+| `auto_replay_nacks` | bool | `true` | Whether messages that are rejected (nacked) at the output level should be automatically replayed indefinitely, eventually resulting in back pressure if the cause of the rejections is persistent. |
+
+Advanced: `batch_count`.
+
+[Upstream documentation](https://docs.redpanda.com/redpanda-connect/components/inputs/parquet/)
 
 ## `pulsar`
 

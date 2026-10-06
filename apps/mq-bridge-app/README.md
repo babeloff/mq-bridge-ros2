@@ -89,7 +89,7 @@ mqb mcp install          # register with Claude Code / Claude Desktop / Cursor
 - **Middleware chains** — retries, dead-letter queues, deduplication, rate limiting, buffering, transforms, weak-join correlation, and more, wrapping any endpoint.
 - **Built-in web UI** — Svelte-based management for publishers, consumers, routes, runtime status, presets, and imports; the same UI the CLI serves in a browser.
 - **Native plugins** — load an endpoint or middleware this binary never compiled (Pulsar, an in-house transport) from a shared library, via `plugins:` in the config or `--plugin <path>`, and use it by name in routes. No special build needed; plugin paths are read only at startup, so adding one means editing the trusted startup configuration and restarting: [Native plugins](https://marcomq.github.io/mq-bridge/extending/plugins.html).
-- **Observability** — structured JSON logging and a Prometheus metrics endpoint.
+- **Observability** — structured JSON logging, a Prometheus metrics endpoint, and `mqb status` for a live table of everything running on the machine.
 - **Flexible configuration** — hierarchical files (YAML/JSON/TOML) plus environment variables, suited to Container/Kubernetes.
 - **Security & storage** — config security modes (plain / extracted secrets / encrypted config / persistent encrypted history), encryption at rest, and local-first operation.
 - **High performance** — Rust + Tokio: low latency, high concurrency, small memory footprint.
@@ -119,11 +119,11 @@ Use Postman/Bruno when your main job is crafting and sharing API requests; use `
 
 ## Performance
 
-A CSV → JSONL conversion hit **2,824,858 rows/s** (mq-bridge 0.4.12) — ~1.4x DuckDB's all-core copy of the same file, on fewer cores and ~17x less memory. The same job **through an MCP tool call** ran at **2,348,793 rows/s** against that session's 2,824,858 rows/s CLI baseline: the MCP interface costs a *fixed* ~72 ms (route start, plus up to one 50 ms completion poll), not a per-row tax. It costs an agent a *flat* ~385 tokens regardless of row count, because the rows never enter the model's context.
+A CSV → JSONL conversion hit **3,134,796 rows/s** (mq-bridge 0.4.20) — ~1.5x DuckDB's all-core copy of the same file, on fewer cores and ~18x less memory. The same job **through an MCP tool call** ran at **2,466,515 rows/s** against that session's 3,134,796 rows/s CLI baseline: the MCP interface costs a *fixed* ~86 ms (route start, plus up to one 50 ms completion poll), not a per-row tax. It costs an agent a *flat* ~385 tokens regardless of row count, because the rows never enter the model's context.
 
 On a Kafka → file relay using mq-bridge-app's default file format and no transform,
-the same engine was **~65% faster than Sea Streamer** comparing both on the mimalloc
-allocator (~80% against its default-allocator build); the native file-format caveats are
+the same engine was **~78% faster than Sea Streamer** comparing both on the mimalloc
+allocator (~82% against its default-allocator build); the native file-format caveats are
 detailed in the linked benchmark documentation.
 
 → Full numbers, methodology, and knobs: [Performance tuning](https://marcomq.github.io/mq-bridge/operations/tuning.html) and [`benches/etl/README.md`](benches/etl/README.md).

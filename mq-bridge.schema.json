@@ -2410,6 +2410,17 @@
           ],
           "format": "uint64",
           "minimum": 0
+        },
+        "stream": {
+          "description": "Read one open response as `sse` events or `ndjson` lines instead of pages.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HttpBulkStream"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false,
@@ -2456,6 +2467,21 @@
         }
       },
       "additionalProperties": false
+    },
+    "HttpBulkStream": {
+      "description": "How an `http_bulk` input that reads one open response is cut into messages.",
+      "oneOf": [
+        {
+          "description": "Server-sent events; the event id is the read position.",
+          "type": "string",
+          "const": "sse"
+        },
+        {
+          "description": "One JSON document per line.",
+          "type": "string",
+          "const": "ndjson"
+        }
+      ]
     },
     "HttpBulkUpsert": {
       "description": "The `http_bulk` request that writes documents.",

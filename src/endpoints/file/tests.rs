@@ -1826,6 +1826,60 @@ fn test_csv_ends_inside_quotes_tracks_field_starts() {
     assert!(csv_ends_inside_quotes(b"\xef\xbb\xbf\"i\n"));
 }
 
+/// The quote scan jumps between quotes; it must land in the same state as the plain
+/// byte-at-a-time walk, wherever the input is split.
+#[test]
+fn test_csv_quote_state_matches_bytewise_walk() {
+    use super::CsvQuoteState;
+
+    // (in_quotes, field_is_empty, pending_quote) after a byte-wise walk.
+    fn walk(state: (bool, bool, bool), bytes: &[u8]) -> (bool, bool, bool) {
+        let (mut in_quotes, mut field_is_empty, mut pending_quote) = state;
+        for &b in bytes {
+            if pending_quote {
+                pending_quote = false;
+                if b == b'"' {
+                    continue;
+                }
+                in_quotes = false;
+            }
+            if in_quotes {
+                pending_quote = b == b'"';
+            } else if b == b'"' && field_is_empty {
+                in_quotes = true;
+            } else {
+                field_is_empty = b == b',';
+            }
+        }
+        (in_quotes, field_is_empty, pending_quote)
+    }
+
+    // Short tokens exercise every transition; the long run crosses the scalar probe.
+    let tokens: [&[u8]; 5] = [b"\"", b",", b"a", b"\n", &[b'x'; 20]];
+    let mut inputs: Vec<Vec<u8>> = vec![Vec::new()];
+    for _ in 0..6 {
+        inputs = inputs
+            .iter()
+            .flat_map(|prefix| tokens.iter().map(move |t| [prefix.as_slice(), t].concat()))
+            .collect();
+        for input in &inputs {
+            for split in 0..=input.len() {
+                let (head, tail) = input.split_at(split);
+                let mut state = CsvQuoteState::default();
+                state.feed(head);
+                state.feed(tail);
+                let expected = walk(walk((false, true, false), head), tail);
+                assert_eq!(
+                    (state.in_quotes, state.field_is_empty, state.pending_quote),
+                    expected,
+                    "input {:?} split at {split}",
+                    String::from_utf8_lossy(input)
+                );
+            }
+        }
+    }
+}
+
 /// The row decoder that shipped before the fused span parser: one `String` per field,
 /// then a JSON object built from them. Kept here as the executable definition of the
 /// behaviour the fast parser must reproduce byte for byte, quirks included.
@@ -2119,6 +2173,65 @@ fn csv_lone_empty_cell_is_quoted() {
     )
     .unwrap();
     assert_eq!(row, b"\"\"", "a missing value in a one-column file");
+}
+
+/// Rows whose keys follow the header take a path without a key map; every other shape
+/// has to come out the same as before.
+#[test]
+fn csv_rows_encode_alike_in_and_out_of_header_order() {
+    use super::csv_encode_message;
+    let csv = super::CsvDialect::default();
+    let mut header = None;
+    let mut row = Vec::new();
+    csv_encode_message(
+        &raw_msg(r#"{"a":1,"b":"x"}"#),
+        &mut header,
+        &mut row,
+        b"\n",
+        &csv,
+    )
+    .unwrap();
+
+    let cases: &[(&str, &str)] = &[
+        (r#"{"a":2,"b":"y,z"}"#, r#"2,"y,z""#),
+        (r#"{ "a" : 2.50 , "b" : [1, 2] }"#, r#"2.50,"[1, 2]""#),
+        (r#"{"a":8,"b":"say \"hi\""}"#, r#"8,"say ""hi""""#),
+        (r#"{"b":"q","a":3}"#, "3,q"),
+        (r#"{"a":4}"#, "4,"),
+        (r#"{"a":5,"b":6,"c":7}"#, "5,6"),
+        (r#"{"a":1,"a":2,"b":3}"#, "2,3"),
+        (r#"{"a":1,"b":3,"b":4}"#, "1,4"),
+    ];
+    for (payload, expected) in cases {
+        csv_encode_message(&raw_msg(payload), &mut header, &mut row, b"\n", &csv).unwrap();
+        assert_eq!(String::from_utf8_lossy(&row), *expected, "{payload}");
+    }
+    for bad in [r#"{"a":9,"b":1} x"#, r#"{"a":9,"b":"\ud800"}"#, "{}", "[1]"] {
+        assert!(
+            csv_encode_message(&raw_msg(bad), &mut header, &mut row, b"\n", &csv).is_err(),
+            "{bad}"
+        );
+    }
+
+    // Flattened columns: `a.x`, `a.y.z`, `b`.
+    let mut header = None;
+    let first = r#"{"a":{"x":1,"y":{"z":2}},"b":3}"#;
+    csv_encode_message(&raw_msg(first), &mut header, &mut row, b"\n", &csv).unwrap();
+    assert_eq!(header.as_deref().unwrap(), ["a.x", "a.y.z", "b"]);
+    let cases: &[(&str, &str)] = &[
+        (r#"{"a":{"x":4,"y":{"z":"p,q"}},"b":6}"#, r#"4,"p,q",6"#),
+        (r#"{"b":6,"a":{"y":{"z":5},"x":4}}"#, "4,5,6"),
+        (r#"{"a":{"x":4,"y":{}},"b":6}"#, "4,,6"),
+        (r#"{"a":{"x":4,"y":{"z":5,"w":0}},"b":6}"#, "4,5,6"),
+        (r#"{"a":{"x":4,"x":7,"y":{"z":5}},"b":6}"#, "7,5,6"),
+        (r#"{"a.x":4,"a.y.z":5,"b":6}"#, "4,5,6"),
+        (r#"{"a":{"x":4,"y.z":5},"b":6}"#, "4,5,6"),
+        (r#"{"a":7,"b":6}"#, ",,6"),
+    ];
+    for (payload, expected) in cases {
+        csv_encode_message(&raw_msg(payload), &mut header, &mut row, b"\n", &csv).unwrap();
+        assert_eq!(String::from_utf8_lossy(&row), *expected, "{payload}");
+    }
 }
 
 /// Writes `payload` as a new CSV file (header + one row) and frames it back into

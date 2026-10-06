@@ -1,0 +1,53 @@
+docs_to_qdrant:
+  input:
+    postgres_cdc:
+      url: "postgres://app:app@postgres:5432/app"
+      publication: "docs_pub"
+      slot_name: "docs_to_qdrant"
+      consume: capture_all                             # copy existing rows, then follow changes
+      checkpoint_store: "file:///app/checkpoint.json"  # a restart does not repeat the copy
+  output:
+    switch:
+      metadata_key: "postgres.operation"
+      cases:
+        # Deletes carry only the primary key: remove the point, call no model.
+        delete:
+          http_bulk: &qdrant
+            url: "http://qdrant:6333"
+            operation: "${metadata:postgres.operation}"
+            upsert:
+              method: PUT
+              path: /collections/docs/points?wait=true
+              format: json_array
+              envelope: '{"points": {documents}}'
+            delete:
+              path: /collections/docs/points/delete?wait=true
+              envelope: '{"points": {ids}}'
+      # Inserts and updates. Output middlewares run bottom-up.
+      default:
+        middlewares:
+          # 3. Shape the Qdrant point: {id, vector, payload}.
+          - transform:
+              mapping:
+                id: "$.id"
+                vector: "$.embedding.data[0].embedding"
+                "payload.title": "$.title"
+                "payload.body": "$.body"
+          # 2. Call the embeddings API; the response lands in `embedding`.
+          - lookup:
+              from:
+                http: { url: "http://ollama:11434" }
+              metadata:
+                http_path: "/v1/embeddings"
+                http_method: POST
+              into: embedding
+          # 1. Add the fields the embeddings API expects: `model` and `input`.
+          - transform:
+              mapping:
+                id: "$.id"
+                title: "$.title"
+                body: "$.body"
+                input: "$.body"
+                model: { path: "$.model", default: "all-minilm" }
+          - retry: { max_attempts: 5 }
+        http_bulk: *qdrant

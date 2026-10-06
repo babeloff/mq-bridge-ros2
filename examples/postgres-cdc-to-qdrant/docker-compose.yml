@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    command: ["postgres", "-c", "wal_level=logical"]
+    environment: { POSTGRES_USER: app, POSTGRES_PASSWORD: app, POSTGRES_DB: app }
+    volumes: ["./init.sql:/docker-entrypoint-initdb.d/init.sql:ro", "pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d app"]
+      interval: 2s
+      retries: 30
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.0
+    ports: ["127.0.0.1:6333:6333"]
+    volumes: ["qdrant:/qdrant/storage"]
+
+  # Any OpenAI-compatible embeddings API works; Ollama keeps the example offline.
+  ollama:
+    image: ollama/ollama:0.12.3
+    ports: ["127.0.0.1:11434:11434"]
+    volumes: ["ollama:/root/.ollama"]
+
+  # Pulls the embedding model and creates the Qdrant collection, then exits.
+  setup:
+    image: curlimages/curl:8.10.1
+    depends_on: [qdrant, ollama]
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        curl -sS --fail --retry 30 --retry-connrefused --retry-delay 1 \
+          http://ollama:11434/api/pull -d '{"model": "all-minilm", "stream": false}'
+        curl -sS --fail --retry 30 --retry-connrefused --retry-delay 1 http://qdrant:6333/readyz
+        curl -sS --fail http://qdrant:6333/collections/docs >/dev/null 2>&1 || \
+          curl -sS --fail -X PUT http://qdrant:6333/collections/docs \
+            -H 'Content-Type: application/json' \
+            -d '{"vectors": {"size": 384, "distance": "Cosine"}}'
+
+  mq-bridge:
+    image: ghcr.io/marcomq/mq-bridge-app:0.4.18
+    command: ["--config", "/config/routes.yaml"]
+    volumes: ["./routes.yaml:/config/routes.yaml:ro", "state:/app"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      setup: { condition: service_completed_successfully }
+    restart: on-failure
+
+volumes:
+  pgdata:
+  qdrant:
+  ollama:
+  state:

@@ -591,7 +591,8 @@ async function fetchNewMessagesForRunningConsumers() {
     const terminalKey = `${runtime.outcome}:${messageSequence}`;
     if (terminal && finalPollByConsumer[runtimeKey] === terminalKey) continue;
     const lastSeen = Number(lastMessageSequenceByConsumer[runtimeKey] || 0);
-    if (!terminal && messageSequence <= lastSeen && consumerMessagesFor(consumer).length > 0) continue;
+    // A lower sequence is a restarted consumer counting from zero again.
+    if (!terminal && messageSequence === lastSeen && consumerMessagesFor(consumer).length > 0) continue;
     const response = await fetch(`/messages?consumer_id=${encodeURIComponent(runtimeKey)}`);
     if (!response.ok) continue;
     const payload = await response.json();

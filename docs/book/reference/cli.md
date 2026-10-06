@@ -3,13 +3,15 @@
 `mqb` is a single headless binary with three modes: **config mode** (the default —
 run a long-lived bridge, optionally serving the browser UI), the **`copy`** subcommand (an
 ad-hoc one-route job), and the **`mcp`** subcommand (expose the bridge as MCP tools). The
-**`checkpoint`** subcommand inspects and edits a source's resume position.
+**`checkpoint`** subcommand inspects and edits a source's resume position. The
+**`status`** subcommand shows what every `mqb` process on the machine is running.
 
 ```text
 mqb [OPTIONS]                          # config mode
 mqb copy SOURCE TARGET [COPY OPTIONS]  # one-route ad-hoc job
 mqb mcp  [MCP OPTIONS]                 # MCP server
 mqb checkpoint show|reset|set ...      # inspect or edit a resume position
+mqb status [--no-watch] [--json]       # what is running on this machine
 ```
 
 ## Config mode (default)
@@ -414,3 +416,41 @@ mqb mcp uninstall
 
 `--print-config` prints the JSON snippet for a client not written directly. Full tool and
 message reference is in [MCP server](../MCP.md).
+
+## `status` — what is running on this machine
+
+```bash
+mqb status                 # live table, redrawn every second until Ctrl-C
+mqb status --watch 5       # redraw every 5 seconds
+mqb status --no-watch      # one table, then exit
+mqb status --json          # the records as JSON, once
+```
+
+The table redraws by default only on a terminal. Piped output and `--json` print once, so
+scripts end; add `--watch` to keep either going.
+
+One row per route or consumer of every `mqb` process your user is running: a `copy`, a
+headless config run, the web UI, the desktop app or an MCP server. It reads a local status
+registry those processes write to, so it needs no config, starts nothing and connects to no
+endpoint.
+
+```text
+INSTANCE            NAME    FLOW              STATE    RATE      AVG       TOTAL   PENDING  UPTIME
+cli copy [48211]    copy    kafka → postgres  running  8123.4/s  7990.1/s  412034  -        51s
+mcp default [4790]  orders  nats → file       running  210.0/s   198.7/s   23844   3        2m00s
+```
+
+| Column | Meaning |
+| --- | --- |
+| `INSTANCE` | Kind of process, its workspace and its pid. |
+| `FLOW` | Endpoint types only, never URLs. |
+| `STATE` | `running`, `unhealthy`, `completed`, `stopped` or `failed`; `idle` for a process that runs nothing. |
+| `RATE` / `AVG` | Messages per second now, and averaged over the route's lifetime. |
+| `TOTAL` | Messages moved since the route started. |
+| `PENDING` | Messages waiting at the source, where the endpoint reports it. |
+
+A process leaves the table within 7 seconds of exiting. `--json` prints an array of instance
+records, each with its `consumers`, `publishers` and `routes`; with `--watch` it prints one
+compact array per line. Errors appear as the word `error` unless `MQB_STATUS_SHOW_ERRORS=1`
+is set for both the reporting process and `mqb status`; see
+[Runtime route status](../operations/observability.md#runtime-route-status).

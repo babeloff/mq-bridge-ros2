@@ -69,14 +69,26 @@ Logs are structured JSON, suited to shipping into a log aggregator. Two things t
 
 ## Runtime route status
 
-For a running bridge, query route health rather than reading logs:
+For a running bridge, query route health rather than reading logs. Every `mqb` process of your
+user (a `copy`, a headless config run, the web UI, the desktop app, an MCP server) reports its
+routes to a local status registry, and three views read it:
 
-- **In the UI**, the runtime status view shows live connection health and message counts per
-  publisher/consumer/route.
+- **`mqb status`** prints one row per route and consumer on the machine: state, current and
+  average rate, total, pending and uptime. It redraws every second; `--no-watch` prints once and `--json`
+  prints the records.
+  See [the CLI reference](../reference/cli.md#status--what-is-running-on-this-machine).
+- **In the UI**, the **Status** tab shows the same rows with the last 60 seconds of each rate.
+  The publisher and consumer views show health and message counts for this instance.
+- **Through the MCP server**, `bridge_status` returns the same records.
 - **Through the MCP server**, `list_routes` and `route_status` report `messages`,
   `messages_per_second` (instantaneous), `elapsed_s`, and `average_messages_per_second`. For a
   running route read the instantaneous rate; for a finished job read the average. See
   [MCP route status](../MCP.md#route-status).
+
+A process drops out of these views within 7 seconds of exiting. Records carry endpoint types,
+not URLs or credentials, and an error appears only as the word `error`. To see the error text,
+set `MQB_STATUS_SHOW_ERRORS=1` for both the process that runs the route and the one that reads
+the status; error text can contain connection details, so leave it off on shared machines.
 
 ## Reading throughput honestly
 
