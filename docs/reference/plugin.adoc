@@ -153,13 +153,13 @@ Python and Node.js both hand the package directory to mq-bridge's generic loader
 | Dependency | Requirement
 
 | `mq-bridge` crate
-| `0.4.13` or later, below `0.5`
+| `0.4.19` or later, below `0.5`
 
 | npm `mq-bridge`
-| `>=0.4.13 <0.5.0` (a peer dependency)
+| `>=0.4.19 <0.5.0` (a peer dependency)
 
 | `mq-bridge-py`
-| `0.4.13` or later. Deliberately *not* a declared dependency, so the two upgrade independently.
+| `0.4.16` or later. Deliberately *not* a declared dependency, so the two upgrade independently.
 |===
 
 == Artifact identity
