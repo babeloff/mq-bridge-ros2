@@ -63,6 +63,10 @@ pub struct QosConfig {
     pub durability: Durability,
     pub history: History,
     pub depth: u32,
+    /// When true, a publisher waits for a compatible reader before accepting
+    /// each message. When false, publishing keeps ROS 2's fire-and-forget
+    /// behavior and the route may commit after the send attempt returns.
+    pub require_subscribers: bool,
 }
 
 impl Default for QosConfig {
@@ -72,6 +76,7 @@ impl Default for QosConfig {
             durability: Durability::default(),
             history: History::default(),
             depth: DEFAULT_DEPTH,
+            require_subscribers: false,
         }
     }
 }
@@ -490,6 +495,7 @@ mod tests {
     #[test]
     fn qos_defaults_match_the_ros_topic_defaults() {
         let profile = QosConfig::default().profile();
+        assert!(!QosConfig::default().require_subscribers);
         assert_eq!(profile.reliability, QoSReliabilityPolicy::Reliable);
         assert_eq!(profile.durability, QoSDurabilityPolicy::Volatile);
         assert_eq!(
@@ -498,6 +504,15 @@ mod tests {
                 depth: DEFAULT_DEPTH
             }
         );
+    }
+
+    #[test]
+    fn require_subscribers_is_configurable() {
+        let endpoint = resolved(
+            "route",
+            serde_json::json!({"qos": {"require_subscribers": true}}),
+        );
+        assert!(endpoint.config.qos.require_subscribers);
     }
 
     #[test]

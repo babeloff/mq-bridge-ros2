@@ -98,6 +98,7 @@ input:
         durability: transient_local           # volatile | transient_local | system_default
         history: keep_last                    # keep_last | keep_all
         depth: 100
+        require_subscribers: false             # wait for a matched reader before send
 ```
 
 Names are checked, not repaired. A name the endpoint *derives* from the route
@@ -150,6 +151,13 @@ itself. Note that a `best_effort` publisher and a `reliable` subscription do
 There is no broker, so retention lives in the *publisher*: a publishing process
 that exits takes its retained samples with it. `transient_local` lets a late
 subscriber catch up with a **running** publisher; it is not a durable log.
+
+`qos.require_subscribers` is `false` by default. Set it to `true` when the
+route must wait for a compatible reader before `send_batch` succeeds. A missing
+reader then produces a retryable result, allowing mq-bridge retry middleware
+to hold the source message until discovery completes. With the default
+`false`, ROS output remains fire-and-forget and a successful send does not mean
+that a reader processed the message.
 
 ### What ROS 2 does not provide
 

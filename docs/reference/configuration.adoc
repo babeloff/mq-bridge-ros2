@@ -182,6 +182,11 @@ The publisher and the subscription of one route use the same profile, so a route
 | integer ≥ 1
 | `10`
 | Queue length under `keep_last`. Ignored under `keep_all`.
+
+| `require_subscribers`
+| `true`, `false`
+| `false`
+| When true, a publisher returns a retryable result until a compatible reader is matched. When false, publishing is fire-and-forget.
 |===
 
 `depth` must be at least 1 when `history` is `keep_last`; a `depth` of 0 with `keep_all` is accepted because the value is unused.

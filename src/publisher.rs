@@ -7,16 +7,15 @@ use rclrs::{
 };
 
 use crate::{
-    config::{self, Durability},
+    config,
     message,
     runtime::{self, Ros2Runtime},
 };
 
 struct Ros2Publisher {
     publisher: DynamicPublisher,
-    /// A volatile writer loses samples published before discovery matches a
-    /// reader. Transient-local writers retain them, so they may publish before
-    /// a subscription exists.
+    /// When enabled, a publisher waits until discovery has matched a compatible
+    /// reader before allowing the route to commit the send.
     require_reader: bool,
     /// Also the factory for the messages being sent: a dynamic message can only
     /// be built from the metadata of its own type.
@@ -41,7 +40,7 @@ pub(crate) async fn create(
         .map_err(non_retryable)?;
 
     let qos = endpoint.config.qos.profile();
-    let require_reader = requires_matched_reader(endpoint.config.qos.durability);
+    let require_reader = endpoint.config.qos.require_subscribers;
     let (runtime, publisher) = Ros2Runtime::start(&endpoint, |node| {
         let mut options = PublisherOptions::new(&endpoint.topic);
         options.qos = qos;
@@ -66,9 +65,9 @@ pub(crate) async fn create(
 impl Ros2Publisher {
     /// Publishing is synchronous and produces no receipt, so this is the whole
     /// of sending one message. A successful `publish` still does not confirm
-    /// that a reader processed the message; the count check only prevents a
-    /// volatile sample from being accepted when no compatible reader has
-    /// matched yet. Note that no `.await` may appear here: a
+    /// that a reader processed the message; when `require_subscribers` is set,
+    /// the count check prevents acceptance until a compatible reader has
+    /// matched. Note that no `.await` may appear here: a
     /// `DynamicMessage` owns raw type-support memory and is not `Send`.
     fn publish(&self, message: &CanonicalMessage) -> Result<(), PublisherError> {
         let mut outgoing = self
@@ -173,10 +172,6 @@ fn publisher_error(error: RclrsError) -> PublisherError {
     }
 }
 
-fn requires_matched_reader(durability: Durability) -> bool {
-    !matches!(durability, Durability::TransientLocal)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,10 +204,4 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn only_volatile_publishers_require_a_matched_reader() {
-        assert!(requires_matched_reader(Durability::Volatile));
-        assert!(!requires_matched_reader(Durability::TransientLocal));
-        assert!(requires_matched_reader(Durability::SystemDefault));
-    }
 }

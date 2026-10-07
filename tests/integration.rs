@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use mq_bridge::{
     traits::{MessageDisposition, MessagePublisher},
-    CanonicalMessage,
+    CanonicalMessage, SentBatch,
 };
 
 /// Both tests share one process, and a second `register()` is an error.
@@ -128,6 +128,37 @@ async fn ros2_publisher_consumer_round_trip_preserves_payload_order() {
     );
 
     consumer.close().await.expect("close ROS 2 consumer");
+}
+
+/// The optional subscriber requirement must report an unmatched publish as
+/// retryable, which gives route middleware a chance to hold the source message
+/// until ROS discovery completes.
+#[tokio::test]
+#[ignore = "requires a sourced ROS 2 installation"]
+async fn require_subscribers_returns_a_retryable_failure_without_a_reader() {
+    let factory = factory().await;
+    let topic = test_topic("require_subscribers");
+    let route_name = "require-subscribers";
+    let mut value = config(&topic, "require_subscribers_out");
+    value["qos"]["require_subscribers"] = serde_json::json!(true);
+
+    let publisher = factory
+        .create_publisher(route_name, &value)
+        .await
+        .expect("create ROS 2 publisher");
+    let outcome = publisher
+        .send_batch(vec![CanonicalMessage::from(b"waiting".to_vec())])
+        .await
+        .expect("unmatched publishes are reported per message");
+
+    let SentBatch::Partial { failed, .. } = outcome else {
+        panic!("an unmatched required subscriber must fail the message");
+    };
+    assert_eq!(failed.len(), 1);
+    assert!(matches!(
+        &failed[0].1,
+        mq_bridge::errors::PublisherError::Retryable(_)
+    ));
 }
 
 /// The ROS 2 counterpart of reading a backlog: the publish deliberately happens
