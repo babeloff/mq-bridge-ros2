@@ -16,6 +16,7 @@ use crate::config::Resolved;
 /// A context per endpoint, rather than one per process, because an endpoint may
 /// select its own `domain_id`, and because a route being torn down has to
 /// release its ROS resources without disturbing any other route.
+// tag::ros2-runtime[]
 pub(crate) struct Ros2Runtime {
     /// The publisher and the subscription each hold their own reference to the
     /// node's handle. This one keeps the node in the ROS graph for as long as
@@ -25,8 +26,10 @@ pub(crate) struct Ros2Runtime {
     /// Taken by whichever of [`Ros2Runtime::shutdown`] and `drop` runs first.
     spinner: Mutex<Option<JoinHandle<()>>>,
 }
+// end::ros2-runtime[]
 
 impl Ros2Runtime {
+    // tag::runtime-start[]
     /// Brings up the context and node, hands the node to `create` so the
     /// endpoint can build its publisher or subscription, and only then starts
     /// spinning.
@@ -72,13 +75,17 @@ impl Ros2Runtime {
             primitive,
         ))
     }
+    // end::runtime-start[]
 
+    // tag::runtime-node[]
     pub(crate) fn node(&self) -> &Node {
         &self.node
     }
+    // end::runtime-node[]
 
     /// Stops the executor and waits for its thread. Idempotent, so an explicit
     /// close followed by a drop does the work once.
+    // tag::runtime-shutdown[]
     pub(crate) fn shutdown(&self) {
         self.commands.halt_spinning();
         if let Some(spinner) = lock(&self.spinner).take() {
@@ -87,21 +94,26 @@ impl Ros2Runtime {
             let _ = spinner.join();
         }
     }
+    // end::runtime-shutdown[]
 }
 
+// tag::runtime-drop[]
 impl Drop for Ros2Runtime {
     fn drop(&mut self) {
         self.shutdown();
     }
 }
+// end::runtime-drop[]
 
 /// The mutex only guards a `JoinHandle`, and a poisoned lock still holds a
 /// perfectly good one, so recovering beats propagating a second panic.
+// tag::runtime-lock[]
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+// end::runtime-lock[]
 
 /// Whether a ROS failure will fail identically however many times it is
 /// retried.
@@ -111,6 +123,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// reconnect interval forever. A message type that is not installed, a package
 /// that was never sourced and a name `rcl` rejects all belong in the first
 /// group — waiting will not install a package.
+// tag::is-permanent[]
 pub(crate) fn is_permanent(error: &RclrsError) -> bool {
     match error {
         RclrsError::DynamicMessageError { .. } | RclrsError::StringContainsNul { .. } => true,
@@ -128,3 +141,4 @@ pub(crate) fn is_permanent(error: &RclrsError) -> bool {
         _ => false,
     }
 }
+// end::is-permanent[]

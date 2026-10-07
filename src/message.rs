@@ -10,8 +10,10 @@ use rosidl_runtime_rs::Sequence;
 /// Metadata a received message carries, so a downstream route can tell where a
 /// payload came from. A ROS 2 message has no property map of its own, so this
 /// is the whole of it, and metadata cannot survive a round trip through ROS.
+// tag::metadata-keys[]
 pub(crate) const TOPIC_KEY: &str = "ros2_topic";
 pub(crate) const MESSAGE_TYPE_KEY: &str = "ros2_message_type";
+// end::metadata-keys[]
 
 /// How a message field can carry an opaque payload.
 ///
@@ -19,15 +21,18 @@ pub(crate) const MESSAGE_TYPE_KEY: &str = "ros2_message_type";
 /// cannot hold bytes fails when the endpoint is created rather than when its
 /// first message arrives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// tag::carrier[]
 pub(crate) enum Carrier {
     /// A `string` or `string<=N` field. The payload has to be valid UTF-8.
     Text,
     /// A `uint8`, `byte` or `char` collection, in any of its shapes.
     Bytes,
 }
+// end::carrier[]
 
 /// Resolves the payload field of a message type, reporting what else was on
 /// offer when the field does not exist or cannot hold a payload.
+// tag::carrier-for[]
 pub(crate) fn carrier_for(structure: &MessageStructure, field: &str) -> Result<Carrier> {
     let Some(info) = structure.get_field_info(field) else {
         let available = structure
@@ -48,8 +53,10 @@ pub(crate) fn carrier_for(structure: &MessageStructure, field: &str) -> Result<C
         )
     })
 }
+// end::carrier-for[]
 
 /// The rule itself, over a field's declared type alone.
+// tag::carrier-rule[]
 fn carrier(base_type: &BaseType, value_kind: ValueKind) -> Result<Carrier> {
     match (base_type, value_kind) {
         (BaseType::String | BaseType::BoundedString { .. }, ValueKind::Simple) => Ok(Carrier::Text),
@@ -66,7 +73,9 @@ fn carrier(base_type: &BaseType, value_kind: ValueKind) -> Result<Carrier> {
         )),
     }
 }
+// end::carrier-rule[]
 
+// tag::describe-type[]
 fn describe(base_type: &BaseType) -> String {
     match base_type {
         // The nested structure's `Debug` would print the whole message tree.
@@ -74,7 +83,9 @@ fn describe(base_type: &BaseType) -> String {
         other => format!("{other:?}"),
     }
 }
+// end::describe-type[]
 
+// tag::describe-kind[]
 fn describe_kind(value_kind: ValueKind) -> &'static str {
     match value_kind {
         ValueKind::Simple => "single value",
@@ -83,8 +94,10 @@ fn describe_kind(value_kind: ValueKind) -> &'static str {
         ValueKind::BoundedSequence { .. } => "bounded sequence",
     }
 }
+// end::describe-kind[]
 
 /// Reads the payload field of a received message.
+// tag::payload-of[]
 pub(crate) fn payload_of(message: &DynamicMessage, field: &str) -> Result<Vec<u8>> {
     let Some(value) = message.get(field) else {
         return Err(anyhow!("received message has no field {field:?}"));
@@ -112,8 +125,10 @@ pub(crate) fn payload_of(message: &DynamicMessage, field: &str) -> Result<Vec<u8
         _ => Err(anyhow!("field {field:?} cannot carry a payload")),
     }
 }
+// end::payload-of[]
 
 /// Writes a payload into the payload field of a message about to be published.
+// tag::set-payload[]
 pub(crate) fn set_payload(message: &mut DynamicMessage, field: &str, payload: &[u8]) -> Result<()> {
     let Some(value) = message.get_mut(field) else {
         return Err(anyhow!("message has no field {field:?}"));
@@ -176,21 +191,27 @@ pub(crate) fn set_payload(message: &mut DynamicMessage, field: &str, payload: &[
         _ => Err(anyhow!("field {field:?} cannot carry a payload")),
     }
 }
+// end::set-payload[]
 
 /// Copies a ROS string out byte for byte. `to_string()` is lossy for bytes that
 /// are not valid UTF-8 and `to_cstr()` stops at an interior nul, so neither is
 /// safe for a payload this endpoint is only passing through.
+// tag::text-bytes[]
 fn text_bytes(text: &rosidl_runtime_rs::String) -> Vec<u8> {
     text.iter().map(|&character| character as u8).collect()
 }
+// end::text-bytes[]
 
+// tag::as-text[]
 fn as_text<'a>(field: &str, payload: &'a [u8]) -> Result<&'a str> {
     std::str::from_utf8(payload).map_err(|error| {
         anyhow!("field {field:?} is a ROS 2 string field, so the payload must be UTF-8: {error}")
     })
 }
+// end::as-text[]
 
 /// Builds the canonical message a route sees, tagged with where it came from.
+// tag::to-canonical[]
 pub(crate) fn to_canonical(payload: Vec<u8>, topic: &str, message_type: &str) -> CanonicalMessage {
     let mut message = CanonicalMessage::from(payload);
     message
@@ -201,6 +222,7 @@ pub(crate) fn to_canonical(payload: Vec<u8>, topic: &str, message_type: &str) ->
         .insert(MESSAGE_TYPE_KEY.to_owned(), message_type.to_owned());
     message
 }
+// end::to-canonical[]
 
 #[cfg(test)]
 mod tests {

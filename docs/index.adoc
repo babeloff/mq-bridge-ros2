@@ -117,6 +117,8 @@ Use these pages when you need exact details.
   describes the exported symbol, package layout, and artifact identity.
 * xref:reference/delivery-semantics.adoc[Delivery semantics]
   records what a successful ROS 2 publish allows the route to commit.
+* xref:reference/implementation.adoc[Implementation reference]
+  exposes the tagged source objects behind the endpoint.
 * xref:reference/pixi-tasks.adoc[Pixi tasks]
   lists the project's development and release commands.
 

@@ -11,6 +11,7 @@ use crate::{
     runtime::{self, Ros2Runtime},
 };
 
+// tag::ros2-publisher[]
 struct Ros2Publisher {
     publisher: DynamicPublisher,
     /// When enabled, a publisher waits until discovery has matched a compatible
@@ -24,7 +25,9 @@ struct Ros2Publisher {
     /// it belongs to is torn down.
     runtime: Ros2Runtime,
 }
+// end::ros2-publisher[]
 
+// tag::create-publisher[]
 pub(crate) async fn create(
     route_name: &str,
     value: &serde_json::Value,
@@ -60,6 +63,7 @@ pub(crate) async fn create(
         runtime,
     }))
 }
+// end::create-publisher[]
 
 impl Ros2Publisher {
     /// Publishing is synchronous and produces no receipt, so this is the whole
@@ -138,27 +142,36 @@ impl MessagePublisher for Ros2Publisher {
     /// reader is the `reliability` policy's job, not a flush's. The route may
     /// commit after this publisher returns, but that commit only records that
     /// the route accepted the send attempt; ROS output remains fire-and-forget.
+    // tag::flush[]
     async fn flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
+    // end::flush[]
 
+    // tag::publisher-as-any[]
     fn as_any(&self) -> &dyn Any {
         self
     }
+    // end::publisher-as-any[]
 }
 
+// tag::publisher-drop[]
 impl Drop for Ros2Publisher {
     fn drop(&mut self) {
         self.runtime.shutdown();
     }
 }
+// end::publisher-drop[]
 
+// tag::publisher-non-retryable[]
 fn non_retryable(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(PublisherError::NonRetryable(error))
 }
+// end::publisher-non-retryable[]
 
 /// Leaving a transient failure unclassified is deliberate: the route then treats
 /// it as a connection failure and retries on its reconnect interval.
+// tag::publisher-setup-error[]
 fn setup_error(error: RclrsError) -> anyhow::Error {
     if runtime::is_permanent(&error) {
         non_retryable(anyhow::Error::new(error))
@@ -166,7 +179,9 @@ fn setup_error(error: RclrsError) -> anyhow::Error {
         anyhow::Error::new(error)
     }
 }
+// end::publisher-setup-error[]
 
+// tag::publisher-error[]
 fn publisher_error(error: RclrsError) -> PublisherError {
     if runtime::is_permanent(&error) {
         PublisherError::NonRetryable(anyhow::Error::new(error))
@@ -174,6 +189,7 @@ fn publisher_error(error: RclrsError) -> PublisherError {
         PublisherError::Retryable(anyhow::Error::new(error))
     }
 }
+// end::publisher-error[]
 
 #[cfg(test)]
 mod tests {

@@ -5,11 +5,13 @@ use serde::Deserialize;
 
 /// The message type a route carries when its configuration does not name one.
 /// `std_msgs/msg/String` is what most ROS 2 graphs use for opaque text.
+// tag::config-constants[]
 const DEFAULT_MESSAGE_TYPE: &str = "std_msgs/msg/String";
 /// The field of that message the payload is read from and written to.
 const DEFAULT_PAYLOAD_FIELD: &str = "data";
 /// Matches the depth of `rmw`'s own default profile.
 const DEFAULT_DEPTH: u32 = 10;
+// end::config-constants[]
 
 /// The `RELIABILITY` policy, as a route spells it.
 // tag::reliability[]
@@ -148,23 +150,29 @@ pub struct Ros2Config {
 }
 // end::ros2-config[]
 
+// tag::default-message-type[]
 fn default_message_type() -> String {
     DEFAULT_MESSAGE_TYPE.to_owned()
 }
+// end::default-message-type[]
 
+// tag::default-payload-field[]
 fn default_payload_field() -> String {
     DEFAULT_PAYLOAD_FIELD.to_owned()
 }
+// end::default-payload-field[]
 
 /// A configuration with every default filled in and every name checked, so
 /// nothing downstream has to ask whether a name is usable.
 #[derive(Clone, Debug, PartialEq, Eq)]
+// tag::resolved-config[]
 pub(crate) struct Resolved {
     pub config: Ros2Config,
     pub node: String,
     pub namespace: String,
     pub topic: String,
 }
+// end::resolved-config[]
 
 /// Which end of a route an endpoint is.
 ///
@@ -173,24 +181,29 @@ pub(crate) struct Resolved {
 /// nodes called the same thing, which `rcl` warns about and which makes
 /// `ros2 node list` ambiguous.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// tag::direction[]
 pub(crate) enum Direction {
     In,
     Out,
 }
+// end::direction[]
 
 impl Direction {
+    // tag::direction-suffix[]
     fn suffix(self) -> &'static str {
         match self {
             Direction::In => "_in",
             Direction::Out => "_out",
         }
     }
+    // end::direction-suffix[]
 }
 
 /// A rejected configuration cannot heal by reconnecting, so both constructors
 /// below hand the route an error classified as permanent. An unclassified
 /// `anyhow::Error` reaches the route as a connection failure, which it retries
 /// on its reconnect interval forever.
+// tag::resolve-consumer[]
 pub(crate) fn resolve_for_consumer(
     route_name: &str,
     value: &serde_json::Value,
@@ -198,7 +211,9 @@ pub(crate) fn resolve_for_consumer(
     resolve(route_name, value, Direction::In)
         .map_err(|error| anyhow::Error::new(ConsumerError::Permanent(error)))
 }
+// end::resolve-consumer[]
 
+// tag::resolve-publisher[]
 pub(crate) fn resolve_for_publisher(
     route_name: &str,
     value: &serde_json::Value,
@@ -206,7 +221,9 @@ pub(crate) fn resolve_for_publisher(
     resolve(route_name, value, Direction::Out)
         .map_err(|error| anyhow::Error::new(PublisherError::NonRetryable(error)))
 }
+// end::resolve-publisher[]
 
+// tag::resolve[]
 fn resolve(
     route_name: &str,
     value: &serde_json::Value,
@@ -262,10 +279,12 @@ fn resolve(
         topic,
     })
 }
+// end::resolve[]
 
 /// Rewrites an arbitrary route name into something a ROS node or topic can be
 /// called: `[A-Za-z_][A-Za-z0-9_]*`. Route names routinely contain hyphens and
 /// dots, and a uuid-suffixed one starts with a digit often enough to matter.
+// tag::sanitize[]
 fn sanitize(route_name: &str) -> String {
     let mut name: String = route_name
         .chars()
@@ -286,8 +305,10 @@ fn sanitize(route_name: &str) -> String {
     }
     name
 }
+// end::sanitize[]
 
 /// One segment of a ROS name.
+// tag::is-name-token[]
 fn is_name_token(token: &str) -> bool {
     let mut characters = token.chars();
     characters
@@ -295,7 +316,9 @@ fn is_name_token(token: &str) -> bool {
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
         && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
+// end::is-name-token[]
 
+// tag::validate-name-token[]
 fn validate_name_token(name: &str) -> anyhow::Result<()> {
     if is_name_token(name) {
         Ok(())
@@ -305,7 +328,9 @@ fn validate_name_token(name: &str) -> anyhow::Result<()> {
         ))
     }
 }
+// end::validate-name-token[]
 
+// tag::validate-namespace[]
 fn validate_namespace(namespace: &str) -> anyhow::Result<()> {
     if namespace == "/" {
         return Ok(());
@@ -323,7 +348,9 @@ fn validate_namespace(namespace: &str) -> anyhow::Result<()> {
         ))
     }
 }
+// end::validate-namespace[]
 
+// tag::validate-topic[]
 fn validate_topic(topic: &str) -> anyhow::Result<()> {
     // `/name` is absolute and `~/name` is private to the node; anything else is
     // relative to the namespace. `rcl` expands all three, this only checks the
@@ -340,9 +367,11 @@ fn validate_topic(topic: &str) -> anyhow::Result<()> {
         ))
     }
 }
+// end::validate-topic[]
 
 /// The same shape `rclrs::MessageTypeName` parses. Checking it here makes a
 /// typo a permanent error instead of a connection failure the route retries.
+// tag::validate-message-type[]
 fn validate_message_type(message_type: &str) -> anyhow::Result<()> {
     let parts: Vec<&str> = message_type.split('/').collect();
     if let [package, "msg", type_name] = parts[..] {
@@ -355,6 +384,7 @@ fn validate_message_type(message_type: &str) -> anyhow::Result<()> {
          for example std_msgs/msg/String"
     ))
 }
+// end::validate-message-type[]
 
 #[cfg(test)]
 mod tests {

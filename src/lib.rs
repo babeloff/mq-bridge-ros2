@@ -68,6 +68,7 @@ pub fn register() -> anyhow::Result<()> {
 
 #[async_trait]
 impl CustomEndpointFactory for Ros2Factory {
+    // tag::factory-create-consumer[]
     async fn create_consumer(
         &self,
         route_name: &str,
@@ -75,7 +76,9 @@ impl CustomEndpointFactory for Ros2Factory {
     ) -> anyhow::Result<Box<dyn MessageConsumer>> {
         consumer::create(route_name, value).await
     }
+    // end::factory-create-consumer[]
 
+    // tag::factory-create-publisher[]
     async fn create_publisher(
         &self,
         route_name: &str,
@@ -83,4 +86,5 @@ impl CustomEndpointFactory for Ros2Factory {
     ) -> anyhow::Result<Box<dyn MessagePublisher>> {
         publisher::create(route_name, value).await
     }
+    // end::factory-create-publisher[]
 }

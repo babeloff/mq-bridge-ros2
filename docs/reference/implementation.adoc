@@ -1,0 +1,460 @@
+= Implementation reference
+:toc: left
+:icons: font
+
+This page exposes the tagged implementation objects that support the public endpoint.
+The configuration, plugin, and delivery pages include the public objects and the core delivery path.
+The excerpts below cover the remaining source objects so the reference surface stays synchronized with compilable Rust.
+
+== Configuration resolution
+
+=== `config-constants`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=config-constants]
+----
+
+=== `default-message-type`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=default-message-type]
+----
+
+=== `default-payload-field`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=default-payload-field]
+----
+
+=== `resolved-config`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=resolved-config]
+----
+
+=== `direction`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=direction]
+----
+
+=== `direction-suffix`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=direction-suffix]
+----
+
+=== `resolve-consumer`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=resolve-consumer]
+----
+
+=== `resolve-publisher`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=resolve-publisher]
+----
+
+=== `resolve`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=resolve]
+----
+
+=== `sanitize`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=sanitize]
+----
+
+=== `is-name-token`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=is-name-token]
+----
+
+=== `validate-name-token`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=validate-name-token]
+----
+
+=== `validate-namespace`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=validate-namespace]
+----
+
+=== `validate-topic`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=validate-topic]
+----
+
+=== `validate-message-type`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=validate-message-type]
+----
+
+== Consumer
+
+=== `consumer-timing`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=consumer-timing]
+----
+
+=== `inbox`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=inbox]
+----
+
+=== `inbox-new`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=inbox-new]
+----
+
+=== `inbox-push`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=inbox-push]
+----
+
+=== `inbox-pop`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=inbox-pop]
+----
+
+=== `inbox-wait`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=inbox-wait]
+----
+
+=== `inbox-discarded`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=inbox-discarded]
+----
+
+=== `consumer-lock`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=consumer-lock]
+----
+
+=== `ros2-consumer`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=ros2-consumer]
+----
+
+=== `create-consumer`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=create-consumer]
+----
+
+=== `commit-requires-order`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=commit-requires-order]
+----
+
+=== `set-exit-on-empty`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=set-exit-on-empty]
+----
+
+=== `on-disconnect-hook`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=on-disconnect-hook]
+----
+
+=== `receive-batch`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=receive-batch]
+----
+
+=== `consumer-as-any`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=consumer-as-any]
+----
+
+=== `message-wait`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=message-wait]
+----
+
+=== `consumer-permanent`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=consumer-permanent]
+----
+
+=== `consumer-setup-error`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=consumer-setup-error]
+----
+
+=== `validate-disposition-count`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=validate-disposition-count]
+----
+
+== Message mapping
+
+=== `metadata-keys`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=metadata-keys]
+----
+
+=== `carrier`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=carrier]
+----
+
+=== `carrier-for`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=carrier-for]
+----
+
+=== `carrier-rule`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=carrier-rule]
+----
+
+=== `describe-type`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=describe-type]
+----
+
+=== `describe-kind`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=describe-kind]
+----
+
+=== `payload-of`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=payload-of]
+----
+
+=== `set-payload`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=set-payload]
+----
+
+=== `text-bytes`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=text-bytes]
+----
+
+=== `as-text`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=as-text]
+----
+
+=== `to-canonical`
+
+[source,rust%collapsible]
+----
+include::../../src/message.rs[tag=to-canonical]
+----
+
+== Runtime
+
+=== `ros2-runtime`
+
+[source,rust%collapsible]
+----
+include::../../src/runtime.rs[tag=ros2-runtime]
+----
+
+=== `runtime-start`
+
+[source,rust%collapsible]
+----
+include::../../src/runtime.rs[tag=runtime-start]
+----
+
+=== `runtime-node`
+
+[source,rust%collapsible]
+----
+include::../../src/runtime.rs[tag=runtime-node]
+----
+
+=== `runtime-shutdown`
+
+[source,rust%collapsible]
+----
+include::../../src/runtime.rs[tag=runtime-shutdown]
+----
+
+=== `runtime-drop`
+
+[source,rust%collapsible]
+----
+include::../../src/runtime.rs[tag=runtime-drop]
+----
+
+=== `runtime-lock`
+
+[source,rust%collapsible]
+----
+include::../../src/runtime.rs[tag=runtime-lock]
+----
+
+=== `is-permanent`
+
+[source,rust%collapsible]
+----
+include::../../src/runtime.rs[tag=is-permanent]
+----
+
+== Publisher
+
+=== `ros2-publisher`
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=ros2-publisher]
+----
+
+=== `create-publisher`
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=create-publisher]
+----
+
+=== `flush`
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=flush]
+----
+
+=== `publisher-as-any`
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=publisher-as-any]
+----
+
+=== `publisher-drop`
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=publisher-drop]
+----
+
+=== `publisher-non-retryable`
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=publisher-non-retryable]
+----
+
+=== `publisher-setup-error`
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=publisher-setup-error]
+----
+
+=== `publisher-error`
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=publisher-error]
+----
+
+== Factory
+
+=== `factory-create-consumer`
+
+[source,rust%collapsible]
+----
+include::../../src/lib.rs[tag=factory-create-consumer]
+----
+
+=== `factory-create-publisher`
+
+[source,rust%collapsible]
+----
+include::../../src/lib.rs[tag=factory-create-publisher]
+----
+
+== See also
+
+* xref:configuration.adoc[Endpoint configuration]
+* xref:plugin.adoc[Plugin interface]
+* xref:delivery-semantics.adoc[Delivery semantics]
+

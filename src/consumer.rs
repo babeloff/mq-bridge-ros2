@@ -29,8 +29,10 @@ use crate::{
 
 /// Only applied while draining, so an idle topic yields an empty batch and lets
 /// `exit_on_empty` fire. Live consumption blocks until a message arrives.
+// tag::consumer-timing[]
 const FIRST_MESSAGE_WAIT: Duration = Duration::from_millis(250);
 const NEXT_MESSAGE_WAIT: Duration = Duration::from_millis(5);
+// end::consumer-timing[]
 
 /// The hand-off between the ROS callback, which pushes, and `receive_batch`,
 /// which pulls. `rclrs` exposes no way to take a message from a subscription on
@@ -41,14 +43,17 @@ const NEXT_MESSAGE_WAIT: Duration = Duration::from_millis(5);
 /// discards the oldest beyond that, which is what a KEEP_LAST reader queue
 /// upstream already does, and `keep_all` holds everything. So the policy a
 /// route asked ROS for is the policy it also gets on this side of the callback.
+// tag::inbox[]
 struct Inbox {
     queue: Mutex<VecDeque<CanonicalMessage>>,
     arrived: Notify,
     capacity: Option<usize>,
     discarded: AtomicU64,
 }
+// end::inbox[]
 
 impl Inbox {
+    // tag::inbox-new[]
     fn new(capacity: Option<usize>) -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
@@ -57,7 +62,9 @@ impl Inbox {
             discarded: AtomicU64::new(0),
         }
     }
+    // end::inbox-new[]
 
+    // tag::inbox-push[]
     fn push(&self, message: CanonicalMessage) {
         {
             let mut queue = lock(&self.queue);
@@ -74,28 +81,38 @@ impl Inbox {
         // a failed `pop` and the `await` below cannot be missed.
         self.arrived.notify_one();
     }
+    // end::inbox-push[]
 
+    // tag::inbox-pop[]
     fn pop(&self) -> Option<CanonicalMessage> {
         lock(&self.queue).pop_front()
     }
+    // end::inbox-pop[]
 
+    // tag::inbox-wait[]
     async fn wait(&self) {
         self.arrived.notified().await;
     }
+    // end::inbox-wait[]
 
+    // tag::inbox-discarded[]
     fn discarded(&self) -> u64 {
         self.discarded.load(Ordering::Relaxed)
     }
+    // end::inbox-discarded[]
 }
 
 /// The queue only ever holds messages, so a poisoned lock still holds a usable
 /// queue and recovering beats turning one panic into two.
+// tag::consumer-lock[]
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+// end::consumer-lock[]
 
+// tag::ros2-consumer[]
 struct Ros2Consumer {
     /// Dropping this stops delivery, which is the only reason it is held.
     #[allow(dead_code)]
@@ -106,7 +123,9 @@ struct Ros2Consumer {
     runtime: Ros2Runtime,
     exit_on_empty: bool,
 }
+// end::ros2-consumer[]
 
+// tag::create-consumer[]
 pub(crate) async fn create(
     route_name: &str,
     value: &serde_json::Value,
@@ -163,21 +182,27 @@ pub(crate) async fn create(
         exit_on_empty: false,
     }))
 }
+// end::create-consumer[]
 
 #[async_trait]
 impl MessageConsumer for Ros2Consumer {
+    // tag::commit-requires-order[]
     fn commit_requires_order(&self) -> bool {
         false
     }
+    // end::commit-requires-order[]
 
+    // tag::set-exit-on-empty[]
     fn set_exit_on_empty(&mut self, exit_on_empty: bool) {
         self.exit_on_empty = exit_on_empty;
     }
+    // end::set-exit-on-empty[]
 
     /// Stops the executor and leaves the ROS graph. The trait's `close()` awaits
     /// this hook, so both route shutdown and an explicit `close()` release the
     /// node. The join inside is bounded: halting wakes every wait set rather
     /// than waiting for the next message.
+    // tag::on-disconnect-hook[]
     fn on_disconnect_hook(&self) -> Option<BoxFuture<'_, anyhow::Result<()>>> {
         Some(Box::pin(async move {
             self.runtime.shutdown();
@@ -194,7 +219,9 @@ impl MessageConsumer for Ros2Consumer {
             Ok(())
         }))
     }
+    // end::on-disconnect-hook[]
 
+    // tag::receive-batch[]
     async fn receive_batch(
         &mut self,
         max_messages: usize,
@@ -240,15 +267,19 @@ impl MessageConsumer for Ros2Consumer {
         });
         Ok(ReceivedBatch { messages, commit })
     }
+    // end::receive-batch[]
 
+    // tag::consumer-as-any[]
     fn as_any(&self) -> &dyn Any {
         self
     }
+    // end::consumer-as-any[]
 }
 
 /// How long to wait for the message at `index`, or `None` to wait indefinitely.
 /// A live route blocks for its first message; a draining one gives up after
 /// [`FIRST_MESSAGE_WAIT`] so the empty batch can end the route.
+// tag::message-wait[]
 fn message_wait(index: usize, exit_on_empty: bool) -> Option<Duration> {
     match index {
         0 if !exit_on_empty => None,
@@ -256,14 +287,18 @@ fn message_wait(index: usize, exit_on_empty: bool) -> Option<Duration> {
         _ => Some(NEXT_MESSAGE_WAIT),
     }
 }
+// end::message-wait[]
 
+// tag::consumer-permanent[]
 fn permanent(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(BridgeConsumerError::Permanent(error))
 }
+// end::consumer-permanent[]
 
 /// Leaving a transient failure unclassified is deliberate: the route then treats
 /// it as a connection failure and retries on its reconnect interval, which is
 /// the right response to a middleware that is not up yet.
+// tag::consumer-setup-error[]
 fn setup_error(error: rclrs::RclrsError) -> anyhow::Error {
     if runtime::is_permanent(&error) {
         permanent(anyhow::Error::new(error))
@@ -271,7 +306,9 @@ fn setup_error(error: rclrs::RclrsError) -> anyhow::Error {
         anyhow::Error::new(error)
     }
 }
+// end::consumer-setup-error[]
 
+// tag::validate-disposition-count[]
 fn validate_disposition_count(expected: usize, actual: usize) -> anyhow::Result<()> {
     if actual == expected {
         Ok(())
@@ -281,6 +318,7 @@ fn validate_disposition_count(expected: usize, actual: usize) -> anyhow::Result<
         ))
     }
 }
+// end::validate-disposition-count[]
 
 #[cfg(test)]
 mod tests {
