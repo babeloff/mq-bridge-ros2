@@ -13,6 +13,9 @@ on:
 
 env:
   RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+  # The packaging CLI is released separately from mq-bridge and currently
+  # lags the core/plugin version. Keep this independent from RELEASE_TAG.
+  MQ_BRIDGE_PACKAGER_VERSION: "0.4.16"
   CARGO_TERM_COLOR: always
   CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_NET_RETRY: "5"
@@ -113,12 +116,12 @@ jobs:
           cache: true
           activate-environment: true
 
-      - name: Install matching mq-bridge packagers
+      - name: Install mq-bridge packagers
         shell: bash
         working-directory: node
         run: |
           npm install --no-package-lock
-          python -m pip install "mq-bridge-py[plugin-packaging]==${RELEASE_TAG#v}"
+          python -m pip install "mq-bridge-py[plugin-packaging]==${MQ_BRIDGE_PACKAGER_VERSION}"
 
       - name: Stage npm native library
         shell: bash
