@@ -72,24 +72,19 @@ jobs:
         include:
           - runner: ubuntu-22.04
             platform: linux-x64-gnu
+            triple: x86_64-unknown-linux-gnu
           - runner: ubuntu-24.04-arm
             platform: linux-arm64-gnu
+            triple: aarch64-unknown-linux-gnu
           - runner: macos-15-intel
             platform: darwin-x64
+            triple: x86_64-apple-darwin
           - runner: macos-latest
             platform: darwin-arm64
-          # win32-x64-msvc is deliberately absent. The pixi environment installs
-          # cleanly on Windows -- that step succeeded -- but linking the cdylib
-          # fails with 21 unresolved __imp_* symbols, all from test_msgs, the
-          # package rclrs vendors and links unconditionally. MSVC wants a DLL
-          # import library for them.
-          #
-          # Restoring it is re-adding the two lines below. Before doing so, see
-          # "Windows is not built" in docs/how-to/package-the-plugin.adoc, which
-          # records what to check first.
-          #
-          #   - runner: windows-latest
-          #     platform: win32-x64-msvc
+            triple: aarch64-apple-darwin
+          - runner: windows-latest
+            platform: win32-x64-msvc
+            triple: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
         with:
@@ -156,15 +151,18 @@ jobs:
       - name: Build standalone plugin archive
         shell: bash
         env:
-          PLUGIN_PLATFORM: ${{ matrix.platform }}
+          PLUGIN_TRIPLE: ${{ matrix.triple }}
+          PLUGIN_VERSION: ${{ github.ref_name }}
           ROS_DISTRO_TARGET: ${{ env.ROS_DISTRO_TARGET }}
         run: |
           python - <<'PY'
+          import hashlib
           import os
           import shutil
           from pathlib import Path
 
-          platform = os.environ["PLUGIN_PLATFORM"]
+          triple = os.environ["PLUGIN_TRIPLE"]
+          version = os.environ["PLUGIN_VERSION"].removeprefix("v")
           libraries = [
               path
               for path in Path("node/prebuilds").rglob("*")
@@ -182,9 +180,16 @@ jobs:
           # `rcl` ABI differs between distributions, so a `jazzy` build is not
           # usable on `humble` even on the same platform.
           distro = os.environ["ROS_DISTRO_TARGET"]
-          base = Path("release-dist") / f"mq-bridge-ros2-{platform}-ros2-{distro}"
-          archive_format = "zip" if platform.startswith("win32-") else "gztar"
-          shutil.make_archive(str(base), archive_format, staging)
+          # One archive shape on every platform — name, version, Rust target
+          # triple — and a checksum beside it. The Homebrew formula and the
+          # conda recipe are generated from these, and the sidecar is what
+          # spares the renderer from downloading every archive to hash it.
+          base = Path("release-dist") / f"mq-bridge-ros2-{version}-{triple}"
+          archive = Path(shutil.make_archive(str(base), "gztar", staging))
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          archive.with_name(archive.name + ".sha256").write_text(
+                 f"{digest}  {archive.name}\n"
+          )
           PY
 
       - name: Upload standalone plugin archive
