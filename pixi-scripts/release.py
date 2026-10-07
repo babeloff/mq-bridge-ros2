@@ -39,9 +39,12 @@ BRANCH = "main"
 
 
 def capture(*command: str) -> str:
-    completed = subprocess.run(
-        command, cwd=str(ROOT), capture_output=True, text=True, check=False
-    )
+    try:
+        completed = subprocess.run(
+            command, cwd=str(ROOT), capture_output=True, text=True, check=False
+        )
+    except FileNotFoundError:
+        return ""
     return completed.stdout.strip() if completed.returncode == 0 else ""
 
 
