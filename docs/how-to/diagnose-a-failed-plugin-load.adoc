@@ -116,7 +116,7 @@ CARGO_TARGET_DIR=target/humble cargo build
 ----
 
 Or force the build script to rerun with `cargo clean -p mq-bridge-ros2 -p rclrs`.
-`pixi run package` is unaffected: every rattler-build variant builds in its own work directory.
+`pixi run conda` is unaffected: every rattler-build variant builds in its own work directory.
 
 == The route fails immediately with `Package '<name>' was not found in any prefix`
 

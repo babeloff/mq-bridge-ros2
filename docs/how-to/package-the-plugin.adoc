@@ -32,7 +32,7 @@ One command builds every ROS distribution:
 
 [source,console]
 ----
-pixi run package
+pixi run conda
 ----
 
 [source,text]
@@ -51,7 +51,7 @@ To build just one while iterating:
 
 [source,console]
 ----
-pixi run package --distro jazzy
+pixi run conda --distro jazzy
 ----
 
 === Adding a distribution
@@ -83,7 +83,7 @@ One channel per invocation respects that guard rather than defeating it, and mak
 
 [source,console]
 ----
-pixi run package --wheel
+pixi run wheel
 ----
 
 The builder is mq-bridge's, not this project's.
@@ -141,7 +141,7 @@ where mq-bridge searches for native plugins.
 The package build string includes the selected ROS distribution,
 so a Humble package cannot be installed as a Jazzy package.
 
-The `packaging/conda/recipe.yaml` path is the source build used by `pixi run package` during development.
+The `packaging/conda/recipe.yaml` path is the source build used by `pixi run conda` during development.
 The release recipe exists to package the tested release archive without rebuilding it.
 
 == Keep the versions in step
@@ -177,7 +177,7 @@ Releasing for a second distribution means running the workflow again with differ
 mq-bridge's packaging tools look for the compiled library at `<root>/target/release/` literally.
 They honour neither `CARGO_TARGET_DIR` nor a `build.target-dir` set in a cargo configuration file, so on a machine that points target-dir at a shared cache — a common setting — cargo succeeds and the packager then reports `cargo produced no shared plugin library`.
 
-`pixi run package --wheel` pins the variable to what the packager expects, and the release job sets it too.
+`pixi run wheel` pins the variable to what the packager expects, and the release job sets it too.
 Building by hand outside those paths needs the same.
 ====
 

@@ -48,7 +48,7 @@ pixi run test      # unit, ROS 2 integration and plugin conformance suites
 pixi run check     # formatting, clippy, versions, doctests, licences, no-ROS check
 pixi run demo      # run the example route and feed it with ros2 topic pub
 pixi run docs      # render the documentation
-pixi run package   # build one conda package per ROS distribution
+pixi run conda   # build one conda package per ROS distribution
 pixi run publish   # upload and index them in the program-forge registry
 pixi run release   # check everything, then tag a release
 pixi run track-version        # follow the latest mq-bridge release
@@ -238,7 +238,7 @@ distributions are a variant axis in `packaging/conda/variants.yaml`, so one comm
 builds them all:
 
 ```console
-pixi run package
+pixi run conda
 ```
 
 ```text

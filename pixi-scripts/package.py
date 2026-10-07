@@ -93,7 +93,7 @@ def main(argv: list[str]) -> int:
     if build_conda:
         require_tool(
             "rattler-build",
-            install_hint="It is a pixi dependency, so run this through `pixi run package`.",
+            install_hint="It is a pixi dependency, so run this through `pixi run conda`.",
         )
 
         available = variant_distros()

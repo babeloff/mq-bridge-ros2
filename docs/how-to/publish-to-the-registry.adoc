@@ -6,7 +6,7 @@ How to get the built conda packages into the project's MinIO-backed conda regist
 
 [source,console]
 ----
-pixi run package                              # build them first
+pixi run conda                              # build them first
 pixi run publish --dry-run                    # check what would go out
 pixi run publish                              # upload and index
 ----
@@ -18,7 +18,7 @@ Publishing never builds, so that a publish cannot quietly ship something other t
 
 [source,console]
 ----
-pixi run package
+pixi run conda
 ----
 
 Only packages matching the version in `Cargo.toml` are published.
@@ -126,7 +126,7 @@ That is a feature — a published version should be immutable, and the usual rig
 
 [source,console]
 ----
-pixi run track-version && pixi run package && pixi run publish
+pixi run track-version && pixi run conda && pixi run publish
 ----
 
 Use `--force` only when replacing a package nobody has installed yet:

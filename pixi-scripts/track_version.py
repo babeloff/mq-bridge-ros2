@@ -56,7 +56,7 @@ def main(argv: list[str]) -> int:
     run(["python", "scripts/set_version.py", version], cwd=ROOT)
     print(f"\ntracked mq-bridge {version} in every manifest.")
     print("Rebuild before publishing, so the artifacts carry the tracked version:")
-    print("  pixi run package && pixi run publish")
+    print("  pixi run conda && pixi run publish")
     return 0
 
 

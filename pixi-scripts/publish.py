@@ -77,7 +77,7 @@ def packages_to_publish(version: str) -> list[Path]:
     """
     if not CONDA_OUTPUT.is_dir():
         raise TaskError(
-            f"{CONDA_OUTPUT.relative_to(ROOT)} does not exist — run `pixi run package` first"
+            f"{CONDA_OUTPUT.relative_to(ROOT)} does not exist — run `pixi run conda` first"
         )
 
     found = sorted(
@@ -94,7 +94,7 @@ def packages_to_publish(version: str) -> list[Path]:
         detail = f"; the directory holds {', '.join(others)}" if others else ""
         raise TaskError(
             f"no packages for version {version} in {CONDA_OUTPUT.relative_to(ROOT)}"
-            f"{detail}.\nRun `pixi run package` to build them."
+            f"{detail}.\nRun `pixi run conda` to build them."
         )
     return found
 
@@ -302,7 +302,7 @@ def main(argv: list[str]) -> int:
     if missing:
         raise TaskError(
             f"no package for ROS 2 {', '.join(missing)} at version {version}. "
-            "Run `pixi run package` to build every distribution, or publish "
+            "Run `pixi run conda` to build every distribution, or publish "
             "deliberately with a narrower selection."
         )
 

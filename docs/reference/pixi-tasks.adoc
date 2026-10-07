@@ -30,7 +30,7 @@ One per ROS distribution, because `rclrs` selects its `rcl` bindings at compile 
 | `pixi run -e humble test`
 |===
 
-Each carries its own RoboStack channel. Two of them in one environment cannot solve, because `ros2-distro-mutex` is distribution-specific and unprefixed — the same constraint that makes `pixi run package` build one distribution per invocation.
+Each carries its own RoboStack channel. Two of them in one environment cannot solve, because `ros2-distro-mutex` is distribution-specific and unprefixed — the same constraint that makes `pixi run conda` build one distribution per invocation.
 
 Switching is safe: the task scripts give each distribution its own subdirectory of whatever target directory cargo is configured to use.
 Without that, `rclrs`' build script — which declares no `cargo:rerun-if-env-changed` for `ROS_DISTRO` — would leave one distribution's bindings in place while linking another's libraries.
@@ -64,9 +64,13 @@ Ten environment/platform pairs is why the lock file is a couple of megabytes; on
 | `docs.py`
 | Renders this documentation.
 
-| `package`
+| `conda`
 | `package.py`
-| Builds the conda package, and optionally the Python wheel.
+| Builds the conda packages.
+
+| `wheel`
+| `package.py`
+| Builds the Python wheel for the active ROS distribution.
 
 | `homebrew`
 | `packaging/homebrew/render.sh`
@@ -157,14 +161,12 @@ The published site at https://phreed.github.io/mq-bridge-ros2/ is built by the s
 `.github/workflows/pages.yml` runs `python3 pixi-scripts/docs.py` on a push to `main` that touches `docs/` or the renderer, and deploys `build/docs` to GitHub Pages.
 That workflow installs only Ruby and asciidoctor — rendering needs neither ROS nor Rust, so it does not create the pixi environment.
 
-== `package`
+== `conda`
 
 [source,console]
 ----
-pixi run package                    # one conda package per ROS distribution
-pixi run package --distro jazzy     # only that distribution, repeatable
-pixi run package --wheel            # also the Python wheel
-pixi run package --conda            # only the conda packages
+pixi run conda                    # one conda package per ROS distribution
+pixi run conda --distro jazzy     # only that distribution, repeatable
 ----
 
 Output goes to `build/conda` and `build/wheel`.
@@ -173,7 +175,15 @@ The distributions come from the `ros_distro` list in `packaging/conda/variants.y
 rattler-build is invoked once per distribution, with only that distribution's RoboStack channel, because `ros2-distro-mutex` cannot be resolved with two of them present — see xref:../how-to/package-the-plugin.adoc[Package the plugin for distribution].
 
 Only the packages this run produced are reported; the output directory accumulates, and a variant or version change alters the build string, so earlier packages remain and are counted separately.
-The wheel build additionally names the distribution it used, because a wheel filename cannot.
+
+== `wheel`
+
+[source,console]
+----
+pixi run wheel
+----
+
+Builds the Python wheel for the active ROS distribution. The wheel build additionally names the distribution it used, because a wheel filename cannot.
 
 == `homebrew`
 
@@ -261,7 +271,7 @@ The gates, all reported together:
 `--skip-tests` drops the slow gate, `--allow-red-ci` the CI one.
 Both are deliberate overrides rather than defaults.
 
-The conda packages are not part of `release.yml`, so the task ends by naming the separate step: `pixi run package && pixi run publish`.
+The conda packages are not part of `release.yml`, so the task ends by naming the separate step: `pixi run conda && pixi run publish`.
 
 == Version tasks
 

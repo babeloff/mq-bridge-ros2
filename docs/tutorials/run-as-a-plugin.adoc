@@ -104,7 +104,7 @@ Build the conda package, which stages the library into the importable Python pac
 
 [source,console]
 ----
-pixi run package
+pixi run conda
 ----
 
 The recipe's own test then does the check that matters: it imports `mq_bridge_ros2`, asks it for `library_path()`, and `dlopen`s the result.

@@ -184,7 +184,7 @@ def main(argv: list[str]) -> int:
     # The conda packages are not part of that workflow, and a release that
     # forgets them leaves the registry a version behind.
     print("\nThe conda packages are published separately:")
-    print("  pixi run package && pixi run publish")
+    print("  pixi run conda && pixi run publish")
     return 0
 
 

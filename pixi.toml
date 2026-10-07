@@ -47,9 +47,13 @@ description = "Formatting, clippy, version sync, doctests, licences and a no-ROS
 cmd = "python pixi-scripts/docs.py"
 description = "Render the AsciiDoc documentation to build/docs"
 
-[tasks.package]
-cmd = "python pixi-scripts/package.py"
-description = "Build the conda package from packaging/conda/recipe.yaml"
+[tasks.conda]
+cmd = "python pixi-scripts/package.py --conda"
+description = "Build the conda packages from packaging/conda/recipe.yaml"
+
+[tasks.wheel]
+cmd = "python pixi-scripts/package.py --wheel"
+description = "Build the Python wheel for the active ROS distribution"
 
 [tasks.homebrew]
 cmd = "packaging/homebrew/render.sh"
