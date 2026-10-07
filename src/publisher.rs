@@ -7,12 +7,17 @@ use rclrs::{
 };
 
 use crate::{
-    config, message,
+    config::{self, Durability},
+    message,
     runtime::{self, Ros2Runtime},
 };
 
 struct Ros2Publisher {
     publisher: DynamicPublisher,
+    /// A volatile writer loses samples published before discovery matches a
+    /// reader. Transient-local writers retain them, so they may publish before
+    /// a subscription exists.
+    require_reader: bool,
     /// Also the factory for the messages being sent: a dynamic message can only
     /// be built from the metadata of its own type.
     metadata: DynamicMessageMetadata,
@@ -36,6 +41,7 @@ pub(crate) async fn create(
         .map_err(non_retryable)?;
 
     let qos = endpoint.config.qos.profile();
+    let require_reader = requires_matched_reader(endpoint.config.qos.durability);
     let (runtime, publisher) = Ros2Runtime::start(&endpoint, |node| {
         let mut options = PublisherOptions::new(&endpoint.topic);
         options.qos = qos;
@@ -50,6 +56,7 @@ pub(crate) async fn create(
 
     Ok(Box::new(Ros2Publisher {
         publisher,
+        require_reader,
         metadata,
         payload_field: endpoint.config.payload_field.clone(),
         runtime,
@@ -73,14 +80,16 @@ impl Ros2Publisher {
         message::set_payload(&mut outgoing, &self.payload_field, &message.payload)
             .map_err(PublisherError::NonRetryable)?;
 
-        let readers = self
-            .publisher
-            .get_subscription_count()
-            .map_err(publisher_error)?;
-        if readers == 0 {
-            return Err(PublisherError::Retryable(anyhow::anyhow!(
-                "no compatible ROS 2 reader has matched the publisher yet"
-            )));
+        if self.require_reader {
+            let readers = self
+                .publisher
+                .get_subscription_count()
+                .map_err(publisher_error)?;
+            if readers == 0 {
+                return Err(PublisherError::Retryable(anyhow::anyhow!(
+                    "no compatible ROS 2 reader has matched the publisher yet"
+                )));
+            }
         }
 
         self.publisher.publish(outgoing).map_err(publisher_error)
@@ -164,6 +173,10 @@ fn publisher_error(error: RclrsError) -> PublisherError {
     }
 }
 
+fn requires_matched_reader(durability: Durability) -> bool {
+    !matches!(durability, Durability::TransientLocal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +207,12 @@ mod tests {
             }),
             PublisherError::NonRetryable(_)
         ));
+    }
+
+    #[test]
+    fn only_volatile_publishers_require_a_matched_reader() {
+        assert!(requires_matched_reader(Durability::Volatile));
+        assert!(!requires_matched_reader(Durability::TransientLocal));
+        assert!(requires_matched_reader(Durability::SystemDefault));
     }
 }
