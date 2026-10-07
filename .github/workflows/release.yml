@@ -458,20 +458,26 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+    env:
+      RELEASE_TARGET_PLATFORM: ${{ matrix.build_target }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: linux-64
+            build_target: linux_64
             runner: ubuntu-22.04
             artifact: standalone-linux-x64-gnu
           - target: linux-aarch64
+            build_target: linux_aarch64
             runner: ubuntu-24.04-arm
             artifact: standalone-linux-arm64-gnu
           - target: osx-64
+            build_target: osx_64
             runner: macos-15-intel
             artifact: standalone-darwin-x64
           - target: osx-arm64
+            build_target: osx_arm64
             runner: macos-latest
             artifact: standalone-darwin-arm64
     steps:
