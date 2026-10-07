@@ -6,8 +6,8 @@ ROS 2 — it loads the compiled Rust endpoint (built on
 [`rclrs`](https://github.com/ros2-rust/ros2_rust)) into mq-bridge, so Node.js,
 Python and Rust all run the same code and the same delivery semantics.
 
-Derived from
-[mq-bridge-pulsar](https://github.com/marcomq/mq-bridge-pulsar).
+Based on the
+[mq-bridge plugin template](https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template).
 
 ```console
 npm install mq-bridge mq-bridge-ros2

@@ -68,7 +68,7 @@ input:
 | Quality of service policies.
 |===
 
-`initial_position` and `subscription` from mq-bridge-pulsar have no equivalent and are rejected.
+`initial_position` and `subscription` have no equivalent and are rejected.
 The nearest thing to `initial_position` is `qos.durability`; see xref:../how-to/receive-earlier-messages.adoc[Receive messages published before the route started].
 There is no `url`, because there is no broker to address.
 

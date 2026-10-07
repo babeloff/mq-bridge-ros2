@@ -7,8 +7,8 @@ ROS 2 — it bundles the compiled Rust endpoint (built on
 mq-bridge, so Python, Node.js and Rust all run the same code and the same
 delivery semantics.
 
-Derived from
-[mq-bridge-pulsar](https://github.com/marcomq/mq-bridge-pulsar).
+Based on the
+[mq-bridge plugin template](https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template).
 
 ```console
 pip install mq-bridge-py mq-bridge-ros2

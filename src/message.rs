@@ -8,9 +8,8 @@ use rclrs::{
 use rosidl_runtime_rs::Sequence;
 
 /// Metadata a received message carries, so a downstream route can tell where a
-/// payload came from. A ROS 2 message has no property map of its own — the one
-/// thing a Pulsar or Kafka message does have — so this is the whole of it, and
-/// metadata cannot survive a round trip through ROS.
+/// payload came from. A ROS 2 message has no property map of its own, so this
+/// is the whole of it, and metadata cannot survive a round trip through ROS.
 pub(crate) const TOPIC_KEY: &str = "ros2_topic";
 pub(crate) const MESSAGE_TYPE_KEY: &str = "ros2_message_type";
 

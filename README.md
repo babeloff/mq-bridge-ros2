@@ -5,9 +5,8 @@ ROS 2, implemented with [`rclrs`](https://github.com/ros2-rust/ros2_rust). It
 supports both ROS 2 inputs and outputs without adding ROS dependencies to
 mq-bridge.
 
-Derived from [mq-bridge-pulsar](https://github.com/marcomq/mq-bridge-pulsar):
-the factory, plugin export, error classification and batch-commit structure are
-that project's, with Apache Pulsar replaced by ROS 2.
+Based on mq-bridge's [plugin template](https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template),
+with a ROS 2 endpoint implementation using `rclrs`.
 
 Message types are resolved at run time through `rclrs`' dynamic messages, so the
 type a route carries is named in its configuration and any message type
@@ -15,9 +14,7 @@ installed on the machine works without generating bindings for it.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). The copyright notice names both this project's
-author and Marco Mengelkoch, whose mq-bridge-pulsar this is derived from: MIT
-requires the original notice be retained in a derivative work.
+MIT — see [LICENSE](LICENSE).
 
 ## Documentation
 
@@ -72,8 +69,7 @@ source /opt/ros/jazzy/setup.bash   # or a RoboStack/conda environment
 
 `ROS_DISTRO` and `AMENT_PREFIX_PATH` must be set, and the ROS libraries must be
 on the runtime loader path. Supported distributions are the ones `rclrs` knows:
-`humble`, `jazzy`, `kilted` and `rolling`. Unlike its Pulsar ancestor, this
-crate needs no `protoc`.
+`humble`, `jazzy`, `kilted` and `rolling`. This crate needs no `protoc`.
 
 ## Configuration
 

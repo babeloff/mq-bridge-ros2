@@ -1,8 +1,8 @@
 //! ROS 2 input/output endpoint extension for `mq-bridge`.
 //!
-//! Derived from [`mq-bridge-pulsar`](https://github.com/marcomq/mq-bridge-pulsar),
-//! whose structure — factory, plugin export, error classification and batch
-//! commit — this crate keeps while speaking ROS 2 instead of Apache Pulsar.
+//! Based on mq-bridge's
+//! [plugin template](https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template),
+//! with a ROS 2 implementation using `rclrs`.
 //!
 //! The same implementation is used three ways:
 //!

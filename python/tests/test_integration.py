@@ -12,7 +12,7 @@ installation is sourced, so the file is safe to collect anywhere.
 
 ## Why there is no publish-then-drain test here
 
-The Pulsar suite this is derived from published with one route and drained with
+The template's broker-backed examples publish with one route and drain with
 another, later. ROS 2 has no broker, so that cannot work: samples retained for
 a late-joining subscription are held by the *publisher*, and a publishing route
 that has exited takes them with it. A round trip therefore needs a publisher and

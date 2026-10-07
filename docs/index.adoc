@@ -8,8 +8,8 @@ The same compiled library is used three ways:
 linked directly into a Rust program, loaded as a native plugin by any mq-bridge host, and shipped inside the Python and npm packages that hand it to that same loader.
 Most of this documentation is about that third life — operating the endpoint as a *plugin* — because that is where the parts a route author cannot see live.
 
-This project is derived from https://github.com/marcomq/mq-bridge-pulsar[mq-bridge-pulsar].
-Its factory, plugin export, error classification and batch-commit structure are that project's, with Apache Pulsar replaced by ROS 2.
+This project is based on the https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template[mq-bridge plugin template],
+with a ROS 2 endpoint implementation using `rclrs`.
 
 == How this documentation is organised
 

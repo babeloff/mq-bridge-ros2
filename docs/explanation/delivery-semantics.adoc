@@ -51,8 +51,8 @@ Bridge it to something that can be, and let the broker own the retry.
 == No metadata
 
 A canonical mq-bridge message is a payload plus a string map.
-Most brokers have somewhere to put that map —
-Pulsar properties, Kafka headers, AMQP application properties.
+Most brokers have somewhere to put that map, such as message properties,
+headers or application properties.
 
 A ROS 2 message has exactly the fields its `.msg` file declares.
 There is no property map, no header extension, nowhere to hide a dictionary.

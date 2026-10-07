@@ -61,10 +61,9 @@ requirements:
     - ${{ compiler('cxx') }}
     - ${{ stdlib('c') }}
     - rust >=1.85
-    # NOTE: no protoc here. It was a build requirement of `pulsar-rs` in the
-    # project this was forked from; `rclrs` does not use protobuf at all. If
-    # something else in this package ever needs it, add `protobuf 7.35.1` —
-    # 21.2 has been yanked from conda-forge.
+    # NOTE: no protoc here. `rclrs` does not use protobuf. If something else
+    # in this package ever needs it, add `protobuf 7.35.1` — 21.2 has been
+    # yanked from conda-forge.
   host:
     - python
     # `test_msgs` and `example_interfaces` are not optional: `rclrs` vendors
@@ -128,5 +127,6 @@ about:
     (ros2_rust). Message types are resolved at run time through dynamic
     messages, so the type a route carries is named in its configuration.
 
-    Derived from mq-bridge-pulsar, with Apache Pulsar replaced by ROS 2.
+    Based on mq-bridge's plugin template, with a ROS 2 endpoint implemented
+    using rclrs.
   repository: https://github.com/phreed/mq-bridge-ros2

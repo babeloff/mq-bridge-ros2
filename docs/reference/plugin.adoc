@@ -206,7 +206,7 @@ These are required to link even though no route uses them:
 
 `ros-base` does not include `test_msgs`.
 
-No `protoc` is needed; that was a `pulsar-rs` requirement in the project this was derived from.
+No `protoc` is needed.
 
 == See also
 
