@@ -4,8 +4,15 @@ on:
   push:
     tags:
       - "[0-9]*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Version tag to package, for example 0.4.19"
+        required: true
+        type: string
 
 env:
+  RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
   CARGO_TERM_COLOR: always
   CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_NET_RETRY: "5"
@@ -34,8 +41,6 @@ jobs:
           python-version: "3.11"
 
       - name: Match package versions to tag
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python scripts/set_version.py --check
           python - <<'PY'
@@ -82,9 +87,6 @@ jobs:
           - runner: macos-latest
             platform: darwin-arm64
             triple: aarch64-apple-darwin
-          - runner: windows-latest
-            platform: win32-x64-msvc
-            triple: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
         with:
@@ -111,12 +113,12 @@ jobs:
           cache: true
           activate-environment: true
 
-      - name: Install official mq-bridge 0.4.16 packagers
+      - name: Install matching mq-bridge packagers
         shell: bash
         working-directory: node
         run: |
           npm install --no-package-lock
-          python -m pip install "mq-bridge-py[plugin-packaging]==0.4.16"
+          python -m pip install "mq-bridge-py[plugin-packaging]==${RELEASE_TAG#v}"
 
       - name: Stage npm native library
         shell: bash
@@ -152,7 +154,7 @@ jobs:
         shell: bash
         env:
           PLUGIN_TRIPLE: ${{ matrix.triple }}
-          PLUGIN_VERSION: ${{ github.ref_name }}
+          PLUGIN_VERSION: ${{ env.RELEASE_TAG }}
           ROS_DISTRO_TARGET: ${{ env.ROS_DISTRO_TARGET }}
         run: |
           python - <<'PY'
@@ -335,11 +337,27 @@ jobs:
 
   github-release:
     name: Create GitHub release
-    needs: [publish-crate, publish-npm, publish-pypi]
+    needs: [build-native-packages, conda]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install ROS 2 ${{ env.ROS_DISTRO_TARGET }} from pixi.lock
+        uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          environments: ${{ env.PIXI_ENVIRONMENT }}
+          locked: true
+          cache: true
+          activate-environment: true
+
       - name: Download standalone plugin archives
         uses: actions/download-artifact@v8
         with:
@@ -347,11 +365,11 @@ jobs:
           path: artifacts/plugins
           merge-multiple: true
 
-      - name: Download npm tarball
-        uses: actions/download-artifact@v8
-        with:
-          name: npm-tarball
-          path: artifacts/npm
+      - name: Create npm tarball
+        shell: bash
+        run: |
+          mkdir -p artifacts/npm
+          npm pack --pack-destination artifacts/npm ./node
 
       - name: Download Python wheels
         uses: actions/download-artifact@v8
@@ -361,15 +379,28 @@ jobs:
           merge-multiple: true
 
       - name: Download crate archive
+        shell: bash
+        run: cargo package --no-verify --allow-dirty
+
+      - name: Collect crate archive
+        shell: bash
+        run: |
+          mkdir -p artifacts/crate
+          cp target/package/*.crate artifacts/crate/
+
+      - name: Download conda packages
         uses: actions/download-artifact@v8
         with:
-          name: crate-package
-          path: artifacts/crate
+          pattern: conda-*
+          path: artifacts/conda
+          merge-multiple: true
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          name: mq-bridge-ros2 ${{ env.RELEASE_TAG }}
+          tag_name: ${{ env.RELEASE_TAG }}
           files: artifacts/**/*
 
   # Render the formula from the checksums attached to the GitHub release, then
@@ -386,7 +417,7 @@ jobs:
           persist-credentials: false
 
       - name: Render formula from release assets
-        run: packaging/homebrew/render.sh "${GITHUB_REF_NAME}" "${{ github.repository }}" out
+        run: packaging/homebrew/render.sh "${RELEASE_TAG}" "${{ github.repository }}" out
 
       - name: Push to tap
         env:
@@ -410,10 +441,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/mq-bridge-ros2.rb
           if git diff --cached --quiet; then
-            echo "tap already up to date for ${GITHUB_REF_NAME}"
+            echo "tap already up to date for ${RELEASE_TAG}"
             exit 0
           fi
-          git commit -m "mq-bridge-ros2 ${GITHUB_REF_NAME}"
+          git commit -m "mq-bridge-ros2 ${RELEASE_TAG}"
           git push
 
   conda:
@@ -438,9 +469,6 @@ jobs:
           - target: osx-arm64
             runner: macos-latest
             artifact: standalone-darwin-arm64
-          - target: win-64
-            runner: windows-latest
-            artifact: standalone-win32-x64-msvc
     steps:
       - uses: actions/checkout@v7
         with:
@@ -458,7 +486,7 @@ jobs:
           set -euo pipefail
           mkdir -p packaging/conda/stage
           tar xzf release-dist/mq-bridge-ros2-*.tar.gz -C packaging/conda/stage
-          echo "MQ_BRIDGE_PLUGIN_VERSION=${GITHUB_REF_NAME#v}" >> "${GITHUB_ENV}"
+          echo "MQ_BRIDGE_PLUGIN_VERSION=${RELEASE_TAG#v}" >> "${GITHUB_ENV}"
           echo "ROS_DISTRO_TARGET=${ROS_DISTRO_TARGET}" >> "${GITHUB_ENV}"
 
       # The recipe repackages the tested standalone library. It does not build
