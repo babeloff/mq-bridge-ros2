@@ -7,8 +7,7 @@ use rclrs::{
 };
 
 use crate::{
-    config,
-    message,
+    config, message,
     runtime::{self, Ros2Runtime},
 };
 
@@ -203,5 +202,4 @@ mod tests {
             PublisherError::NonRetryable(_)
         ));
     }
-
 }
