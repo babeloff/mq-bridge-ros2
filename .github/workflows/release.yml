@@ -121,7 +121,9 @@ jobs:
         working-directory: node
         run: |
           npm install --no-package-lock
-          python -m pip install "mq-bridge-py[plugin-packaging]==${MQ_BRIDGE_PACKAGER_VERSION}"
+          python -m pip install \
+            "mq-bridge-py[plugin-packaging]==${MQ_BRIDGE_PACKAGER_VERSION}" \
+            build
 
       - name: Stage npm native library
         shell: bash
