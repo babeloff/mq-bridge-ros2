@@ -124,6 +124,21 @@ Neither will a valid name emerge from an invalid one, nor valid UTF-8 from bytes
 
 xref:../reference/configuration.adoc#error-classification[The reference] lists which is which.
 
+== Runtime implementation evidence
+
+The runtime objects below enforce the context, executor, and shutdown lifecycle described on this page.
+
+[source,rust%collapsible]
+----
+include::../../src/runtime.rs[tag=ros2-runtime]
+include::../../src/runtime.rs[tag=runtime-start]
+include::../../src/runtime.rs[tag=runtime-node]
+include::../../src/runtime.rs[tag=runtime-shutdown]
+include::../../src/runtime.rs[tag=runtime-drop]
+include::../../src/runtime.rs[tag=runtime-lock]
+include::../../src/runtime.rs[tag=is-permanent]
+----
+
 [#shim]
 == Why the shim cannot build the plugin
 

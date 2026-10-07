@@ -155,6 +155,16 @@ The npm package instead stages per-platform binaries under `node/prebuilds/`, an
 
 Python and Node.js both hand the package directory to mq-bridge's generic loader; neither contains an implementation.
 
+== Factory implementation evidence
+
+The factory methods below are the source objects behind the public API.
+
+[source,rust%collapsible]
+----
+include::../../src/lib.rs[tag=factory-create-consumer]
+include::../../src/lib.rs[tag=factory-create-publisher]
+----
+
 == Host compatibility
 
 [cols="1,2", options="header"]

@@ -277,6 +277,29 @@ These are permanent — `ConsumerError::Permanent` or `PublisherError::NonRetrya
 
 Everything else, including a middleware that is not up yet, reaches the route unclassified and is retried on its reconnect interval.
 
+== Implementation evidence
+
+The validation and resolution rules above are implemented by these tagged source objects.
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=config-constants]
+include::../../src/config.rs[tag=default-message-type]
+include::../../src/config.rs[tag=default-payload-field]
+include::../../src/config.rs[tag=resolved-config]
+include::../../src/config.rs[tag=direction]
+include::../../src/config.rs[tag=direction-suffix]
+include::../../src/config.rs[tag=resolve-consumer]
+include::../../src/config.rs[tag=resolve-publisher]
+include::../../src/config.rs[tag=resolve]
+include::../../src/config.rs[tag=sanitize]
+include::../../src/config.rs[tag=is-name-token]
+include::../../src/config.rs[tag=validate-name-token]
+include::../../src/config.rs[tag=validate-namespace]
+include::../../src/config.rs[tag=validate-topic]
+include::../../src/config.rs[tag=validate-message-type]
+----
+
 == See also
 
 * xref:plugin.adoc[Plugin interface]

@@ -73,22 +73,35 @@ def check_source_includes(files: list[Path]) -> None:
         for name in TAG.findall(path.read_text())
     }
     includes = [
-        (name, source)
+        (name, source, include_path)
         for source in files
-        for _, name in INCLUDE_TAG.findall(source.read_text())
+        for include_path, name in INCLUDE_TAG.findall(source.read_text())
     ]
+    implementation = DOCS / "reference" / "implementation.adoc"
     counts = {
-        name: sum(included == name for included, _ in includes)
+        name: sum(included == name for included, _, _ in includes)
+        for name in tags
+    }
+    implementation_counts = {
+        name: sum(
+            included == name and source == implementation
+            for included, source, _ in includes
+        )
         for name in tags
     }
     errors = [
-        f"  {name} in {path.relative_to(ROOT)} is included {counts[name]} times"
+        f"  {name} in {path.relative_to(ROOT)} has {implementation_counts[name]} implementation-reference includes"
         for name, path in tags.items()
-        if counts[name] != 1
+        if implementation_counts[name] != 1
     ]
     errors.extend(
+        f"  {name} in {path.relative_to(ROOT)} has only {counts[name]} total reference includes"
+        for name, path in tags.items()
+        if counts[name] < 2
+    )
+    errors.extend(
         f"  {name} in {source.relative_to(ROOT)} has no matching source tag"
-        for name, source in includes
+        for name, source, _ in includes
         if name not in tags
     )
     if errors:

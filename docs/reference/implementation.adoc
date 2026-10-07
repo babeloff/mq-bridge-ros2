@@ -6,6 +6,24 @@ This page exposes the tagged implementation objects that support the public endp
 The configuration, plugin, and delivery pages include the public objects and the core delivery path.
 The excerpts below cover the remaining source objects so the reference surface stays synchronized with compilable Rust.
 
+== Public and delivery objects
+
+The following source objects also appear in their specification pages.
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=reliability]
+include::../../src/config.rs[tag=durability]
+include::../../src/config.rs[tag=history]
+include::../../src/config.rs[tag=qos-config]
+include::../../src/config.rs[tag=ros2-config]
+include::../../src/lib.rs[tag=factory]
+include::../../src/lib.rs[tag=register]
+include::../../src/lib.rs[tag=public-api]
+include::../../src/publisher.rs[tag=publish]
+include::../../src/publisher.rs[tag=send-batch]
+----
+
 == Configuration resolution
 
 === `config-constants`
@@ -457,4 +475,3 @@ include::../../src/lib.rs[tag=factory-create-publisher]
 * xref:configuration.adoc[Endpoint configuration]
 * xref:plugin.adoc[Plugin interface]
 * xref:delivery-semantics.adoc[Delivery semantics]
-

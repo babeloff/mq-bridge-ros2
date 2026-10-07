@@ -38,6 +38,60 @@ normal commit behavior.
 That commit records the send result available to the plugin.
 It remains independent of application-level delivery confirmation from ROS 2.
 
+== Publisher implementation evidence
+
+The remaining publisher lifecycle and error paths are part of the same send contract.
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=ros2-publisher]
+include::../../src/publisher.rs[tag=create-publisher]
+include::../../src/publisher.rs[tag=flush]
+include::../../src/publisher.rs[tag=publisher-as-any]
+include::../../src/publisher.rs[tag=publisher-drop]
+include::../../src/publisher.rs[tag=publisher-non-retryable]
+include::../../src/publisher.rs[tag=publisher-setup-error]
+include::../../src/publisher.rs[tag=publisher-error]
+----
+
+== Consumer and message implementation evidence
+
+The consumer and message mapping objects implement the corresponding receive, payload, and metadata rules.
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=consumer-timing]
+include::../../src/consumer.rs[tag=inbox]
+include::../../src/consumer.rs[tag=inbox-new]
+include::../../src/consumer.rs[tag=inbox-push]
+include::../../src/consumer.rs[tag=inbox-pop]
+include::../../src/consumer.rs[tag=inbox-wait]
+include::../../src/consumer.rs[tag=inbox-discarded]
+include::../../src/consumer.rs[tag=consumer-lock]
+include::../../src/consumer.rs[tag=ros2-consumer]
+include::../../src/consumer.rs[tag=create-consumer]
+include::../../src/consumer.rs[tag=commit-requires-order]
+include::../../src/consumer.rs[tag=set-exit-on-empty]
+include::../../src/consumer.rs[tag=on-disconnect-hook]
+include::../../src/consumer.rs[tag=receive-batch]
+include::../../src/consumer.rs[tag=consumer-as-any]
+include::../../src/consumer.rs[tag=message-wait]
+include::../../src/consumer.rs[tag=consumer-permanent]
+include::../../src/consumer.rs[tag=consumer-setup-error]
+include::../../src/consumer.rs[tag=validate-disposition-count]
+include::../../src/message.rs[tag=metadata-keys]
+include::../../src/message.rs[tag=carrier]
+include::../../src/message.rs[tag=carrier-for]
+include::../../src/message.rs[tag=carrier-rule]
+include::../../src/message.rs[tag=describe-type]
+include::../../src/message.rs[tag=describe-kind]
+include::../../src/message.rs[tag=payload-of]
+include::../../src/message.rs[tag=set-payload]
+include::../../src/message.rs[tag=text-bytes]
+include::../../src/message.rs[tag=as-text]
+include::../../src/message.rs[tag=to-canonical]
+----
+
 == See also
 
 * xref:configuration.adoc#qos[QoS configuration]
