@@ -251,8 +251,10 @@ pixi run release --push         # ...and push, which starts publishing
 ----
 
 Does not publish.
-Pushing a tag matching `[0-9]*` is what triggers `.github/workflows/release.yml`, which builds on four platforms and publishes the crate, the npm package and the wheels.
-This task establishes that the commit deserves that, and creates the tag.
+Pushing a tag matching `[0-9]*` is what triggers `.github/workflows/release.yml`.
+The workflow builds four Unix platforms and creates a GitHub Release with generated notes and the standalone archives, checksums, Python wheels, npm tarball, Cargo crate, and conda packages.
+The external registry publication jobs run separately.
+This task establishes that the commit deserves the release, and creates the tag.
 
 The push is a separate flag because it is the irreversible step: crates.io and PyPI allow a published version to be yanked but never replaced.
 
@@ -271,7 +273,23 @@ The gates, all reported together:
 `--skip-tests` drops the slow gate, `--allow-red-ci` the CI one.
 Both are deliberate overrides rather than defaults.
 
-The conda packages are not part of `release.yml`, so the task ends by naming the separate step: `pixi run conda && pixi run publish`.
+The release workflow builds the conda packages from the tested standalone archives and attaches them to the GitHub Release.
+The local conda task and registry publication remain separate:
+
+[source,console]
+----
+pixi run conda && pixi run publish
+----
+
+The release workflow also publishes to crates.io, npm, PyPI, Anaconda.org, and the Homebrew tap when the required credentials are configured.
+Those publication jobs do not prevent the GitHub Release from being created with its build artifacts.
+
+If a tag's workflow fails before creating or completing its release, rerun it manually with:
+
+[source,console]
+----
+gh workflow run release.yml -f release_tag=0.4.19
+----
 
 == Version tasks
 

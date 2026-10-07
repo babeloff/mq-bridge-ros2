@@ -2,8 +2,9 @@
 """Tags a release, after checking everything the release depends on.
 
 This task does not publish. Pushing a tag matching `[0-9]*` is what triggers
-`.github/workflows/release.yml`, which builds on five platforms and publishes
-the crate, the npm package and the wheels. The job here is to establish that the
+`.github/workflows/release.yml`, which builds four Unix platforms and creates a
+GitHub Release containing the native archives, checksums, Python wheels, npm
+tarball, Cargo crate, and conda packages. The job here is to establish that the
 commit being tagged deserves to be released, and then to create the tag.
 
     pixi run release --dry-run    # run every check, tag nothing
@@ -184,9 +185,9 @@ def main(argv: list[str]) -> int:
     run(["git", "push", "origin", tag])
     print(f"\npushed {tag}; release.yml is now building")
 
-    # The conda packages are not part of that workflow, and a release that
-    # forgets them leaves the registry a version behind.
-    print("\nThe conda packages are published separately:")
+    # The workflow builds the conda packages and attaches them to the GitHub
+    # Release, while publishing them to the registry remains a separate job.
+    print("\nThe conda packages are published to the registry separately:")
     print("  pixi run conda && pixi run publish")
     return 0
 

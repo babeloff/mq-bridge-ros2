@@ -160,10 +160,38 @@ CI runs the check, and `pixi run check` includes it.
 
 == Release from CI
 
-Pushing a numeric tag runs `.github/workflows/release.yml`, which builds for four targets — `linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64` and `darwin-arm64` — and publishes the crate, the npm package and the wheels.
+Pushing a numeric tag runs `.github/workflows/release.yml`.
+The workflow builds four Unix targets — `linux-x64-gnu`, `linux-arm64-gnu`, `darwin-x64` and `darwin-arm64` — and creates or updates the GitHub Release for that tag.
+The release has generated notes and contains the standalone archives and checksums, Python wheels, npm tarball, Cargo crate, and one Jazzy conda package for each target platform.
+Windows is not in this release matrix.
 
 `pixi run release` is the front door: it checks the tree, the branch, the tag, CI, `check` and the test suites in every environment before creating the tag, and pushes only when asked.
 See xref:../reference/pixi-tasks.adoc[Pixi tasks].
+
+Use:
+
+[source,console]
+----
+pixi run follow-version
+pixi run sync-version --check
+pixi run release --dry-run
+pixi run release --push
+----
+
+The last command pushes the numeric tag, which starts the workflow.
+The workflow also has a manual dispatch for rerunning an existing tag after a workflow fix:
+
+[source,console]
+----
+gh workflow run release.yml -f release_tag=0.4.19
+----
+
+The manual run checks out `main`, packages the requested version, and updates that tag's GitHub Release.
+It is useful when the tag already exists and the original workflow failed before creating the release or uploading all assets.
+
+The GitHub Release is independent of publishing to crates.io, npm, PyPI, Anaconda.org, and the Homebrew tap.
+Those publication jobs use their own credentials and can be retried or fixed without losing the GitHub Release assets.
+The Homebrew tap is updated from the checksums attached to the GitHub Release.
 
 ROS, the Rust toolchain and python all come from the locked pixi environment, installed with `locked: true` rather than re-solved on each runner.
 That is what keeps a release off the failure mode that broke CI: a fresh solve validates each download against the size recorded in the channel's repodata, and that metadata is not always right, whereas the lock records a sha256.
