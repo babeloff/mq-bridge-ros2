@@ -175,6 +175,7 @@ jobs:
           staging.mkdir(parents=True)
           shutil.copy2(libraries[0], staging / libraries[0].name)
           shutil.copy2("node/mq-bridge-plugin.json", staging / "mq-bridge-plugin.json")
+          shutil.copy2("LICENSE", staging / "LICENSE")
 
           # The ROS distribution is part of the identity of the artifact: the
           # `rcl` ABI differs between distributions, so a `jazzy` build is not
@@ -370,3 +371,133 @@ jobs:
         with:
           generate_release_notes: true
           files: artifacts/**/*
+
+  # Render the formula from the checksums attached to the GitHub release, then
+  # copy it into the tap used by Homebrew consumers.
+  update-homebrew-tap:
+    name: Update Homebrew tap
+    needs: github-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Render formula from release assets
+        run: packaging/homebrew/render.sh "${GITHUB_REF_NAME}" "${{ github.repository }}" out
+
+      - name: Push to tap
+        env:
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DEPLOY_KEY}" ]; then
+            echo "::error::HOMEBREW_TAP_DEPLOY_KEY is not configured; the tap was not updated"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "${DEPLOY_KEY}" > ~/.ssh/tap_key
+          chmod 600 ~/.ssh/tap_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap_key -o IdentitiesOnly=yes"
+          git clone git@github.com:babeloff/homebrew-tap.git tap
+          mkdir -p tap/Formula
+          cp out/Formula/mq-bridge-ros2.rb tap/Formula/mq-bridge-ros2.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/mq-bridge-ros2.rb
+          if git diff --cached --quiet; then
+            echo "tap already up to date for ${GITHUB_REF_NAME}"
+            exit 0
+          fi
+          git commit -m "mq-bridge-ros2 ${GITHUB_REF_NAME}"
+          git push
+
+  conda:
+    name: Conda ${{ matrix.target }} package
+    needs: build-native-packages
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-64
+            runner: ubuntu-22.04
+            artifact: standalone-linux-x64-gnu
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+            artifact: standalone-linux-arm64-gnu
+          - target: osx-64
+            runner: macos-15-intel
+            artifact: standalone-darwin-x64
+          - target: osx-arm64
+            runner: macos-latest
+            artifact: standalone-darwin-arm64
+          - target: win-64
+            runner: windows-latest
+            artifact: standalone-win32-x64-msvc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download the standalone plugin archive
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: release-dist
+
+      - name: Stage the library for the recipe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p packaging/conda/stage
+          tar xzf release-dist/mq-bridge-ros2-*.tar.gz -C packaging/conda/stage
+          echo "MQ_BRIDGE_PLUGIN_VERSION=${GITHUB_REF_NAME#v}" >> "${GITHUB_ENV}"
+          echo "ROS_DISTRO_TARGET=${ROS_DISTRO_TARGET}" >> "${GITHUB_ENV}"
+
+      # The recipe repackages the tested standalone library. It does not build
+      # Rust again, so the conda package and the GitHub release contain the
+      # same plugin binary.
+      - name: Build the conda package
+        uses: prefix-dev/rattler-build-action@1ca5f45832f419a46d1326ccc5861d7e14d67c44 # v0.2.39
+        with:
+          recipe-path: packaging/conda/release-recipe.yaml
+          build-args: --target-platform=${{ matrix.target }} -c conda-forge
+          artifact-name: conda-${{ matrix.target }}
+
+  publish-conda:
+    name: Publish conda packages
+    needs: conda
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download conda packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: conda-*
+          path: conda-packages
+          merge-multiple: true
+
+      - name: Upload to Anaconda.org
+        env:
+          ANACONDA_API_TOKEN: ${{ secrets.ANACONDA_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANACONDA_API_TOKEN}" ]; then
+            echo "::error::ANACONDA_API_TOKEN is not configured; no conda package was published"
+            exit 1
+          fi
+          mapfile -t packages < <(find conda-packages -type f -name '*.conda' | sort)
+          if [ "${#packages[@]}" -eq 0 ]; then
+            echo "::error::no conda packages were produced"
+            exit 1
+          fi
+          pipx install --include-deps anaconda-client
+          anaconda upload --user babeloff --label main "${packages[@]}"

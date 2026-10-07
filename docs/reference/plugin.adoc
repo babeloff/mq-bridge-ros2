@@ -172,7 +172,7 @@ A built artifact is valid for one combination of:
 `rclrs` selects its `rcl` bindings at compile time, and that ABI differs between `humble`, `jazzy`, `kilted` and `rolling`.
 A `jazzy` build will not work on `humble` even on identical hardware.
 
-The distributions built for are listed in `recipes/variants.yaml` as a variant axis, and the conda build string names the one a package is for:
+The distributions built for are listed in `packaging/conda/variants.yaml` as a variant axis, and the conda build string names the one a package is for:
 
 [source,text]
 ----

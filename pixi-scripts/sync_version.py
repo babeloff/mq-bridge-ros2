@@ -10,7 +10,7 @@ kept in step with it are:
 * `node/package.json`
 * `node/package-lock.json` (two entries)
 * `python/pyproject.toml`
-* `recipes/recipe.yaml` (`context.version`, which the conda package version
+* `packaging/conda/recipe.yaml` (`context.version`, which the conda package version
   references)
 
 Use this after editing `Cargo.toml` by hand, or when a merge has left one

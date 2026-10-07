@@ -7,7 +7,7 @@ package instead.
 
 An artifact is specific to one platform *and* one ROS distribution, because the
 `rcl` ABI differs between distributions and nothing can make a single artifact
-serve two. The conda side handles that with a variant axis: `recipes/variants.yaml`
+serve two. The conda side handles that with a variant axis: `packaging/conda/variants.yaml`
 lists the distributions, and one build produces one package per entry with the
 distribution in its build string.
 
@@ -80,7 +80,7 @@ def main(argv: list[str]) -> int:
         action="append",
         metavar="NAME",
         help="build only this ROS distribution, repeatable; defaults to every one "
-        "listed in recipes/variants.yaml",
+        "listed in packaging/conda/variants.yaml",
     )
     arguments = parser.parse_args(argv)
 

@@ -159,7 +159,7 @@ The endpoint's own code is distribution-agnostic —
 it was written against `jazzy` and built,
 tested and packaged for `humble` without a single change —
 so supporting another distribution is a packaging concern rather than a porting one.
-That is why the distributions are a variant axis in `recipes/variants.yaml`:
+That is why the distributions are a variant axis in `packaging/conda/variants.yaml`:
 adding one is a line of configuration,
 and the resulting packages carry the distribution in their build string so they cannot be confused.
 

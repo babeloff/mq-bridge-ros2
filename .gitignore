@@ -20,4 +20,5 @@ python/mq_bridge_ros2/*.dll
 # written by `pixi run demo` and the example route
 /ros2-messages.jsonl
 
-/packaging/
+/packaging/conda/stage/
+/packaging/conda/output/

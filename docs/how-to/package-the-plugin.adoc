@@ -2,7 +2,7 @@
 :toc: left
 :icons: font
 
-How to produce each of the four artifacts, and what each one is valid for.
+How to produce the distributable artifacts, and what each one is valid for.
 
 [IMPORTANT]
 ====
@@ -27,7 +27,7 @@ Building by hand outside those paths still needs a target directory per distribu
 
 == Build the conda packages
 
-These are the project's primary artifacts, built with https://rattler.build[rattler-build] from `recipes/recipe.yaml`.
+These are the project's primary artifacts, built with https://rattler.build[rattler-build] from `packaging/conda/recipe.yaml`.
 One command builds every ROS distribution:
 
 [source,console]
@@ -57,7 +57,7 @@ pixi run package --distro jazzy
 === Adding a distribution
 
 The distributions are a *variant axis*, not a value in the recipe.
-Add one to the `ros_distro` list in `recipes/variants.yaml` and that is the whole change:
+Add one to the `ros_distro` list in `packaging/conda/variants.yaml` and that is the whole change:
 
 [source,yaml]
 ----
@@ -119,6 +119,30 @@ mq-bridge-package-plugin --pack --out npm
 
 For hosts that load a library by path and want nothing to do with pip or npm, the release workflow produces an archive of just the library and its manifest.
 See the `Build standalone plugin archive` step in `.github/workflows/release.yml`; it names the archive after both the platform and the distribution.
+
+== Build the Homebrew and release conda packages
+
+The release workflow repackages the same standalone archive for Homebrew and conda.
+It does not compile a second copy of the plugin.
+
+The Homebrew formula is rendered from the archive checksums by:
+
+[source,console]
+----
+packaging/homebrew/render.sh <tag> [owner/repository] [output-directory]
+----
+
+The release job copies the rendered formula into the `babeloff/homebrew-tap` repository.
+It requires the `HOMEBREW_TAP_DEPLOY_KEY` secret.
+
+The release conda recipe is `packaging/conda/release-recipe.yaml`.
+It installs the prebuilt library under `lib/mq-bridge` on Unix and `Library/bin` on Windows,
+where mq-bridge searches for native plugins.
+The package build string includes the selected ROS distribution,
+so a Humble package cannot be installed as a Jazzy package.
+
+The `packaging/conda/recipe.yaml` path is the source build used by `pixi run package` during development.
+The release recipe exists to package the tested release archive without rebuilding it.
 
 == Keep the versions in step
 
@@ -226,7 +250,7 @@ the directory through `RUSTFLAGS`.
 | `Cargo.toml`'s `include` list. An explicit `include` overrides cargo's defaults, so `/LICENSE` has to be listed or the published crate carries none.
 
 | conda
-| `about.license_file` in `recipes/recipe.yaml`, which puts the text in the package's `info/licenses/`.
+| `about.license_file` in `packaging/conda/recipe.yaml`, which puts the text in the package's `info/licenses/`.
 
 | npm
 | `node/LICENSE`. npm always includes a licence regardless of the `files` array, but it packs from `node/` and does not look above it.
@@ -244,7 +268,7 @@ That duplication is only safe if the copies cannot drift, so `pixi run check` co
 `ros-<distro>-test-msgs` and `ros-<distro>-example-interfaces` are therefore *required* build dependencies.
 Without them the crate does not link, with a long list of `cannot find -ltest_msgs__rosidl_generator_c` errors.
 
-Both are listed in `recipes/recipe.yaml`, `pixi.toml` and the CI workflows for this reason.
+Both are listed in `packaging/conda/recipe.yaml`, `pixi.toml` and the CI workflows for this reason.
 
 == See also
 

@@ -17,8 +17,8 @@ from typing import Callable, Iterable, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD_DIR = ROOT / "build"
-RECIPE = ROOT / "recipes" / "recipe.yaml"
-VARIANTS = ROOT / "recipes" / "variants.yaml"
+RECIPE = ROOT / "packaging" / "conda" / "recipe.yaml"
+VARIANTS = ROOT / "packaging" / "conda" / "variants.yaml"
 CONDA_OUTPUT = BUILD_DIR / "conda"
 
 #: The distribution the `ros-shim` type check targets. `rclrs` selects its `rcl`
@@ -119,7 +119,7 @@ def shim_environment() -> dict[str, str]:
 
 
 def variant_distros() -> list[str]:
-    """The ROS distributions `recipes/variants.yaml` builds for.
+    """The ROS distributions `packaging/conda/variants.yaml` builds for.
 
     The single source of truth: it drives the variant axis rattler-build
     expands, the channels each build resolves against, and what a publish

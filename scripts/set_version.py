@@ -22,12 +22,12 @@ UPDATES = (
     ("node/package.json", r'^(\s*"version"\s*:\s*)"[^"]+"', 1),
     ("node/package-lock.json", r'^(\s*"version"\s*:\s*)"[^"]+"', 2),
     ("python/pyproject.toml", r'^(version\s*=\s*)"[^"]+"', 1),
-    ("recipes/recipe.yaml", RECIPE_VERSION.pattern, 1),
+    ("packaging/conda/recipe.yaml", RECIPE_VERSION.pattern, 1),
 )
 
 
 def recipe_version():
-    found = RECIPE_VERSION.search((ROOT / "recipes/recipe.yaml").read_text())
+    found = RECIPE_VERSION.search((ROOT / "packaging/conda/recipe.yaml").read_text())
     return found.group(2) if found else None
 
 
@@ -42,7 +42,7 @@ def versions():
         "node/package-lock.json": lock["version"],
         'node/package-lock.json packages[""]': lock["packages"][""]["version"],
         "python/pyproject.toml": python["project"]["version"],
-        "recipes/recipe.yaml": recipe_version(),
+        "packaging/conda/recipe.yaml": recipe_version(),
     }
 
 

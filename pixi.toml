@@ -49,7 +49,7 @@ description = "Render the AsciiDoc documentation to build/docs"
 
 [tasks.package]
 cmd = "python pixi-scripts/package.py"
-description = "Build the conda package from recipes/recipe.yaml"
+description = "Build the conda package from packaging/conda/recipe.yaml"
 
 [tasks.publish]
 cmd = "python pixi-scripts/publish.py"
@@ -104,7 +104,7 @@ rattler-index = ">=0.30.11,<0.31"
 # rewrite.
 asciidoctor = ">=2.0.20,<3"
 
-# `package.py` reads recipes/variants.yaml to learn which ROS distributions to
+# `package.py` reads packaging/conda/variants.yaml to learn which ROS distributions to
 # build for, and derives the build channels from that list. Only `safe_load` is
 # used, which has been stable across the whole 6.x line.
 pyyaml = ">=6.0,<7"

@@ -234,7 +234,7 @@ how loading, versioning and the ABI work.
 ### Packaging
 
 The primary artifacts are conda packages, one per ROS distribution. The
-distributions are a variant axis in `recipes/variants.yaml`, so one command
+distributions are a variant axis in `packaging/conda/variants.yaml`, so one command
 builds them all:
 
 ```console
@@ -247,7 +247,7 @@ build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
 ```
 
 `humble` and `jazzy` are built and tested. The endpoint's source is
-distribution-agnostic, so adding another is a line in `variants.yaml` rather
+distribution-agnostic, so adding another is a line in `packaging/conda/variants.yaml` rather
 than a port — provided `rclrs` supports it (`humble`, `jazzy`, `kilted`,
 `rolling`) and RoboStack publishes a channel for it.
 

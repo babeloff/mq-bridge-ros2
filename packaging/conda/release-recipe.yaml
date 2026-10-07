@@ -1,0 +1,57 @@
+schema_version: 1
+
+context:
+  version: ${{ env.get("MQ_BRIDGE_PLUGIN_VERSION") }}
+  ros_distro: ${{ env.get("ROS_DISTRO_TARGET") }}
+
+package:
+  name: mq-bridge-ros2
+  version: ${{ version }}
+
+# The release workflow stages the prebuilt plugin archive here. This recipe
+# repackages that exact library instead of compiling a second copy.
+source:
+  path: stage
+  use_gitignore: false
+
+build:
+  number: 0
+  string: ros2_${{ ros_distro }}_0
+  script:
+    content:
+      - if: win
+        then:
+          - if not exist "%LIBRARY_BIN%" mkdir "%LIBRARY_BIN%"
+          - copy /Y mq_bridge_ros2.dll "%LIBRARY_BIN%"
+        else:
+          - mkdir -p "${PREFIX}/lib/mq-bridge"
+          - cp libmq_bridge_ros2.* "${PREFIX}/lib/mq-bridge/"
+
+tests:
+  - package_contents:
+      files:
+        - if: win
+          then: Library/bin/mq_bridge_ros2.dll
+          else: lib/mq-bridge/libmq_bridge_ros2.*
+
+requirements:
+  run:
+    - mq-bridge >=0.4.19,<0.5
+    - ros-${{ ros_distro }}-ros-base
+    - ros-${{ ros_distro }}-std-msgs
+
+about:
+  homepage: https://github.com/babeloff/mq-bridge-ros2
+  repository: https://github.com/babeloff/mq-bridge-ros2
+  documentation: https://babeloff.github.io/mq-bridge-ros2/
+  summary: ROS 2 endpoint plugin for mq-bridge
+  description: |
+    A loadable ROS 2 endpoint plugin for mq-bridge. Install it into the same
+    conda environment as mq-bridge and routes can use the `ros2` endpoint.
+  license: MIT
+  license_file:
+    - LICENSE
+
+extra:
+  recipe-maintainers:
+    - babeloff

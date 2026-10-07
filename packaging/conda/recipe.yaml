@@ -13,7 +13,7 @@ package:
   version: ${{ version }}
 
 source:
-  path: ..
+  path: ../..
 
 build:
   number: 0

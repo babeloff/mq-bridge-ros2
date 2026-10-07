@@ -35,7 +35,7 @@ Each carries its own RoboStack channel. Two of them in one environment cannot so
 Switching is safe: the task scripts give each distribution its own subdirectory of whatever target directory cargo is configured to use.
 Without that, `rclrs`' build script — which declares no `cargo:rerun-if-env-changed` for `ROS_DISTRO` — would leave one distribution's bindings in place while linking another's libraries.
 
-Add a distribution by adding a feature and an environment to `pixi.toml`, then keep `[environments]`, the CI matrix and `recipes/variants.yaml` in step.
+Add a distribution by adding a feature and an environment to `pixi.toml`, then keep `[environments]`, the CI matrix and `packaging/conda/variants.yaml` in step.
 
 `pixi.toml` declares five platforms — `linux-64`, `linux-aarch64`, `osx-64`, `osx-arm64` and `win-64` — so a release runner can install from `pixi.lock` rather than re-solving.
 RoboStack publishes every ROS package needed for both distributions on all five, `test-msgs` included.
@@ -165,7 +165,7 @@ pixi run package --conda            # only the conda packages
 
 Output goes to `build/conda` and `build/wheel`.
 
-The distributions come from the `ros_distro` list in `recipes/variants.yaml`, which is the single source of truth: the task reads it to decide what to build, and derives each build's channel from it.
+The distributions come from the `ros_distro` list in `packaging/conda/variants.yaml`, which is the single source of truth: the task reads it to decide what to build, and derives each build's channel from it.
 rattler-build is invoked once per distribution, with only that distribution's RoboStack channel, because `ros2-distro-mutex` cannot be resolved with two of them present — see xref:../how-to/package-the-plugin.adoc[Package the plugin for distribution].
 
 Only the packages this run produced are reported; the output directory accumulates, and a variant or version change alters the build string, so earlier packages remain and are counted separately.
@@ -257,7 +257,7 @@ These manifests are kept in step with it:
 * `node/package.json`
 * `node/package-lock.json` (two entries)
 * `python/pyproject.toml`
-* `recipes/recipe.yaml` — `context.version`, which the conda package version references
+* `packaging/conda/recipe.yaml` — `context.version`, which the conda package version references
 
 Both delegate to `scripts/set_version.py`, which is also what CI runs, so there is one implementation of the propagation rule.
 
@@ -353,7 +353,7 @@ conda-forge's `rust` package bundles `clippy` and `rustfmt` from the same build,
 The two rattler ceilings are the other ones that will need attention.
 Widening either is a one-line change, but do it deliberately and re-run `pixi run publish --dry-run` afterwards to confirm the flags still exist.
 
-`recipes/recipe.yaml` pins `rust >=1.85` separately for the conda build, which resolves its own build environment and does not use this one.
+`packaging/conda/recipe.yaml` pins `rust >=1.85` separately for the conda build, which resolves its own build environment and does not use this one.
 
 == The shared helper
 

@@ -2,89 +2,147 @@
 :toc: left
 :icons: font
 
-A ROS 2 input and output endpoint for https://github.com/marcomq/mq-bridge[mq-bridge], built on https://github.com/ros2-rust/ros2_rust[`rclrs`].
+`mq-bridge-ros2` is an input and output endpoint for https://github.com/marcomq/mq-bridge[mq-bridge].
+It connects routes to ROS 2 topics through https://github.com/ros2-rust/ros2_rust[`rclrs`].
 
-The same compiled library is used three ways:
-linked directly into a Rust program, loaded as a native plugin by any mq-bridge host, and shipped inside the Python and npm packages that hand it to that same loader.
-Most of this documentation is about that third life — operating the endpoint as a *plugin* — because that is where the parts a route author cannot see live.
+The endpoint is distributed as one compiled library.
+You can link it directly into a Rust program,
+load it as a plugin in an mq-bridge host,
+or use it through the Python and npm packages.
 
-This project is based on the https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template[mq-bridge plugin template],
-with a ROS 2 endpoint implementation using `rclrs`.
+This documentation focuses on using the endpoint as a plugin.
+That is where loading, packaging, ROS 2 discovery, and delivery behavior affect a route.
 
-== How this documentation is organised
+The project follows the https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template[mq-bridge plugin template].
+Its endpoint implementation uses `rclrs` and ROS 2 dynamic messages.
 
-It follows https://diataxis.fr/[Diátaxis], which separates four things that are usually mixed together and are hard to write well when they are.
-Each section answers one question, so start with the one matching what you actually need.
+== Recommended installation: Pixi and conda packages
+
+The usual way to run the endpoint is to install `mq-bridge` and `mq-bridge-ros2`
+as conda packages in the same https://pixi.sh/[Pixi] environment.
+The `mq-bridge-ros2` package brings the ROS 2 runtime packages required by its selected distribution,
+and its plugin library is installed where mq-bridge can discover it.
+
+For example,
+this environment selects the Jazzy build of the endpoint:
+
+[source,toml]
+----
+[workspace]
+channels = [
+    "https://program-forge.invalid",
+    "https://prefix.dev/robostack-jazzy",
+    "conda-forge",
+]
+
+[dependencies]
+mq-bridge = "*"
+mq-bridge-ros2 = { version = "*", build = "ros2_jazzy_*" }
+----
+
+Create the environment and install its packages with:
+
+[source,console]
+----
+pixi install
+----
+
+The canonical program-forge channel name is resolved through Pixi's mirror configuration.
+If that mirror is not already configured,
+follow xref:how-to/publish-to-the-registry.adoc[the registry guide] before adding the dependency.
+Use `ros2_humble_*` instead when the environment targets Humble.
+
+The endpoint is then available to any mq-bridge route running inside that environment.
+There is no separate library path to configure and no Rust build step at runtime.
+
+== Find the right guide
+
+The documentation follows https://diataxis.fr/[Diátaxis].
+Choose the section that matches what you need to do.
 
 [cols="1,2,3", options="header"]
 |===
-| Section | Answers | Read it when
+| Section | Answers | Start here when
 
 | xref:tutorials/first-ros2-route.adoc[Tutorials]
-| "Take me through it."
-| You have never run this endpoint and want a working route in front of you.
+| "How do I get started?"
+| You want to run a working ROS 2 route.
 
 | xref:how-to/load-the-plugin-in-a-host.adoc[How-to guides]
-| "How do I achieve this?"
-| You know what you want and need the steps for that one job.
+| "How do I complete this task?"
+| You need a focused procedure for loading, configuring, testing, or packaging the endpoint.
 
 | xref:reference/configuration.adoc[Reference]
-| "What exactly does this accept?"
-| You are writing configuration and need the precise, complete answer.
+| "What does this accept?"
+| You need the complete configuration, plugin interface, or task reference.
 
 | xref:explanation/plugin-model.adoc[Explanation]
 | "Why does it work this way?"
-| Something surprised you, or you are deciding whether this design fits.
+| You want to understand plugin loading or delivery behavior.
 |===
 
-=== Tutorials
+== Tutorials
 
-Learning-oriented, and meant to be followed in order.
+Follow these guides when you are learning the endpoint.
 
-* xref:tutorials/first-ros2-route.adoc[Your first ROS 2 route] — bring up a route that reads a ROS topic and writes a file.
-* xref:tutorials/run-as-a-plugin.adoc[Run the same endpoint as a plugin] — load the compiled library into a host that was never built against it.
+* xref:tutorials/first-ros2-route.adoc[Your first ROS 2 route]
+  takes a message from a ROS 2 topic and writes it to a file.
+* xref:tutorials/run-as-a-plugin.adoc[Run the same endpoint as a plugin]
+  loads the compiled library into a host that was not built against this crate.
 
-=== How-to guides
+== How-to guides
 
-Task-oriented, and each independent of the others.
+Use these guides for a specific task.
 
-* xref:how-to/load-the-plugin-in-a-host.adoc[Load the plugin in a host] — from Rust, Python or Node.js.
-* xref:how-to/carry-non-text-payloads.adoc[Carry payloads that are not text] — binary data through a byte-sequence message type.
-* xref:how-to/receive-earlier-messages.adoc[Receive messages published before the route started] — what `transient_local` can and cannot do.
-* xref:how-to/package-the-plugin.adoc[Package the plugin for distribution] — conda, wheel and npm artifacts.
-* xref:how-to/publish-to-the-registry.adoc[Publish to the program-forge registry] — upload and index in the MinIO conda channel.
-* xref:how-to/diagnose-a-failed-plugin-load.adoc[Diagnose a failed plugin load] — the symptoms, in the order they occur.
+* xref:how-to/load-the-plugin-in-a-host.adoc[Load the plugin in a host]
+  covers Rust, Python, and Node.js.
+* xref:how-to/carry-non-text-payloads.adoc[Carry non-text payloads]
+  shows how to use byte-sequence message fields.
+* xref:how-to/receive-earlier-messages.adoc[Receive messages published before the route started]
+  explains what `transient_local` can and cannot retain.
+* xref:how-to/package-the-plugin.adoc[Package the plugin for distribution]
+  covers conda, Python wheels, and npm packages.
+* xref:how-to/publish-to-the-registry.adoc[Publish to the program-forge registry]
+  covers the MinIO conda channel.
+* xref:how-to/diagnose-a-failed-plugin-load.adoc[Diagnose a failed plugin load]
+  leads from the first symptom to the likely cause.
 
-=== Reference
+== Reference
 
-Information-oriented, and intended to be complete rather than readable.
+Use these pages when you need exact details.
 
-* xref:reference/configuration.adoc[Endpoint configuration] — every field, its default and its validation.
-* xref:reference/plugin.adoc[Plugin interface] — the exported symbol, the plugin package layout, artifact identity.
-* xref:reference/pixi-tasks.adoc[Pixi tasks] — the project's task commands.
+* xref:reference/configuration.adoc[Endpoint configuration]
+  lists every field, default, and validation rule.
+* xref:reference/plugin.adoc[Plugin interface]
+  describes the exported symbol, package layout, and artifact identity.
+* xref:reference/pixi-tasks.adoc[Pixi tasks]
+  lists the project's development and release commands.
 
-=== Explanation
+== Explanation
 
-Understanding-oriented, and safe to skip until something puzzles you.
+These pages describe the design and its consequences.
 
-* xref:explanation/plugin-model.adoc[How mq-bridge loads this endpoint] — registration, the ABI, and why one library serves three languages.
-* xref:explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus] — what changes when there is no broker: no acknowledgement, no metadata, no durable log.
+* xref:explanation/plugin-model.adoc[How mq-bridge loads this endpoint]
+  explains registration, the ABI, and the shared library used by three languages.
+* xref:explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus]
+  explains acknowledgement, metadata, durability, and fire-and-forget output.
 
-== Before anything else
+== Requirements
 
-`rclrs` links `rcl` and loads message type support libraries from a ROS installation.
-There is no build and no test run without one, not even for the unit tests, whose binary would fail to load.
+`rclrs` links against `rcl` and loads message type support libraries from ROS 2.
+The ROS 2 environment must be available to build and run the endpoint.
 
 [source,console]
 ----
 source /opt/ros/jazzy/setup.bash
 ----
 
-Or use this project's pixi environment, which installs ROS 2 from https://robostack.github.io/[RoboStack] and activates it for every task:
+You can use the project's Pixi environment instead.
+It installs ROS 2 from https://robostack.github.io/[RoboStack] and activates the environment for each task.
 
 [source,console]
 ----
 pixi run test
 ----
 
-See xref:reference/pixi-tasks.adoc[Pixi tasks] for the full set.
+See xref:reference/pixi-tasks.adoc[Pixi tasks] for the available commands.
