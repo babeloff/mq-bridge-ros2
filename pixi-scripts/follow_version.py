@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Tracks the latest published `mq-bridge` version.
+"""Follows the latest published `mq-bridge` version.
 
-    pixi run track-version            # read crates.io and update every manifest
-    pixi run track-version --dry-run  # report the version without writing
+    pixi run follow-version            # read crates.io and update every manifest
+    pixi run follow-version --dry-run  # report the version without writing
 
 The endpoint is released alongside the core library, so its package version
 must follow `mq-bridge` instead of being bumped independently. crates.io is the

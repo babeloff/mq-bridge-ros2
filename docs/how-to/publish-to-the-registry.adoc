@@ -126,7 +126,7 @@ That is a feature — a published version should be immutable, and the usual rig
 
 [source,console]
 ----
-pixi run track-version && pixi run conda && pixi run publish
+pixi run follow-version && pixi run conda && pixi run publish
 ----
 
 Use `--force` only when replacing a package nobody has installed yet:

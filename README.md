@@ -51,7 +51,7 @@ pixi run docs      # render the documentation
 pixi run conda   # build one conda package per ROS distribution
 pixi run publish   # upload and index them in the program-forge registry
 pixi run release   # check everything, then tag a release
-pixi run track-version        # follow the latest mq-bridge release
+pixi run follow-version        # follow the latest mq-bridge release
 pixi run sync-version         # make every manifest match Cargo.toml
 ```
 
@@ -286,7 +286,7 @@ The package version tracks the latest `mq-bridge` release. Update every
 ecosystem manifest together before tagging a release:
 
 ```console
-pixi run track-version         # read the latest mq-bridge version
+pixi run follow-version         # read the latest mq-bridge version
 pixi run sync-version --check  # verify they agree
 ```
 

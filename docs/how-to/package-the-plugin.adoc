@@ -152,7 +152,7 @@ Both npm manifests, `python/pyproject.toml` and the conda recipe's `context.vers
 
 [source,console]
 ----
-pixi run track-version         # follow the latest mq-bridge release
+pixi run follow-version         # follow the latest mq-bridge release
 pixi run sync-version --check  # verify they agree
 ----
 

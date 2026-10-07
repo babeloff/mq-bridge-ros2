@@ -45,7 +45,7 @@ def main(argv: list[str]) -> int:
     # the script directory so the
     # modules can import their `_common` sibling.
     status = run(
-        ["python", "-m", "doctest", "track_version.py"],
+        ["python", "-m", "doctest", "follow_version.py"],
         env=env,
         cwd=ROOT / "pixi-scripts",
         check=False,

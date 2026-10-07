@@ -14,7 +14,7 @@ kept in step with it are:
   references)
 
 Use this after editing `Cargo.toml` by hand, or when a merge has left one
-manifest behind. To update from upstream, use `pixi run track-version`.
+manifest behind. To update from upstream, use `pixi run follow-version`.
 
 The work is done by `scripts/set_version.py`, which is also what CI runs, so
 there is one implementation of the rule.

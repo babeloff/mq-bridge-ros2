@@ -84,8 +84,8 @@ Ten environment/platform pairs is why the lock file is a couple of megabytes; on
 | `release.py`
 | Checks everything a release depends on, then tags it.
 
-| `track-version`
-| `track_version.py`
+| `follow-version`
+| `follow_version.py`
 | Reads the latest `mq-bridge` release and propagates it to every manifest.
 
 | `sync-version`
@@ -256,7 +256,7 @@ This task establishes that the commit deserves that, and creates the tag.
 
 The push is a separate flag because it is the irreversible step: crates.io and PyPI allow a published version to be yanked but never replaced.
 
-The version is read from `Cargo.toml` after `pixi run track-version` has aligned
+The version is read from `Cargo.toml` after `pixi run follow-version` has aligned
 it with the latest `mq-bridge` release.
 
 The gates, all reported together:
@@ -287,14 +287,14 @@ These manifests are kept in step with it:
 
 Both delegate to `scripts/set_version.py`, which is also what CI runs, so there is one implementation of the propagation rule.
 
-=== `track-version`
+=== `follow-version`
 
 Reads the latest stable `mq-bridge` version from crates.io and writes it everywhere.
 
 [source,console]
 ----
-pixi run track-version                    # follow the latest mq-bridge release
-pixi run track-version --dry-run          # report it, write nothing
+pixi run follow-version                    # follow the latest mq-bridge release
+pixi run follow-version --dry-run          # report it, write nothing
 ----
 
 The task does not rebuild.

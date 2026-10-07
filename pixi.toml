@@ -30,7 +30,7 @@ version = "0.4.19"
 
 # Every task is a Python script under pixi-scripts/, so the logic is readable,
 # reviewable and runnable on its own. Arguments after the task name reach the
-# script: `pixi run test --unit`, `pixi run track-version --dry-run`.
+# script: `pixi run test --unit`, `pixi run follow-version --dry-run`.
 [tasks.build]
 cmd = "python pixi-scripts/build.py"
 description = "Compile the endpoint and its loadable plugin library"
@@ -67,9 +67,9 @@ description = "Upload and index the built conda packages in the program-forge re
 cmd = "python pixi-scripts/release.py"
 description = "Check everything, then tag a release (pushing the tag starts publishing)"
 
-[tasks.track-version]
-cmd = "python pixi-scripts/track_version.py"
-description = "Track the latest mq-bridge release across every manifest"
+[tasks.follow-version]
+cmd = "python pixi-scripts/follow_version.py"
+description = "Follow the latest mq-bridge release across every manifest"
 
 [tasks.sync-version]
 cmd = "python pixi-scripts/sync_version.py"
