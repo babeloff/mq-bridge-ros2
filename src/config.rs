@@ -12,6 +12,7 @@ const DEFAULT_PAYLOAD_FIELD: &str = "data";
 const DEFAULT_DEPTH: u32 = 10;
 
 /// The `RELIABILITY` policy, as a route spells it.
+// tag::reliability[]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Reliability {
@@ -24,9 +25,11 @@ pub enum Reliability {
     /// Whatever the RMW implementation defaults to.
     SystemDefault,
 }
+// end::reliability[]
 
 /// The `DURABILITY` policy, as a route spells it. This is the ROS 2 equivalent
 /// of asking where a late-joining reader starts.
+// tag::durability[]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Durability {
@@ -40,8 +43,10 @@ pub enum Durability {
     /// Whatever the RMW implementation defaults to.
     SystemDefault,
 }
+// end::durability[]
 
 /// The `HISTORY` policy, as a route spells it.
+// tag::history[]
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum History {
@@ -52,10 +57,12 @@ pub enum History {
     /// then ignored.
     KeepAll,
 }
+// end::history[]
 
 /// The subset of DDS quality of service a route can set. The remaining
 /// policies — deadline, lifespan, liveliness — are left at the ROS defaults,
 /// because a bridge has no basis on which to pick them.
+// tag::qos-config[]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct QosConfig {
@@ -68,6 +75,7 @@ pub struct QosConfig {
     /// behavior and the route may commit after the send attempt returns.
     pub require_subscribers: bool,
 }
+// end::qos-config[]
 
 impl Default for QosConfig {
     fn default() -> Self {
@@ -109,6 +117,7 @@ impl QosConfig {
 /// Every field has a default, so `config: {}` is valid: the route name supplies
 /// the node and topic names, and the payload travels as the `data` field of a
 /// `std_msgs/msg/String`.
+// tag::ros2-config[]
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Ros2Config {
@@ -137,6 +146,7 @@ pub struct Ros2Config {
     #[serde(default)]
     pub domain_id: Option<usize>,
 }
+// end::ros2-config[]
 
 fn default_message_type() -> String {
     DEFAULT_MESSAGE_TYPE.to_owned()

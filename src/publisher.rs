@@ -68,6 +68,7 @@ impl Ros2Publisher {
     /// the count check prevents acceptance until a compatible reader has
     /// matched. Note that no `.await` may appear here: a
     /// `DynamicMessage` owns raw type-support memory and is not `Send`.
+    // tag::publish[]
     fn publish(&self, message: &CanonicalMessage) -> Result<(), PublisherError> {
         let mut outgoing = self
             .metadata
@@ -92,6 +93,7 @@ impl Ros2Publisher {
 
         self.publisher.publish(outgoing).map_err(publisher_error)
     }
+    // end::publish[]
 }
 
 #[async_trait]
@@ -100,6 +102,7 @@ impl MessagePublisher for Ros2Publisher {
     /// the fields its type declares, with no property map to put a canonical
     /// message's metadata in, so it is dropped rather than smuggled somewhere a
     /// consumer would not think to look.
+    // tag::send-batch[]
     async fn send_batch(
         &self,
         messages: Vec<CanonicalMessage>,
@@ -128,6 +131,7 @@ impl MessagePublisher for Ros2Publisher {
             })
         }
     }
+    // end::send-batch[]
 
     /// Nothing to do: `publish` hands the sample straight to the middleware, and
     /// there is no producer-side batch to force out. Getting the sample to a

@@ -1,0 +1,44 @@
+= Delivery semantics reference
+:toc: left
+:icons: font
+
+This page records the publisher behavior that determines when mq-bridge can
+commit a source offset.
+
+== Publish one message
+
+The publisher constructs a dynamic ROS 2 message, writes the configured
+payload field, optionally checks for a matched reader, and calls `publish`.
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=publish]
+----
+
+`publish` has no reader acknowledgement.
+With `require_subscribers: false`, a successful call means that the ROS 2
+middleware accepted the send attempt.
+It does not mean that a reader received or processed the message.
+
+With `require_subscribers: true`, no matched compatible reader produces a
+retryable error before the call to `publish`.
+
+== Send a batch
+
+The batch method attempts every message and reports failed messages with their
+error classification.
+
+[source,rust%collapsible]
+----
+include::../../src/publisher.rs[tag=send-batch]
+----
+
+An `Ack` or successful entry in a partial result allows the route to apply its
+normal commit behavior.
+That commit records the send result available to the plugin.
+It remains independent of application-level delivery confirmation from ROS 2.
+
+== See also
+
+* xref:configuration.adoc#qos[QoS configuration]
+* xref:../explanation/delivery-semantics.adoc[Delivery semantics on a brokerless bus]

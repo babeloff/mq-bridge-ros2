@@ -39,10 +39,14 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mq_bridge::traits::{CustomEndpointFactory, MessageConsumer, MessagePublisher};
 
+// tag::public-api[]
 pub use config::{Durability, History, QosConfig, Reliability, Ros2Config};
+// end::public-api[]
 
+// tag::factory[]
 #[derive(Debug, Default)]
 pub struct Ros2Factory;
+// end::factory[]
 
 // Exports the same factory as a loadable plugin. `register()` below covers the
 // directly linked case; this covers every host that loads the compiled library,
@@ -56,9 +60,11 @@ mq_bridge::export_endpoint_plugin! {
 /// Registers this crate's factory under `ros2`. Call once, before starting
 /// routes that use it. Only needed when linking this crate directly; a host that
 /// loads the compiled plugin registers the endpoint as part of loading it.
+// tag::register[]
 pub fn register() -> anyhow::Result<()> {
     mq_bridge::extensions::register_endpoint_factory("ros2", Arc::new(Ros2Factory))
 }
+// end::register[]
 
 #[async_trait]
 impl CustomEndpointFactory for Ros2Factory {

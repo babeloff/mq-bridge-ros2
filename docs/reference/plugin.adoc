@@ -74,13 +74,22 @@ Linking this crate directly alongside another mq-bridge plugin crate fails at li
 
 == Public Rust API
 
-[source,rust]
+[source,rust%collapsible]
 ----
-pub struct Ros2Factory;
+include::../../src/lib.rs[tag=factory]
+----
 
-pub fn register() -> anyhow::Result<()>;
+[source,rust%collapsible]
+----
+include::../../src/lib.rs[tag=register]
+----
 
-pub use config::{Durability, History, QosConfig, Reliability, Ros2Config};
+The configuration types are documented with their source declarations in
+xref:configuration.adoc[Endpoint configuration].
+
+[source,rust%collapsible]
+----
+include::../../src/lib.rs[tag=public-api]
 ----
 
 `register()` registers `Ros2Factory` under `ros2`.

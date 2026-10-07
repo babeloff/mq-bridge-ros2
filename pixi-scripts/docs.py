@@ -20,6 +20,8 @@ OUTPUT = BUILD_DIR / "docs"
 #: `xref:some/path.adoc#anchor[text]`. Only inter-document references are of
 #: interest here; a bare `<<anchor>>` is asciidoctor's own business.
 XREF = re.compile(r"xref:([^\[\]#]+\.adoc)(#[^\[\]]*)?\[")
+TAG = re.compile(r"tag::([^\]]+)\[\]")
+INCLUDE_TAG = re.compile(r"include::([^\[]+)\[tag=([^\]]+)\]")
 
 
 def sources() -> list[Path]:
@@ -51,6 +53,49 @@ def check_cross_references(files: list[Path]) -> None:
     print("cross-references resolve")
 
 
+def check_source_includes(files: list[Path]) -> None:
+    """Checks that every documented source tag has one reference include.
+
+    Source excerpts are deliberately kept in the reference pages rather than
+    copied into prose.
+    This check catches both an unreferenced tagged object and an include that
+    points at a tag that no longer exists.
+    """
+    source_files = [
+        path
+        for directory in (ROOT / "src", ROOT / "examples")
+        for path in directory.rglob("*")
+        if path.is_file()
+    ]
+    tags = {
+        name: path
+        for path in source_files
+        for name in TAG.findall(path.read_text())
+    }
+    includes = [
+        (name, source)
+        for source in files
+        for _, name in INCLUDE_TAG.findall(source.read_text())
+    ]
+    counts = {
+        name: sum(included == name for included, _ in includes)
+        for name in tags
+    }
+    errors = [
+        f"  {name} in {path.relative_to(ROOT)} is included {counts[name]} times"
+        for name, path in tags.items()
+        if counts[name] != 1
+    ]
+    errors.extend(
+        f"  {name} in {source.relative_to(ROOT)} has no matching source tag"
+        for name, source in includes
+        if name not in tags
+    )
+    if errors:
+        raise TaskError("source tags and reference includes do not match:\n" + "\n".join(errors))
+    print(f"source tags resolve ({len(tags)} tagged block(s))")
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -68,6 +113,7 @@ def main(argv: list[str]) -> int:
     files = sources()
     print(f"{len(files)} AsciiDoc source(s) under {DOCS.relative_to(ROOT)}")
     check_cross_references(files)
+    check_source_includes(files)
 
     def convert(destination: Path) -> None:
         # `--failure-level=WARN` is what makes this a check rather than a

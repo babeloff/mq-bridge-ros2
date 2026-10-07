@@ -7,6 +7,31 @@ Every field the `ros2` endpoint accepts, its default, and how it is validated.
 Unknown fields are rejected.
 Every field has a default, so `config: {}` is valid.
 
+The Rust declarations below are the source of truth for the public policy and
+endpoint configuration types.
+
+== Policy types
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=reliability]
+----
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=durability]
+----
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=history]
+----
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=qos-config]
+----
+
 [source,yaml]
 ----
 input:
@@ -24,9 +49,15 @@ input:
         durability: volatile
         history: keep_last
         depth: 10
+        require_subscribers: false
 ----
 
 == Fields
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=ros2-config]
+----
 
 [cols="1,1,2,3", options="header"]
 |===
