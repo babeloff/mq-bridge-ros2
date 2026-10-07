@@ -2,7 +2,7 @@
 :toc: left
 :icons: font
 
-The project's tasks, defined in `pixi.toml` and implemented as Python scripts under `pixi-scripts/`.
+The project's tasks are defined in `pixi.toml` and implemented by scripts under `pixi-scripts/` and `packaging/`.
 
 Every task runs inside a pixi environment, which activates ROS 2.
 Arguments after the task name reach the script, so `pixi run test --unit` works.
@@ -67,6 +67,10 @@ Ten environment/platform pairs is why the lock file is a couple of megabytes; on
 | `package`
 | `package.py`
 | Builds the conda package, and optionally the Python wheel.
+
+| `homebrew`
+| `packaging/homebrew/render.sh`
+| Renders a Homebrew formula for a published release.
 
 | `publish`
 | `publish.py`
@@ -170,6 +174,18 @@ rattler-build is invoked once per distribution, with only that distribution's Ro
 
 Only the packages this run produced are reported; the output directory accumulates, and a variant or version change alters the build string, so earlier packages remain and are counted separately.
 The wheel build additionally names the distribution it used, because a wheel filename cannot.
+
+== `homebrew`
+
+[source,console]
+----
+pixi run homebrew -- 0.4.19
+pixi run homebrew -- 0.4.19 babeloff/mq-bridge-ros2 build/homebrew
+----
+
+Downloads the release checksums for the four supported macOS and Linux targets and writes `Formula/mq-bridge-ros2.rb` under the output directory.
+The release archives must already exist on GitHub; this task renders the formula and does not compile the plugin.
+The optional repository and output arguments are passed to `packaging/homebrew/render.sh`.
 
 == `publish`
 

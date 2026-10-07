@@ -51,6 +51,10 @@ description = "Render the AsciiDoc documentation to build/docs"
 cmd = "python pixi-scripts/package.py"
 description = "Build the conda package from packaging/conda/recipe.yaml"
 
+[tasks.homebrew]
+cmd = "packaging/homebrew/render.sh"
+description = "Render the Homebrew formula for a release tag"
+
 [tasks.publish]
 cmd = "python pixi-scripts/publish.py"
 description = "Upload and index the built conda packages in the program-forge registry"
