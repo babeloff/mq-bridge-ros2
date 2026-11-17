@@ -46,9 +46,13 @@ def virtual_environment(name: str, packages: list[str], env: dict[str, str]) -> 
 def build_wheel(python: Path, env: dict[str, str]) -> Path:
     out = WORK / "dist"
     shutil.rmtree(out, ignore_errors=True)
+    # The packager looks for the library at `<root>/target/release/` literally,
+    # ignoring the per-distribution `CARGO_TARGET_DIR`; see package.py.
+    wheel_env = dict(env)
+    wheel_env["CARGO_TARGET_DIR"] = str(ROOT / "target")
     run(
         [python, "-m", "mq_bridge.plugin_packaging", "--package", "python/mq_bridge_ros2", "--out", out],
-        env=env,
+        env=wheel_env,
     )
     wheels = list(out.glob("*.whl"))
     if len(wheels) != 1:
