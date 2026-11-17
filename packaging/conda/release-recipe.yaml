@@ -37,7 +37,9 @@ tests:
 
 requirements:
   run:
-    - mq-bridge >=0.4.19,<0.5
+    # The Python host is published as `mq-bridge` on PyPI but `mq-bridge-py` on
+    # conda-forge, which has no package called `mq-bridge`.
+    - mq-bridge-py >=0.4.19,<2
     - ros-${{ ros_distro }}-ros-base
     - ros-${{ ros_distro }}-std-msgs
 

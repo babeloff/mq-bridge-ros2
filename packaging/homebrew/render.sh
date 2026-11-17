@@ -3,7 +3,7 @@
 #
 # Usage:
 #   render.sh <tag> [repo] [outdir]
-#     tag       release tag, for example 0.4.19
+#     tag       release tag, for example 0.5.0
 #     repo      owner/name (default: babeloff/mq-bridge-ros2)
 #     outdir    output directory (default: ./out)
 set -euo pipefail

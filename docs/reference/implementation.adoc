@@ -47,6 +47,20 @@ include::../../src/config.rs[tag=default-message-type]
 include::../../src/config.rs[tag=default-payload-field]
 ----
 
+=== `default-inbox-capacity`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=default-inbox-capacity]
+----
+
+=== `default-first-message-wait`
+
+[source,rust%collapsible]
+----
+include::../../src/config.rs[tag=default-first-message-wait]
+----
+
 === `resolved-config`
 
 [source,rust%collapsible]
@@ -222,6 +236,13 @@ include::../../src/consumer.rs[tag=set-exit-on-empty]
 [source,rust%collapsible]
 ----
 include::../../src/consumer.rs[tag=on-disconnect-hook]
+----
+
+=== `consumer-status`
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=consumer-status]
 ----
 
 === `receive-batch`
@@ -468,6 +489,13 @@ include::../../src/lib.rs[tag=factory-create-consumer]
 [source,rust%collapsible]
 ----
 include::../../src/lib.rs[tag=factory-create-publisher]
+----
+
+=== `factory-config-schema`
+
+[source,rust%collapsible]
+----
+include::../../src/lib.rs[tag=factory-config-schema]
 ----
 
 == See also

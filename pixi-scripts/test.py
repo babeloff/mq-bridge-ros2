@@ -32,7 +32,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--python",
         action="store_true",
-        help="also run the Python plugin tests (they skip unless the wheel is installed)",
+        help="also build the wheel and test it against the oldest and latest mq-bridge (test_wheel.py)",
     )
     parser.add_argument("--node", action="store_true", help="also run the npm package smoke test")
     arguments = parser.parse_args(argv)
@@ -45,7 +45,7 @@ def main(argv: list[str]) -> int:
     steps: list[tuple[str, bool]] = []
 
     commands = {
-        "unit": ["cargo", "test", "--lib"],
+        "unit": ["cargo", "test", "--lib", "--test", "example_config"],
         # `--ignored` is how the end-to-end tests are reached: they are marked
         # ignored so that a bare `cargo test` stays a fast, local-only run.
         "integration": ["cargo", "test", "--test", "integration", "--", "--ignored", "--nocapture"],
@@ -56,8 +56,8 @@ def main(argv: list[str]) -> int:
         steps.append((f"{suite} tests", status == 0))
 
     if arguments.python:
-        status = run(["python", "-m", "pytest", "python/tests", "-v"], env=env, check=False)
-        steps.append(("python plugin tests", status == 0))
+        status = run(["python", ROOT / "pixi-scripts" / "test_wheel.py"], env=env, check=False)
+        steps.append(("python wheel tests", status == 0))
 
     if arguments.node:
         node = ROOT / "node"

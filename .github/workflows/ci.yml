@@ -89,6 +89,11 @@ jobs:
       - name: Endpoint conformance, linked and plugin-loaded
         run: pixi run -e ${{ matrix.environment }} test --conformance
 
+      # The only check across the plugin ABI between different mq-bridge
+      # versions: the wheel against the oldest supported and the latest host.
+      - name: Python wheel against the oldest and latest host
+        run: pixi run -e ${{ matrix.environment }} test-wheel
+
   # Type-checks the crate without a ROS installation. This is what the
   # `ros-shim` feature is for, and it keeps the compile clean for contributors
   # who have no ROS on their machine.

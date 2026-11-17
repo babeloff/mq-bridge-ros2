@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context};
 use mq_bridge::errors::{ConsumerError, PublisherError};
 use rclrs::{QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy};
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 /// The message type a route carries when its configuration does not name one.
@@ -11,11 +12,17 @@ const DEFAULT_MESSAGE_TYPE: &str = "std_msgs/msg/String";
 const DEFAULT_PAYLOAD_FIELD: &str = "data";
 /// Matches the depth of `rmw`'s own default profile.
 const DEFAULT_DEPTH: u32 = 10;
+/// How many received messages a consumer buffers while its route is busy, unless
+/// a larger `keep_last` depth asks for more.
+const DEFAULT_INBOX_CAPACITY: usize = 1000;
+/// The wait used before it was configurable. Often shorter than DDS discovery
+/// takes, so a drain that must see a fresh publisher should raise it.
+const DEFAULT_FIRST_MESSAGE_WAIT_MS: u64 = 250;
 // end::config-constants[]
 
 /// The `RELIABILITY` policy, as a route spells it.
 // tag::reliability[]
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Reliability {
     /// Retry until every matched subscription has the sample. The ROS default.
@@ -32,7 +39,7 @@ pub enum Reliability {
 /// The `DURABILITY` policy, as a route spells it. This is the ROS 2 equivalent
 /// of asking where a late-joining reader starts.
 // tag::durability[]
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Durability {
     /// Only samples published while this endpoint is matched are delivered.
@@ -49,7 +56,7 @@ pub enum Durability {
 
 /// The `HISTORY` policy, as a route spells it.
 // tag::history[]
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum History {
     /// Queue the most recent `depth` samples.
@@ -65,7 +72,7 @@ pub enum History {
 /// policies — deadline, lifespan, liveliness — are left at the ROS defaults,
 /// because a bridge has no basis on which to pick them.
 // tag::qos-config[]
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct QosConfig {
     pub reliability: Reliability,
@@ -120,8 +127,9 @@ impl QosConfig {
 /// the node and topic names, and the payload travels as the `data` field of a
 /// `std_msgs/msg/String`.
 // tag::ros2-config[]
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[schemars(extend("x-mqb-acknowledges" = false))]
 pub struct Ros2Config {
     /// Node name this endpoint appears under in the ROS graph. Defaults to
     /// `mq_bridge_<route>_in` for an input and `mq_bridge_<route>_out` for an
@@ -132,8 +140,11 @@ pub struct Ros2Config {
     /// Absolute namespace for the node, e.g. `/ingest`. Defaults to `/`.
     #[serde(default)]
     pub namespace: Option<String>,
-    /// Topic to subscribe to or publish on. Defaults to the route name.
+    /// Topic to subscribe to or publish on. Defaults to the route name. In a
+    /// URI it is the path without its leading `/`, so `ros2:///chatter` names
+    /// `chatter`, resolved relative to the namespace.
     #[serde(default)]
+    #[schemars(extend("x-mqb-uri" = "path"))]
     pub topic: Option<String>,
     /// Message type, as `<package>/msg/<Type>`.
     #[serde(default = "default_message_type")]
@@ -147,6 +158,17 @@ pub struct Ros2Config {
     /// `ROS_DOMAIN_ID` override. Defaults to whatever the environment says.
     #[serde(default)]
     pub domain_id: Option<usize>,
+    /// Consumer only: messages buffered between the ROS callback and the route.
+    /// When full, the oldest is discarded. Defaults to 1000, or to `qos.depth`
+    /// under `keep_last` when that is larger; an explicit value may not be
+    /// smaller than that depth.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub inbox_capacity: Option<usize>,
+    /// Consumer only: how long a draining (`exit_on_empty`) route waits for the
+    /// first message of a batch before treating the topic as idle.
+    #[serde(default = "default_first_message_wait_ms")]
+    pub first_message_wait_ms: u64,
 }
 // end::ros2-config[]
 
@@ -162,6 +184,32 @@ fn default_payload_field() -> String {
 }
 // end::default-payload-field[]
 
+/// A smaller inbox than the `keep_last` depth would discard what the route
+/// explicitly asked DDS to keep, so that is refused rather than applied.
+// tag::default-inbox-capacity[]
+fn inbox_capacity(config: &Ros2Config) -> anyhow::Result<usize> {
+    let depth = match config.qos.history {
+        History::KeepLast => config.qos.depth as usize,
+        History::KeepAll => 0,
+    };
+    match config.inbox_capacity {
+        None => Ok(DEFAULT_INBOX_CAPACITY.max(depth)),
+        Some(0) => Err(anyhow!("ROS 2 `inbox_capacity` must be at least 1")),
+        Some(capacity) if capacity < depth => Err(anyhow!(
+            "ROS 2 `inbox_capacity` {capacity} is smaller than `qos.depth` {depth}, \
+             so it would discard messages the keep_last history retains"
+        )),
+        Some(capacity) => Ok(capacity),
+    }
+}
+// end::default-inbox-capacity[]
+
+// tag::default-first-message-wait[]
+fn default_first_message_wait_ms() -> u64 {
+    DEFAULT_FIRST_MESSAGE_WAIT_MS
+}
+// end::default-first-message-wait[]
+
 /// A configuration with every default filled in and every name checked, so
 /// nothing downstream has to ask whether a name is usable.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,6 +219,7 @@ pub(crate) struct Resolved {
     pub node: String,
     pub namespace: String,
     pub topic: String,
+    pub inbox_capacity: usize,
 }
 // end::resolved-config[]
 
@@ -271,12 +320,14 @@ fn resolve(
             "ROS 2 `qos.depth` must be at least 1 for keep_last"
         ));
     }
+    let inbox_capacity = inbox_capacity(&config)?;
 
     Ok(Resolved {
         config,
         node,
         namespace,
         topic,
+        inbox_capacity,
     })
 }
 // end::resolve[]
@@ -513,6 +564,7 @@ mod tests {
         assert!(rejects("route", serde_json::json!({"extra": true})));
         assert!(rejects("route", serde_json::json!({"payload_field": " "})));
         assert!(rejects("route", serde_json::json!({"qos": {"depth": 0}})));
+        assert!(rejects("route", serde_json::json!({"inbox_capacity": 0})));
         assert!(rejects(
             "route",
             serde_json::json!({"qos": {"reliability": "eventual"}})
@@ -544,6 +596,40 @@ mod tests {
                 depth: DEFAULT_DEPTH
             }
         );
+    }
+
+    #[test]
+    fn consumer_buffering_has_defaults_and_is_configurable() {
+        let endpoint = resolved("route", serde_json::json!({}));
+        assert_eq!(endpoint.inbox_capacity, DEFAULT_INBOX_CAPACITY);
+        assert_eq!(
+            endpoint.config.first_message_wait_ms,
+            DEFAULT_FIRST_MESSAGE_WAIT_MS
+        );
+
+        let endpoint = resolved(
+            "route",
+            serde_json::json!({"inbox_capacity": 50, "first_message_wait_ms": 100}),
+        );
+        assert_eq!(endpoint.inbox_capacity, 50);
+        assert_eq!(endpoint.config.first_message_wait_ms, 100);
+    }
+
+    #[test]
+    fn the_inbox_never_holds_less_than_the_keep_last_depth() {
+        let deep = resolved("route", serde_json::json!({"qos": {"depth": 5000}}));
+        assert_eq!(deep.inbox_capacity, 5000);
+
+        let keep_all = resolved(
+            "route",
+            serde_json::json!({"qos": {"history": "keep_all", "depth": 5000}}),
+        );
+        assert_eq!(keep_all.inbox_capacity, DEFAULT_INBOX_CAPACITY);
+
+        assert!(rejects(
+            "route",
+            serde_json::json!({"inbox_capacity": 100, "qos": {"depth": 500}})
+        ));
     }
 
     #[test]

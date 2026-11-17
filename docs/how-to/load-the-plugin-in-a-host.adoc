@@ -74,7 +74,7 @@ assert!(info.supports_consumer && info.supports_publisher);
 
 [source,console]
 ----
-pip install mq-bridge-py mq-bridge-ros2
+pip install mq-bridge mq-bridge-ros2
 ----
 
 [source,python]

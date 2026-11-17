@@ -1,6 +1,6 @@
 # mq-bridge-ros2 (Python)
 
-A ROS 2 endpoint for [mq-bridge-py](https://pypi.org/project/mq-bridge-py/),
+A ROS 2 endpoint for [mq-bridge](https://pypi.org/project/mq-bridge/),
 shipped as a native plugin. The package contains no Python implementation of
 ROS 2 — it bundles the compiled Rust endpoint (built on
 [`rclrs`](https://github.com/ros2-rust/ros2_rust)) and registers it with
@@ -11,7 +11,7 @@ Based on the
 [mq-bridge plugin template](https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template).
 
 ```console
-pip install mq-bridge-py mq-bridge-ros2
+pip install mq-bridge mq-bridge-ros2
 ```
 
 A ROS 2 installation has to be sourced in the environment before the
@@ -61,7 +61,7 @@ dependency.
 The generic wheel builder is supplied by mq-bridge:
 
 ```console
-pip install "mq-bridge-py[plugin-packaging]"
+pip install "mq-bridge[plugin-packaging]"
 python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 --out dist
 ```
 
@@ -69,14 +69,21 @@ python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 --out dist
 
 `python/tests/` exercises the endpoint the way Python actually loads it — as a
 native plugin through the ABI — so it complements, rather than repeats, the
-directly linked Rust tests. It covers registration, packaging and the
-configuration surface; delivery semantics are covered by
-`cargo test --test integration`, because a round trip needs a publisher and a
-subscription alive at the same time and ROS 2 has no broker to hold messages in
-between.
+directly linked Rust tests. It covers registration, packaging, the
+configuration surface, a publish-and-receive round trip and the inbox overflow
+reported by `Consumer.status()`.
+
+The reliable way to run it builds the wheel from this checkout and tests it
+against both the oldest supported and the latest mq-bridge, failing on any skip:
 
 ```console
-pip install mq-bridge-py mq-bridge-ros2 pytest
+pixi run test-wheel
+```
+
+Against whatever is installed:
+
+```console
+pip install mq-bridge mq-bridge-ros2 pytest
 pytest python/tests -v
 ```
 
@@ -90,7 +97,7 @@ instead of reporting a confusing `unknown field` failure. To test what you just
 wrote, rebuild and reinstall first:
 
 ```console
-pip install "mq-bridge-py[plugin-packaging]"
+pip install "mq-bridge[plugin-packaging]"
 python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 --out python/dist
 pip install --force-reinstall python/dist/*.whl
 ```

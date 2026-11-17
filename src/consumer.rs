@@ -12,7 +12,7 @@ use anyhow::anyhow;
 use async_trait::async_trait;
 use mq_bridge::{
     errors::ConsumerError as BridgeConsumerError,
-    traits::{BatchCommitFunc, BoxFuture, MessageConsumer},
+    traits::{BatchCommitFunc, BoxFuture, EndpointStatus, MessageConsumer},
     CanonicalMessage, ReceivedBatch,
 };
 use rclrs::{
@@ -22,15 +22,11 @@ use rclrs::{
 use tokio::sync::Notify;
 
 use crate::{
-    config::{self, History},
-    message,
+    config, message,
     runtime::{self, Ros2Runtime},
 };
 
-/// Only applied while draining, so an idle topic yields an empty batch and lets
-/// `exit_on_empty` fire. Live consumption blocks until a message arrives.
 // tag::consumer-timing[]
-const FIRST_MESSAGE_WAIT: Duration = Duration::from_millis(250);
 const NEXT_MESSAGE_WAIT: Duration = Duration::from_millis(5);
 // end::consumer-timing[]
 
@@ -38,23 +34,21 @@ const NEXT_MESSAGE_WAIT: Duration = Duration::from_millis(5);
 /// which pulls. `rclrs` exposes no way to take a message from a subscription on
 /// demand, so a queue in between is unavoidable.
 ///
-/// Its bound is the route's own history policy rather than a number of this
-/// endpoint's choosing: `keep_last: depth` holds at most `depth` messages and
-/// discards the oldest beyond that, which is what a KEEP_LAST reader queue
-/// upstream already does, and `keep_all` holds everything. So the policy a
-/// route asked ROS for is the policy it also gets on this side of the callback.
+/// Its bound is the route's `inbox_capacity`, at least the `keep_last` depth, so a
+/// briefly stalled sink does not lose messages at the small DDS queue depth and
+/// `keep_all` cannot grow without limit. Beyond it the oldest is discarded.
 // tag::inbox[]
 struct Inbox {
     queue: Mutex<VecDeque<CanonicalMessage>>,
     arrived: Notify,
-    capacity: Option<usize>,
+    capacity: usize,
     discarded: AtomicU64,
 }
 // end::inbox[]
 
 impl Inbox {
     // tag::inbox-new[]
-    fn new(capacity: Option<usize>) -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             queue: Mutex::new(VecDeque::new()),
             arrived: Notify::new(),
@@ -68,11 +62,9 @@ impl Inbox {
     fn push(&self, message: CanonicalMessage) {
         {
             let mut queue = lock(&self.queue);
-            if let Some(capacity) = self.capacity {
-                while queue.len() >= capacity {
-                    queue.pop_front();
-                    self.discarded.fetch_add(1, Ordering::Relaxed);
-                }
+            while queue.len() >= self.capacity {
+                queue.pop_front();
+                self.discarded.fetch_add(1, Ordering::Relaxed);
             }
             queue.push_back(message);
         }
@@ -100,6 +92,10 @@ impl Inbox {
         self.discarded.load(Ordering::Relaxed)
     }
     // end::inbox-discarded[]
+
+    fn len(&self) -> usize {
+        lock(&self.queue).len()
+    }
 }
 
 /// The queue only ever holds messages, so a poisoned lock still holds a usable
@@ -122,6 +118,8 @@ struct Ros2Consumer {
     /// subscription it is pumping is torn down.
     runtime: Ros2Runtime,
     exit_on_empty: bool,
+    first_message_wait: Duration,
+    topic: String,
 }
 // end::ros2-consumer[]
 
@@ -143,10 +141,7 @@ pub(crate) async fn create(
     message::carrier_for(metadata.structure(), &endpoint.config.payload_field)
         .map_err(permanent)?;
 
-    let inbox = Arc::new(Inbox::new(match endpoint.config.qos.history {
-        History::KeepLast => Some(endpoint.config.qos.depth as usize),
-        History::KeepAll => None,
-    }));
+    let inbox = Arc::new(Inbox::new(endpoint.inbox_capacity));
 
     let field = endpoint.config.payload_field.clone();
     let topic = endpoint.topic.clone();
@@ -180,6 +175,8 @@ pub(crate) async fn create(
         inbox,
         runtime,
         exit_on_empty: false,
+        first_message_wait: Duration::from_millis(endpoint.config.first_message_wait_ms),
+        topic: endpoint.topic,
     }))
 }
 // end::create-consumer[]
@@ -209,10 +206,10 @@ impl MessageConsumer for Ros2Consumer {
             let discarded = self.inbox.discarded();
             if discarded > 0 {
                 // Worth saying once, at the end: a route that consistently
-                // overflows its own `qos.depth` is losing data by configuration.
+                // overflows its own `inbox_capacity` is losing data by configuration.
                 eprintln!(
                     "mq-bridge-ros2: discarded {discarded} message(s) that overflowed \
-                     `qos.depth` on node {}",
+                     `inbox_capacity` on node {}",
                     self.runtime.node().name()
                 );
             }
@@ -220,6 +217,19 @@ impl MessageConsumer for Ros2Consumer {
         }))
     }
     // end::on-disconnect-hook[]
+
+    // tag::consumer-status[]
+    async fn status(&self) -> EndpointStatus {
+        EndpointStatus {
+            healthy: true,
+            target: self.topic.clone(),
+            pending: Some(self.inbox.len()),
+            capacity: Some(self.inbox.capacity),
+            error: None,
+            details: serde_json::json!({ "discarded": self.inbox.discarded() }),
+        }
+    }
+    // end::consumer-status[]
 
     // tag::receive-batch[]
     async fn receive_batch(
@@ -239,7 +249,7 @@ impl MessageConsumer for Ros2Consumer {
             // A ROS topic never ends, so unlike a queue with a closed stream
             // this can never report `EndOfStream`; a drained route stops on the
             // empty batch below instead.
-            match message_wait(messages.len(), self.exit_on_empty) {
+            match message_wait(messages.len(), self.exit_on_empty, self.first_message_wait) {
                 Some(wait) => {
                     if tokio::time::timeout(wait, self.inbox.wait()).await.is_err() {
                         break;
@@ -278,12 +288,12 @@ impl MessageConsumer for Ros2Consumer {
 
 /// How long to wait for the message at `index`, or `None` to wait indefinitely.
 /// A live route blocks for its first message; a draining one gives up after
-/// [`FIRST_MESSAGE_WAIT`] so the empty batch can end the route.
+/// `first_wait` (`first_message_wait_ms`) so the empty batch can end the route.
 // tag::message-wait[]
-fn message_wait(index: usize, exit_on_empty: bool) -> Option<Duration> {
+fn message_wait(index: usize, exit_on_empty: bool, first_wait: Duration) -> Option<Duration> {
     match index {
         0 if !exit_on_empty => None,
-        0 => Some(FIRST_MESSAGE_WAIT),
+        0 => Some(first_wait),
         _ => Some(NEXT_MESSAGE_WAIT),
     }
 }
@@ -342,21 +352,23 @@ mod tests {
         assert!(validate_disposition_count(2, 1).is_err());
     }
 
+    const FIRST_WAIT: Duration = Duration::from_millis(2000);
+
     #[test]
     fn live_consumption_waits_for_the_first_message() {
-        assert_eq!(message_wait(0, false), None);
-        assert_eq!(message_wait(1, false), Some(NEXT_MESSAGE_WAIT));
+        assert_eq!(message_wait(0, false, FIRST_WAIT), None);
+        assert_eq!(message_wait(1, false, FIRST_WAIT), Some(NEXT_MESSAGE_WAIT));
     }
 
     #[test]
-    fn draining_gives_up_on_an_idle_topic() {
-        assert_eq!(message_wait(0, true), Some(FIRST_MESSAGE_WAIT));
-        assert_eq!(message_wait(1, true), Some(NEXT_MESSAGE_WAIT));
+    fn draining_gives_up_on_an_idle_topic_after_the_configured_wait() {
+        assert_eq!(message_wait(0, true, FIRST_WAIT), Some(FIRST_WAIT));
+        assert_eq!(message_wait(1, true, FIRST_WAIT), Some(NEXT_MESSAGE_WAIT));
     }
 
     #[test]
     fn the_inbox_hands_messages_over_in_order() {
-        let inbox = Inbox::new(Some(4));
+        let inbox = Inbox::new(4);
         inbox.push(message("one"));
         inbox.push(message("two"));
 
@@ -366,8 +378,8 @@ mod tests {
     }
 
     #[test]
-    fn keep_last_drops_the_oldest_message_like_a_reader_queue_does() {
-        let inbox = Inbox::new(Some(2));
+    fn a_full_inbox_drops_the_oldest_message() {
+        let inbox = Inbox::new(2);
         for payload in ["one", "two", "three"] {
             inbox.push(message(payload));
         }
@@ -377,21 +389,21 @@ mod tests {
     }
 
     #[test]
-    fn keep_all_never_discards() {
-        let inbox = Inbox::new(None);
-        for index in 0..1_000 {
+    fn the_inbox_is_bounded_by_its_capacity() {
+        let inbox = Inbox::new(1_000);
+        for index in 0..1_500 {
             inbox.push(message(&index.to_string()));
         }
 
         assert_eq!(payloads(&inbox).len(), 1_000);
-        assert_eq!(inbox.discarded(), 0);
+        assert_eq!(inbox.discarded(), 500);
     }
 
     #[tokio::test]
     async fn a_waiter_is_woken_by_a_message_that_arrived_before_it_waited() {
         // The race `notify_one`'s stored permit exists to close: the callback
         // fires between `pop` returning `None` and `wait` being awaited.
-        let inbox = Inbox::new(Some(4));
+        let inbox = Inbox::new(4);
         inbox.push(message("early"));
 
         tokio::time::timeout(Duration::from_millis(50), inbox.wait())
@@ -401,7 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_waiter_is_woken_by_a_later_push() {
-        let inbox = Arc::new(Inbox::new(Some(4)));
+        let inbox = Arc::new(Inbox::new(4));
         let sink = Arc::clone(&inbox);
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(10)).await;

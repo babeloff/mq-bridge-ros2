@@ -82,7 +82,7 @@ The two packages are deliberately independent, so installing this one does not p
 
 [source,console]
 ----
-pip install mq-bridge-py
+pip install mq-bridge
 ----
 
 == Loading the library fails with undefined symbols, or a mismatched distribution
@@ -168,16 +168,18 @@ Two distinct causes.
 With `volatile` durability, samples published before discovery matched the two sides are genuinely lost.
 That is expected, not a fault; see xref:receive-earlier-messages.adoc[Receive messages published before the route started].
 
-Otherwise the route may be falling behind its own `qos.depth`.
-The consumer buffers at most `depth` messages between the ROS callback and the route and discards the oldest beyond that, mirroring a KEEP_LAST reader queue.
-Discards are counted and reported on stderr when the endpoint closes:
+Otherwise the route may be falling behind its own `inbox_capacity`.
+The consumer buffers at most `inbox_capacity` messages (default 1000, or `qos.depth` under `keep_last` if larger) between the ROS callback and the route and discards the oldest beyond that.
+Discards are shown as `details.discarded` in the route's status while it runs, and reported on stderr when the endpoint closes:
 
 [source,text]
 ----
-mq-bridge-ros2: discarded 41 message(s) that overflowed `qos.depth` on node mq_bridge_orders_in
+mq-bridge-ros2: discarded 41 message(s) that overflowed `inbox_capacity` on node mq_bridge_orders_in
 ----
 
-Raise `depth`, or use `history: keep_all` to remove the bound.
+Raise `inbox_capacity`, or speed up the route's output.
+
+A draining route (`exit_on_empty`) that ends without any message may simply not have waited long enough for discovery; raise `first_message_wait_ms`.
 
 == See also
 

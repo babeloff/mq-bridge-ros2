@@ -1,7 +1,7 @@
 schema_version: 1
 
 context:
-  version: "0.4.19"
+  version: "0.5.0"
 
 # `ros_distro` is deliberately *not* a context value: it comes from
 # variants.yaml, which makes it a variant axis. One build then produces one
@@ -78,8 +78,9 @@ requirements:
     - ros-${{ ros_distro }}-ros-base
     # The default message type, and the one every example uses.
     - ros-${{ ros_distro }}-std-msgs
-    # Deliberately not a dependency: mq-bridge-py is installed and upgraded
-    # independently, and `register()` reports a clear error when it is absent.
+    # Deliberately not a dependency: the Python host (`mq-bridge-py` on conda,
+    # `mq-bridge` on PyPI) is installed and upgraded independently, and
+    # `register()` reports a clear error when it is absent.
 
 tests:
   - script:
@@ -91,7 +92,7 @@ tests:
         # symbol the library needs resolves from the run environment.
         #
         # Deliberately does not call `mq_bridge_ros2.library_path()`, which goes
-        # through mq-bridge-py — not a dependency here, so it would fail with an
+        # through the Python host (`mq-bridge-py`) — not a dependency here, so it would fail with an
         # ImportError that says nothing about this package.
         python -c "
         import ctypes, json, pathlib

@@ -56,6 +56,10 @@ Ten environment/platform pairs is why the lock file is a couple of megabytes; on
 | `test.py`
 | Runs the unit, integration and conformance suites.
 
+| `test-wheel`
+| `test_wheel.py`
+| Builds the Python wheel and tests it against the oldest supported and the latest `mq-bridge`.
+
 | `check`
 | `check.py`
 | Formatting, clippy, version sync, doctests, licence copies and a type check without ROS.
@@ -116,7 +120,7 @@ pixi run test                  # unit, integration and conformance
 pixi run test --unit
 pixi run test --integration
 pixi run test --conformance
-pixi run test --python         # additionally, the Python plugin tests
+pixi run test --python         # additionally, test-wheel
 pixi run test --node           # additionally, the npm smoke test
 ----
 
@@ -125,6 +129,19 @@ The Rust test binaries link the ROS libraries, so none of them can load without 
 
 The integration and conformance suites are marked `#[ignore]` so a bare `cargo test` stays fast; this task passes `--ignored` to reach them.
 Neither needs a broker.
+
+== `test-wheel`
+
+[source,console]
+----
+pixi run test-wheel                                     # build, then test
+python pixi-scripts/test_wheel.py --wheel dist/x.whl   # test a built wheel
+----
+
+Installs the wheel into fresh virtual environments under `build/python-tests/`, one with the lowest `mq-bridge` that `Cargo.toml` allows and one with the latest from PyPI, and runs `python/tests` in each.
+It is the only suite that crosses the plugin ABI between different `mq-bridge` versions.
+A skipped test fails the task, because a run that skipped everything proves nothing.
+CI runs it per ROS distribution, and the release runs it on each published wheel after retagging and repair.
 
 == `check`
 
@@ -189,8 +206,8 @@ Builds the Python wheel for the active ROS distribution. The wheel build additio
 
 [source,console]
 ----
-pixi run homebrew -- 0.4.19
-pixi run homebrew -- 0.4.19 babeloff/mq-bridge-ros2 build/homebrew
+pixi run homebrew -- 0.5.0
+pixi run homebrew -- 0.5.0 babeloff/mq-bridge-ros2 build/homebrew
 ----
 
 Downloads the release checksums for the four supported macOS and Linux targets and writes `Formula/mq-bridge-ros2.rb` under the output directory.
@@ -258,8 +275,7 @@ This task establishes that the commit deserves the release, and creates the tag.
 
 The push is a separate flag because it is the irreversible step: crates.io and PyPI allow a published version to be yanked but never replaced.
 
-The version is read from `Cargo.toml` after `pixi run follow-version` has aligned
-it with the latest `mq-bridge` release.
+The version is read from `Cargo.toml`, as written by `scripts/set_version.py`.
 
 The gates, all reported together:
 
@@ -288,7 +304,7 @@ If a tag's workflow fails before creating or completing its release, rerun it ma
 
 [source,console]
 ----
-gh workflow run release.yml -f release_tag=0.4.19
+gh workflow run release.yml -f release_tag=0.5.0
 ----
 
 == Version tasks
@@ -332,7 +348,7 @@ Use it after editing `Cargo.toml` by hand, or when a merge has left one manifest
 
 [source,text]
 ----
-versions do not match Cargo.toml '0.4.19': {'node/package.json': '0.4.20', ...}
+versions do not match Cargo.toml '0.5.0': {'node/package.json': '0.5.1', ...}
 ----
 
 `--check` is what CI and `pixi run check` use.

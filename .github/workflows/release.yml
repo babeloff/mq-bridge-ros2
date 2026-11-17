@@ -7,15 +7,15 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Version tag to package, for example 0.4.19"
+        description: "Version tag to package, for example 0.5.0"
         required: true
         type: string
 
 env:
   RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
-  # The packaging CLI is released separately from mq-bridge and currently
-  # lags the core/plugin version. Keep this independent from RELEASE_TAG.
-  MQ_BRIDGE_PACKAGER_VERSION: "0.4.16"
+  # The packaging CLI ships with the PyPI `mq-bridge` package, which is
+  # versioned independently of this plugin. Keep this independent from RELEASE_TAG.
+  MQ_BRIDGE_PACKAGER_VERSION: "1.6.1"
   CARGO_TERM_COLOR: always
   CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_NET_RETRY: "5"
@@ -122,7 +122,7 @@ jobs:
         run: |
           npm install --no-package-lock
           python -m pip install \
-            "mq-bridge-py[plugin-packaging]==${MQ_BRIDGE_PACKAGER_VERSION}" \
+            "mq-bridge[plugin-packaging]==${MQ_BRIDGE_PACKAGER_VERSION}" \
             build
 
       - name: Stage npm native library
@@ -154,6 +154,11 @@ jobs:
           python -m auditwheel repair python/dist/*.whl --wheel-dir python/repaired
           rm python/dist/*.whl
           mv python/repaired/*.whl python/dist/
+
+      # After retagging and repair, so the wheel tested is the one published.
+      - name: Test Python wheel
+        shell: bash
+        run: python pixi-scripts/test_wheel.py --wheel python/dist/*.whl
 
       - name: Build standalone plugin archive
         shell: bash

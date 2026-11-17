@@ -5,7 +5,7 @@ ROS 2, implemented with [`rclrs`](https://github.com/ros2-rust/ros2_rust). It
 supports both ROS 2 inputs and outputs without adding ROS dependencies to
 mq-bridge.
 
-Based on mq-bridge's [plugin template](https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template),
+Based on mq-bridge's [plugin template](https://github.com/marcomq/mq-bridge-plugin-template),
 with a ROS 2 endpoint implementation using `rclrs`.
 
 Message types are resolved at run time through `rclrs`' dynamic messages, so the
@@ -51,7 +51,6 @@ pixi run docs      # render the documentation
 pixi run conda   # build one conda package per ROS distribution
 pixi run publish   # upload and index them in the program-forge registry
 pixi run release   # check everything, then tag a release
-pixi run follow-version        # follow the latest mq-bridge release
 pixi run sync-version         # make every manifest match Cargo.toml
 ```
 
@@ -79,27 +78,36 @@ Register the endpoint before any route starts:
 mq_bridge_ros2::register()?;
 ```
 
-Then use the explicit custom endpoint form. Every field has a default, so
-`config: {}` is valid:
+Then address it by name. Every field has a default, so `ros2: {}` is valid:
 
 ```yaml
 input:
-  custom:
-    name: ros2
-    config:
-      topic: "/orders/new"                    # optional; route name by default
-      message_type: "std_msgs/msg/String"     # optional; this is the default
-      payload_field: "data"                   # optional; this is the default
-      node: "ingest_bridge"                   # optional; mq_bridge_<route>_in/_out by default
-      namespace: "/ingest"                    # optional; "/" by default
-      domain_id: 0                            # optional; ROS_DOMAIN_ID by default
-      qos:                                    # optional
-        reliability: reliable                 # reliable | best_effort | system_default
-        durability: transient_local           # volatile | transient_local | system_default
-        history: keep_last                    # keep_last | keep_all
-        depth: 100
-        require_subscribers: false             # wait for a matched reader before send
+  ros2:
+    topic: "/orders/new"                    # optional; route name by default
+    message_type: "std_msgs/msg/String"     # optional; this is the default
+    payload_field: "data"                   # optional; this is the default
+    node: "ingest_bridge"                   # optional; mq_bridge_<route>_in/_out by default
+    namespace: "/ingest"                    # optional; "/" by default
+    domain_id: 0                            # optional; ROS_DOMAIN_ID by default
+    inbox_capacity: 1000                    # input only; messages buffered for the route
+    first_message_wait_ms: 250              # input only; idle wait before a drain ends
+    qos:                                    # optional
+      reliability: reliable                 # reliable | best_effort | system_default
+      durability: transient_local           # volatile | transient_local | system_default
+      history: keep_last                    # keep_last | keep_all
+      depth: 100
+      require_subscribers: false            # wait for a matched reader before send
 ```
+
+The long form `custom: { name: ros2, config: {...} }` is the same endpoint, for
+configs validated against `mq-bridge.schema.json`.
+
+The endpoint publishes a JSON schema of this configuration, so hosts render a
+form for it and a URI maps onto it with typed values. The URI path is the
+topic, without its leading `/`: `ros2:///chatter?message_type=std_msgs/msg/String`
+names the topic `chatter`, resolved relative to the namespace — the same as
+`/chatter` under the default namespace `/`. `qos` is nested and therefore only
+settable from YAML or JSON, not from URI parameters.
 
 Names are checked, not repaired. A name the endpoint *derives* from the route
 name is sanitised, because route names routinely contain characters ROS forbids
@@ -172,11 +180,23 @@ Two habits from broker-backed endpoints do not survive the move:
   consumer would not look, and a received message carries only `ros2_topic` and
   `ros2_message_type`.
 
-Consumers buffer between the ROS callback and the route using the route's own
-history policy: `keep_last: depth` holds at most `depth` messages and discards
-the oldest beyond that, exactly as a KEEP_LAST reader queue upstream does, while
-`keep_all` holds everything. Discards are counted and reported when the endpoint
-closes.
+Because nothing is acknowledged, the endpoint declares itself at-most-once
+(`x-mqb-acknowledges: false`), and mq-bridge refuses a route from it that asks
+for `required_delivery: at_least_once`.
+
+Consumers buffer between the ROS callback and the route in an inbox of
+`inbox_capacity` messages, so a briefly stalled output does not lose messages at
+the small DDS queue depth and `keep_all` cannot grow without bound. The default is
+1000, or `qos.depth` under `keep_last` when that is larger; an explicit
+`inbox_capacity` below that depth is rejected. When the inbox is full the oldest
+message is discarded. Discards are summarised in one warning when the consumer
+closes and reported in its `status()` (`pending`, `capacity` and
+`details.discarded`). For a route with a slow output, raise `inbox_capacity`.
+
+A draining route (`exit_on_empty`) ends when no message arrives within
+`first_message_wait_ms` (default 250 ms). DDS discovery has to match the
+subscription to its publishers first, which can take longer than that, so a
+drain that must see a fresh publisher should raise it, for example to 2000.
 
 ## Example
 
@@ -227,9 +247,41 @@ import { register } from "mq-bridge-ros2";
 register(); // once, before starting routes
 ```
 
-The configuration is the same in every language (`name: ros2`). See
+The configuration is the same in every language (`ros2:`). See
 [PLUGINS.md](https://github.com/marcomq/mq-bridge/blob/main/docs/PLUGINS.md) for
 how loading, versioning and the ABI work.
+
+### With `mqb` or mq-bridge-app, without code
+
+`mqb` and the desktop app find an installed plugin by its endpoint name:
+putting `libmq_bridge_ros2.so` (Linux) or `libmq_bridge_ros2.dylib` (macOS) into
+a plugin directory — for example one listed in `MQB_PLUGIN_DIR`, or the conda
+package installing it under `$CONDA_PREFIX/lib/mq-bridge` — is the whole
+installation step:
+
+```console
+mqb copy 'ros2:///chatter?message_type=std_msgs/msg/String' 'mqtt://localhost:1883/robot'
+```
+
+A program embedding mq-bridge loads it by name instead of by path:
+
+```rust
+mq_bridge::plugin::load_installed_plugin("ros2")?;   // Rust
+```
+
+```python
+mq_bridge.load_installed_plugin("ros2")              # Python
+```
+
+```javascript
+loadInstalledPlugin("ros2");                         // Node.js
+```
+
+Either way a ROS 2 environment has to be sourced in the process at run time,
+and it has to be the distribution the library was built for (`humble` or
+`jazzy`, named in the conda build string): the library links, or with
+`ros-shim` resolves by `dlopen`, that distribution's `rcl` libraries, whose ABI
+differs between distributions.
 
 ### Packaging
 
@@ -242,8 +294,8 @@ pixi run conda
 ```
 
 ```text
-build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_humble_hee40719_0.conda
-build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
+build/conda/linux-64/mq-bridge-ros2-0.5.0-ros2_humble_hee40719_0.conda
+build/conda/linux-64/mq-bridge-ros2-0.5.0-ros2_jazzy_h2a6e838_0.conda
 ```
 
 `humble` and `jazzy` are built and tested. The endpoint's source is
@@ -256,7 +308,7 @@ name. The npm release is a single package containing all staged binaries under
 `node/prebuilds/`. Build on each target, merge those directories, then pack once:
 
 ```console
-pip install "mq-bridge-py[plugin-packaging]"
+pip install "mq-bridge[plugin-packaging]"
 python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 --out dist
 mq-bridge-package-plugin
 mq-bridge-package-plugin --pack --out npm
@@ -282,12 +334,14 @@ to build the plugin without one: `rclrs` vendors several message packages whose
 generated code links real ROS libraries, so producing the `cdylib` still
 requires them.
 
-The package version tracks the latest `mq-bridge` release. Update every
-ecosystem manifest together before tagging a release:
+The package is versioned independently of `mq-bridge`; the range of
+`mq-bridge` versions it works with is declared in each manifest (currently
+`>=0.4.19, <2`). Update every ecosystem manifest together before tagging a
+release:
 
 ```console
-pixi run follow-version         # read the latest mq-bridge version
-pixi run sync-version --check  # verify they agree
+python scripts/set_version.py 0.5.1   # write one version into every manifest
+pixi run sync-version --check         # verify they agree
 ```
 
 That covers `Cargo.toml`, both npm manifests, `python/pyproject.toml` and the

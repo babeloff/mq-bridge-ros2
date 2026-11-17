@@ -119,14 +119,16 @@ mq-bridge consumers *pull*: `receive_batch` asks for up to N messages.
 Something has to sit between them, and that something needs an overflow policy —
 which is a decision about when to lose data, so it should not be invented quietly.
 
-Rather than pick a buffer size, the endpoint reuses the policy the route already stated.
-`history: keep_last` with `depth: N` holds at most N messages and discards the oldest beyond that,
-which is precisely what a KEEP\_LAST reader queue upstream does anyway;
-the route's stated intent is applied twice rather than contradicted once.
-`history: keep_all` holds everything and lets memory be the only bound, matching what "keep all" asks for.
+The buffer is bounded by `inbox_capacity`: by default 1000, or `qos.depth` under `keep_last` when that is larger.
+Reusing `depth` alone would make the default of 10 drop messages the moment the output stalls briefly,
+and `keep_all` would leave memory as the only bound.
+An explicit `inbox_capacity` below the `keep_last` depth is rejected, because it would discard what the route asked DDS to retain.
+When the inbox is full the oldest message is discarded — the same choice a KEEP\_LAST reader queue makes.
 
-Discards are counted and reported on stderr when the endpoint closes,
-because a route that routinely overflows its own `depth` is losing data by configuration and should be told.
+Discards cannot be prevented, because DDS has no way to push back on a publisher through a full callback queue without stalling the executor, but they are made visible:
+`pending`, `capacity` and `details.discarded` in the consumer's `status()`,
+and a summary warning when the consumer closes.
+A route that routinely overflows its inbox is losing data by configuration and should be told.
 
 == What does carry over unchanged
 

@@ -40,8 +40,8 @@ pixi run conda
 building for ROS 2: humble, jazzy
 
 conda package(s):
-  build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_humble_hee40719_0.conda
-  build/conda/linux-64/mq-bridge-ros2-0.4.19-ros2_jazzy_h2a6e838_0.conda
+  build/conda/linux-64/mq-bridge-ros2-0.5.0-ros2_humble_hee40719_0.conda
+  build/conda/linux-64/mq-bridge-ros2-0.5.0-ros2_jazzy_h2a6e838_0.conda
 ----
 
 The distribution is in the build string, so the two cannot be installed over each other by accident.
@@ -146,14 +146,14 @@ The release recipe exists to package the tested release archive without rebuildi
 
 == Keep the versions in step
 
-The package version tracks the latest `mq-bridge` release. `Cargo.toml` and
-`pixi.toml` carry that tracked version.
+The package is versioned independently of `mq-bridge`; the supported `mq-bridge` range (`>=0.4.19, <2`) is declared in `Cargo.toml`, `node/package.json` and the conda release recipe.
+`Cargo.toml` and `pixi.toml` carry the package version.
 Both npm manifests, `python/pyproject.toml` and the conda recipe's `context.version` must agree with it, or a release ships mismatched versions:
 
 [source,console]
 ----
-pixi run follow-version         # follow the latest mq-bridge release
-pixi run sync-version --check  # verify they agree
+python scripts/set_version.py 0.5.1   # write one version into every manifest
+pixi run sync-version --check         # verify they agree
 ----
 
 CI runs the check, and `pixi run check` includes it.
@@ -172,7 +172,7 @@ Use:
 
 [source,console]
 ----
-pixi run follow-version
+python scripts/set_version.py 0.5.1
 pixi run sync-version --check
 pixi run release --dry-run
 pixi run release --push
@@ -183,7 +183,7 @@ The workflow also has a manual dispatch for rerunning an existing tag after a wo
 
 [source,console]
 ----
-gh workflow run release.yml -f release_tag=0.4.19
+gh workflow run release.yml -f release_tag=0.5.0
 ----
 
 The manual run checks out `main`, packages the requested version, and updates that tag's GitHub Release.
