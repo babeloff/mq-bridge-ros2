@@ -1,35 +1,30 @@
 """Tests for the ROS 2 endpoint as Python loads it: a native plugin.
 
 This is the `cdylib` path — `register()` hands the bundled library to
-mq-bridge's generic loader — so it exercises the plugin ABI, the packaging and
-the configuration surface rather than delivery semantics.
+mq-bridge's generic loader — so it exercises the plugin ABI, the packaging, the
+configuration surface and the data path across the ABI.
 
-    pip install mq-bridge-py mq-bridge-ros2     # or a locally built wheel
-    pytest python/tests -v
+    pixi run test-wheel                         # builds, then tests two hosts
+    pytest python/tests -v                      # against what is installed
 
 Every test skips (rather than fails) when the packages are missing or no ROS 2
-installation is sourced, so the file is safe to collect anywhere.
+installation is sourced, so the file is safe to collect anywhere. `test-wheel`
+turns any skip into a failure.
 
-## Why there is no publish-then-drain test here
-
-The template's broker-backed examples publish with one route and drain with
-another, later. ROS 2 has no broker, so that cannot work: samples retained for
-a late-joining subscription are held by the *publisher*, and a publishing route
-that has exited takes them with it. A round trip therefore needs a publisher and
-a subscription alive at the same time, which is what
-`cargo test --test integration` does — it covers ordering, `transient_local`
-backlog delivery and non-UTF-8 payloads against a real middleware. Duplicating
-that here would only re-test rclrs.
+The round trips use a long-lived `Publisher` and `Consumer`, not two routes:
+ROS 2 has no broker, samples retained for a late joiner are held by the
+publisher, and a publishing route that has exited takes them with it.
 """
 
 import json
 import os
+import time
 import uuid
 from pathlib import Path
 
 import pytest
 
-mq_bridge = pytest.importorskip("mq_bridge", reason="mq-bridge-py is not installed")
+mq_bridge = pytest.importorskip("mq_bridge", reason="mq-bridge is not installed")
 mq_bridge_ros2 = pytest.importorskip(
     "mq_bridge_ros2", reason="mq-bridge-ros2 is not installed"
 )
@@ -74,34 +69,63 @@ def _ros2_endpoint(topic: str, **extra) -> str:
     return f"    custom:\n      name: ros2\n      config:\n{lines}"
 
 
-def _supports_qos() -> bool:
-    """Whether the *installed* plugin knows the `qos` field.
+def _plugin_matches_checkout() -> bool:
+    """Whether the *installed* plugin knows the newest config fields.
 
     A wheel is a compiled artifact, so `pip install mq-bridge-ros2` can easily
     be older than this checkout. Probing beats a confusing `unknown field`
     failure that looks like a bug in the endpoint rather than a stale install.
     """
+    probe = _ros2_endpoint(
+        "mq_bridge_pytest_probe",
+        qos={"durability": "transient_local"},
+        inbox_capacity=1000,
+        first_message_wait_ms=100,
+    )
     try:
         mq_bridge.Route.from_str(
             f"""
 input:
-{_ros2_endpoint("mq_bridge_pytest_probe", qos={"durability": "transient_local"})}
+{probe}
 output:
-  file: {{ path: "/dev/null" }}
+  file: {{ path: "{os.devnull}" }}
 exit_on_empty: true
 """
         ).run()
     except Exception as error:  # noqa: BLE001 - any failure is inspected below
-        return "unknown field `qos`" not in str(error)
+        return "unknown field" not in str(error)
     return True
 
 
-requires_qos = pytest.mark.skipif(
-    _ros2_is_sourced() and not _supports_qos(),
-    reason="the installed mq-bridge-ros2 predates `qos`; rebuild the wheel from this "
-    "checkout: python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 "
+requires_current_plugin = pytest.mark.skipif(
+    _ros2_is_sourced() and not _plugin_matches_checkout(),
+    reason="the installed mq-bridge-ros2 is older than this checkout; rebuild the wheel: "
+    "python -m mq_bridge.plugin_packaging --package python/mq_bridge_ros2 "
     "--out python/dist",
 )
+
+
+def _live_endpoint(topic: str, node: str, **extra) -> dict:
+    """`transient_local` with `keep_all`, so nothing depends on discovery timing."""
+    config = {
+        "topic": topic,
+        "node": node,
+        "domain_id": TEST_DOMAIN_ID,
+        "qos": {"durability": "transient_local", "history": "keep_all"},
+        **extra,
+    }
+    return {"custom": {"name": "ros2", "config": config}}
+
+
+def _poll(consumer, count: int, timeout_s: float = 30.0) -> list:
+    received = []
+    deadline = time.monotonic() + timeout_s
+    while len(received) < count and time.monotonic() < deadline:
+        batch = consumer.poll(max=count - len(received), timeout_ms=500)
+        if batch:
+            consumer.commit()
+            received.extend(batch)
+    return received
 
 
 def test_register_is_idempotent(registered):
@@ -114,7 +138,39 @@ def test_library_path_points_at_a_real_file():
 
 
 @requires_ros2
-@requires_qos
+@requires_current_plugin
+def test_a_round_trip_through_the_plugin_keeps_payloads_and_order(topic):
+    publisher = mq_bridge.Publisher.from_config(_live_endpoint(topic, "pytest_out"))
+    with mq_bridge.Consumer.from_config(_live_endpoint(topic, "pytest_in")) as consumer:
+        publisher.send_batch([b"one", b"two", b"three"])
+        received = _poll(consumer, 3)
+
+    assert [message.payload for message in received] == [b"one", b"two", b"three"]
+
+
+@requires_ros2
+@requires_current_plugin
+def test_a_full_inbox_keeps_the_newest_messages_and_reports_the_rest(topic):
+    """Nothing is polled while five messages arrive, so three must be discarded."""
+    publisher = mq_bridge.Publisher.from_config(_live_endpoint(topic, "pytest_out"))
+    consumer_config = _live_endpoint(topic, "pytest_in", inbox_capacity=2)
+    with mq_bridge.Consumer.from_config(consumer_config) as consumer:
+        publisher.send_batch([b"one", b"two", b"three", b"four", b"five"])
+
+        deadline = time.monotonic() + 30
+        status = consumer.status()
+        while status["details"].get("discarded", 0) < 3 and time.monotonic() < deadline:
+            time.sleep(0.05)
+            status = consumer.status()
+
+        assert status["capacity"] == 2
+        assert status["pending"] == 2
+        assert status["details"]["discarded"] == 3
+        assert [message.payload for message in _poll(consumer, 2)] == [b"four", b"five"]
+
+
+@requires_ros2
+@requires_current_plugin
 def test_a_drain_of_an_idle_topic_ends_without_a_publisher(tmp_path, topic):
     """A subscription with nothing to read must end, not hang.
 

@@ -161,6 +161,39 @@ async fn require_subscribers_returns_a_retryable_failure_without_a_reader() {
     ));
 }
 
+/// `spin` clears a halt request that arrives before it starts, so an endpoint
+/// dropped right after creation must still stop its executor. The rounds run on
+/// a thread of their own because a hang there is synchronous and no async
+/// timeout could interrupt it.
+#[tokio::test]
+#[ignore = "requires a sourced ROS 2 installation"]
+async fn an_endpoint_dropped_right_after_creation_shuts_down() {
+    let factory = factory().await;
+    let topic = test_topic("immediate_drop");
+    let route_name = "immediate-drop";
+
+    let (finished, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        futures::executor::block_on(async {
+            for _ in 0..20 {
+                let publisher = factory
+                    .create_publisher(route_name, &config(&topic, "immediate_drop_out"))
+                    .await
+                    .expect("create ROS 2 publisher");
+                drop(publisher);
+                let consumer = factory
+                    .create_consumer(route_name, &config(&topic, "immediate_drop_in"))
+                    .await
+                    .expect("create ROS 2 consumer");
+                drop(consumer);
+            }
+        });
+        let _ = finished.send(());
+    });
+    done.recv_timeout(Duration::from_secs(60))
+        .expect("dropping freshly created ROS 2 endpoints hung");
+}
+
 /// The ROS 2 counterpart of reading a backlog: the publish deliberately happens
 /// before any subscription exists, so only a retained sample can satisfy it.
 #[tokio::test]

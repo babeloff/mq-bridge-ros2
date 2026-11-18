@@ -1,7 +1,7 @@
 //! ROS 2 input/output endpoint extension for `mq-bridge`.
 //!
 //! Based on mq-bridge's
-//! [plugin template](https://github.com/marcomq/mq-bridge/tree/main/examples/plugin-template),
+//! [plugin template](https://github.com/marcomq/mq-bridge-plugin-template),
 //! with a ROS 2 implementation using `rclrs`.
 //!
 //! The same implementation is used three ways:
@@ -87,4 +87,35 @@ impl CustomEndpointFactory for Ros2Factory {
         publisher::create(route_name, value).await
     }
     // end::factory-create-publisher[]
+
+    /// Lets hosts render a form, map a URI with typed values and see that a route
+    /// from this endpoint is at-most-once (`x-mqb-acknowledges: false`).
+    // tag::factory-config-schema[]
+    fn config_schema(&self) -> Option<serde_json::Value> {
+        serde_json::to_value(schemars::schema_for!(Ros2Config)).ok()
+    }
+    // end::factory-config-schema[]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_route_from_ros2_is_reported_as_at_most_once() {
+        assert!(!Ros2Factory.acknowledges(&serde_json::json!({})));
+        assert!(!Ros2Factory.idempotent_sink(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn the_schema_maps_the_uri_path_to_the_topic_and_rejects_unknown_fields() {
+        let schema = Ros2Factory.config_schema().unwrap();
+        assert_eq!(schema["properties"]["topic"]["x-mqb-uri"], "path");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(
+            schema["properties"]["first_message_wait_ms"]["default"],
+            250
+        );
+        assert_eq!(schema["properties"]["inbox_capacity"]["minimum"], 1);
+    }
 }

@@ -5,7 +5,7 @@
 Every field the `ros2` endpoint accepts, its default, and how it is validated.
 
 Unknown fields are rejected.
-Every field has a default, so `config: {}` is valid.
+Every field has a default, so `ros2: {}` is valid.
 
 The Rust declarations below are the source of truth for the public policy and
 endpoint configuration types.
@@ -35,21 +35,21 @@ include::../../src/config.rs[tag=qos-config]
 [source,yaml]
 ----
 input:
-  custom:
-    name: ros2
-    config:
-      topic: "/orders/new"
-      message_type: "std_msgs/msg/String"
-      payload_field: "data"
-      node: "ingest_bridge"
-      namespace: "/ingest"
-      domain_id: 0
-      qos:
-        reliability: reliable
-        durability: volatile
-        history: keep_last
-        depth: 10
-        require_subscribers: false
+  ros2:
+    topic: "/orders/new"
+    message_type: "std_msgs/msg/String"
+    payload_field: "data"
+    node: "ingest_bridge"
+    namespace: "/ingest"
+    domain_id: 0
+    inbox_capacity: 1000
+    first_message_wait_ms: 2000
+    qos:
+      reliability: reliable
+      durability: volatile
+      history: keep_last
+      depth: 10
+      require_subscribers: false
 ----
 
 == Fields
@@ -93,11 +93,37 @@ include::../../src/config.rs[tag=ros2-config]
 | `ROS_DOMAIN_ID` from the environment
 | DDS domain to join. Endpoints in different domains cannot see each other.
 
+| `inbox_capacity`
+| integer ≥ 1
+| `1000`, or `qos.depth` under `keep_last` if larger
+| Input only. Must not be smaller than the `keep_last` depth. Messages buffered between the ROS callback and the route; see <<inbox>>.
+
+| `first_message_wait_ms`
+| integer
+| `250`
+| Input only. How long a draining route (`exit_on_empty`) waits for the first message of a batch before treating the topic as idle.
+  DDS discovery has to match the subscription first, which can take longer than the default; raise it (for example to `2000`) when a drain ends before a publisher was discovered.
+
 | `qos`
 | map
 | see <<qos>>
 | Quality of service policies.
 |===
+
+The long form `custom: { name: ros2, config: {...} }` is the same endpoint, for configs validated against `mq-bridge.schema.json`.
+
+== URI and schema
+
+The endpoint publishes a JSON schema of this configuration (`config_schema`), so a host renders a form and maps a URI onto typed fields.
+The URI path is `topic`, without its leading `/`: `ros2:///chatter?message_type=std_msgs/msg/String` names `chatter`, resolved relative to `namespace` — the same as `/chatter` under the default namespace `/`.
+Every other top-level field is a query parameter; `qos` is nested and can be set only from YAML or JSON.
+
+The schema also declares `x-mqb-acknowledges: false`, so mq-bridge treats a route from this endpoint as at-most-once and refuses one that sets `required_delivery: at_least_once`.
+
+[source,rust%collapsible]
+----
+include::../../src/lib.rs[tag=factory-config-schema]
+----
 
 `initial_position` and `subscription` have no equivalent and are rejected.
 The nearest thing to `initial_position` is `qos.durability`; see xref:../how-to/receive-earlier-messages.adoc[Receive messages published before the route started].
@@ -239,11 +265,23 @@ An incompatible pair never matches, and the symptom is silence rather than an er
 | `volatile` | `transient_local` | *no*
 |===
 
-=== `history` also bounds the consumer's own buffer
+[#inbox]
+=== The consumer's own buffer
 
 `rclrs` offers no way to take a message from a subscription on demand, so a consumer queues between the ROS callback and the route.
-That queue uses the same policy: `keep_last` holds at most `depth` messages and discards the oldest beyond that, and `keep_all` holds everything.
-Discards are counted and reported on stderr when the endpoint closes.
+That inbox holds at most `inbox_capacity` messages, so a briefly stalled output does not lose messages at the DDS queue depth and `keep_all` cannot grow without bound.
+It never holds less than a `keep_last` depth: the default grows to `depth` when that exceeds 1000, and an explicit smaller value is rejected.
+When it is full the oldest message is discarded.
+
+Discards are visible two ways:
+
+* the consumer's `status()`: `pending`, `capacity` and `details.discarded`, while it runs;
+* a summary warning when the endpoint closes.
+
+[source,rust%collapsible]
+----
+include::../../src/consumer.rs[tag=consumer-status]
+----
 
 == Received metadata
 
@@ -286,6 +324,8 @@ The validation and resolution rules above are implemented by these tagged source
 include::../../src/config.rs[tag=config-constants]
 include::../../src/config.rs[tag=default-message-type]
 include::../../src/config.rs[tag=default-payload-field]
+include::../../src/config.rs[tag=default-inbox-capacity]
+include::../../src/config.rs[tag=default-first-message-wait]
 include::../../src/config.rs[tag=resolved-config]
 include::../../src/config.rs[tag=direction]
 include::../../src/config.rs[tag=direction-suffix]

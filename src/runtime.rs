@@ -1,11 +1,12 @@
 use std::{
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Mutex, MutexGuard},
     thread::JoinHandle,
 };
 
+use futures::channel::oneshot;
 use rclrs::{
-    Context, CreateBasicExecutor, ExecutorCommands, InitOptions, IntoNodeOptions, Node,
-    RclReturnCode, RclrsError, SpinOptions,
+    Context, CreateBasicExecutor, InitOptions, IntoNodeOptions, Node, RclReturnCode, RclrsError,
+    SpinOptions,
 };
 
 use crate::config::Resolved;
@@ -22,7 +23,10 @@ pub(crate) struct Ros2Runtime {
     /// node's handle. This one keeps the node in the ROS graph for as long as
     /// the endpoint lives, which is what makes it discoverable.
     node: Node,
-    commands: Arc<ExecutorCommands>,
+    /// Resolves the promise `spin` runs until. Unlike `halt_spinning`, which
+    /// `spin` resets on entry, this request cannot be lost if it is sent before
+    /// the spinner thread has reached `spin`.
+    halt: Mutex<Option<oneshot::Sender<()>>>,
     /// Taken by whichever of [`Ros2Runtime::shutdown`] and `drop` runs first.
     spinner: Mutex<Option<JoinHandle<()>>>,
 }
@@ -56,20 +60,20 @@ impl Ros2Runtime {
 
         let primitive = create(&node)?;
 
-        let commands = Arc::clone(executor.commands());
+        let (halt, halted) = oneshot::channel();
         // `spin` blocks its thread, and rclrs' basic executor is not a tokio
         // runtime, so it gets a thread of its own rather than a tokio task.
         // Spin errors are dropped deliberately: the route observes a broken
         // endpoint through its own receive/send failures, and a stopped
         // executor cannot report anything to anyone.
         let spinner = std::thread::spawn(move || {
-            let _ = executor.spin(SpinOptions::default());
+            let _ = executor.spin(SpinOptions::default().until_promise_resolved(halted));
         });
 
         Ok((
             Self {
                 node,
-                commands,
+                halt: Mutex::new(Some(halt)),
                 spinner: Mutex::new(Some(spinner)),
             },
             primitive,
@@ -87,7 +91,9 @@ impl Ros2Runtime {
     /// close followed by a drop does the work once.
     // tag::runtime-shutdown[]
     pub(crate) fn shutdown(&self) {
-        self.commands.halt_spinning();
+        if let Some(halt) = lock(&self.halt).take() {
+            let _ = halt.send(());
+        }
         if let Some(spinner) = lock(&self.spinner).take() {
             // A panic in the executor thread is already lost by the time we get
             // here; joining is about not leaving the thread running.

@@ -26,7 +26,7 @@ platforms = [
     "osx-arm64",
     "win-64",
 ]
-version = "0.4.19"
+version = "0.5.0"
 
 # Every task is a Python script under pixi-scripts/, so the logic is readable,
 # reviewable and runnable on its own. Arguments after the task name reach the
@@ -38,6 +38,10 @@ description = "Compile the endpoint and its loadable plugin library"
 [tasks.test]
 cmd = "python pixi-scripts/test.py"
 description = "Run the unit, ROS 2 integration and plugin conformance suites"
+
+[tasks.test-wheel]
+cmd = "python pixi-scripts/test_wheel.py"
+description = "Build the Python wheel and test it against the oldest and latest mq-bridge"
 
 [tasks.check]
 cmd = "python pixi-scripts/check.py"
@@ -118,7 +122,7 @@ asciidoctor = ">=2.0.20,<3"
 pyyaml = ">=6.0,<7"
 
 # For the release workflow, which pip-installs mq-bridge's own packaging tools
-# (`mq-bridge-py[plugin-packaging]`, auditwheel, wheel) into this environment.
+# (`mq-bridge[plugin-packaging]`, auditwheel, wheel) into this environment.
 # The conda `python` package does not bring pip along, and without it the
 # release would need a second interpreter beside this one — which is how the
 # 3.11-versus-3.12 mismatch arose that this removes.
