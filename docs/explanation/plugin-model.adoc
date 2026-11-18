@@ -82,9 +82,11 @@ so building the subscription first means no message can slip past a subscription
 `Ros2Runtime::start` takes a closure for exactly this reason —
 the wrong order is not expressible.
 
-Shutting down is `halt_spinning()` followed by a join.
-That is bounded rather than open-ended because halting also wakes every wait set,
+Shutting down resolves the promise the executor spins until, followed by a join.
+That is bounded rather than open-ended because resolving it also wakes every wait set,
 so the executor notices immediately instead of waiting for the next message to arrive.
+It is a promise rather than `halt_spinning()` because `spin` clears the halt flag on entry:
+an endpoint dropped before its spinner thread reached `spin` would otherwise never stop, and the join would hang.
 
 == Why message types are resolved at run time
 
