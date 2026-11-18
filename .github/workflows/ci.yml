@@ -37,6 +37,9 @@ jobs:
   ros2-tests:
     name: Tests (ROS 2 ${{ matrix.ros_distro }})
     runs-on: ubuntu-latest
+    # A normal run takes about three minutes; a hung test would otherwise hold
+    # the runner for GitHub's six-hour limit.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
